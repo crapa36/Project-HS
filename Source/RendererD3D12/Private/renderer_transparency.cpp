@@ -43,6 +43,11 @@ Result Failure(ErrorCode code, std::string message)
 {
     return Result::Failure(code, "hs_renderer_transparency", std::move(message));
 }
+void ReadMotion(PassBuilder &pass, const LayeredTranslucencyInputs &inputs)
+{
+    if (inputs.previous_instances.resource) pass.Read(inputs.previous_instances, Access::VertexShaderRead);
+    if (inputs.previous_skin.resource) pass.Read(inputs.previous_skin, Access::VertexShaderRead);
+}
 Result NativeFailure(std::string_view operation, HRESULT error)
 {
     return Failure(ErrorCode::TaskFailed, std::string(operation) + " failed (HRESULT " +
@@ -366,10 +371,10 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
             D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, next->unpeeled_fragment_count); !created) return created;
 
     std::vector<std::byte> vertex;
-    if (auto read = readShader("render/shader/layered_translucency_vs.dxil", vertex); !read) return read;
+    if (auto read = readShader("render/shader/scene_vs.dxil", vertex); !read) return read;
     if (vertex.empty()) return Failure(ErrorCode::TaskFailed, "Translucency transparency indexed vertex shader is empty.");
     std::vector<std::byte> current_vertex;
-    if (auto read = readShader("render/shader/layered_translucency_current_vs.dxil", current_vertex); !read) return read;
+    if (auto read = readShader("render/shader/scene_current_vs.dxil", current_vertex); !read) return read;
     if (current_vertex.empty()) return Failure(ErrorCode::TaskFailed, "Translucency current-pose vertex shader is empty.");
     constexpr D3D12_INPUT_ELEMENT_DESC layout[]{
         {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
@@ -657,6 +662,8 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             retained->capture_work != capture_work ||
             retained->single_layer_water != inputs.single_layer_water ||
             retained->occupancy != use_occupancy ||
+            !same_version(inputs.previous_instances, retained->previous_instances) ||
+            !same_version(inputs.previous_skin, retained->previous_skin) ||
             !same_reads(inputs.peel_reads, retained->peel_reads) ||
             !same_reads(inputs.scene_reads, retained->scene_reads))
             return Failure(ErrorCode::InvalidState, "Translucency retained topology variant changed.");
@@ -716,6 +723,8 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             inputs.accumulation.version, inputs.revealage.version};
         layout->peel_reads.assign(inputs.peel_reads.begin(), inputs.peel_reads.end());
         layout->scene_reads.assign(inputs.scene_reads.begin(), inputs.scene_reads.end());
+        layout->previous_instances = inputs.previous_instances;
+        layout->previous_skin = inputs.previous_skin;
     }
     if (layout) layout->occupancy = use_occupancy;
     if (!retained) pending.scene_reads.assign(inputs.scene_reads.begin(), inputs.scene_reads.end());
@@ -1133,6 +1142,7 @@ Result TranslucencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph,
             water.Read(background.version, Access::ShaderRead);
             water.Read(inputs.opaque_depth.version, Access::ShaderRead);
             for (const auto &read : pending.scene_reads) water.Read(read.version, read.access);
+            ReadMotion(water, inputs);
         }
         pending.color[0] = retained ? ResourceVersion{pending.color[0].resource, 2}
             : water.ReadWrite(pending.color[0], Access::RenderTarget);
@@ -1216,6 +1226,7 @@ Result TranslucencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph,
             if (layer + 1 < storage->layer_count)
                 compose.Read(pending.front[layer + 1], Access::ShaderRead);
             for (const auto &read : pending.scene_reads) compose.Read(read.version, read.access);
+            if (layer == 0) ReadMotion(compose, inputs);
         }
         pending.color[target] = retained
             ? ResourceVersion{pending.color[target].resource, (step / 2) * 2 + 2}

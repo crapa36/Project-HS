@@ -281,6 +281,7 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
         const bool baseline_needed=!local_specular || (diffuse_consumed && !local_diffuse);
         const float3 diffuse_field=local_diffuse?HsSceneProbeIrradiance(world,n)*HsBsdfInvPi:0;
         const HsBsdfSamplingContext bsdf_sampling=HsBsdfPrepareSampling(closure,v);
+        const bool flip_bsdf_normal=HsBsdfThinTransmissionWeight(closure)>0.0 && dot(closure.normal,v)<0.0;
         [loop] for(uint index=0u;index<sample_count;++index)
         {
             float u_lobe=frac((float(index)+0.5)*0.6180339887498948482);
@@ -292,7 +293,8 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
             ++valid_work_samples;
 #endif
             float3 sample_diffuse,sample_specular;
-            HsBsdfEvaluateComponentsOptical(closure,v,sample.wi,base_fresnel_override,sample_diffuse,sample_specular);
+            HsBsdfEvaluateComponentsOpticalView(closure,v,n,flip_bsdf_normal,sample.wi,
+                base_fresnel_override,prepared,sample_diffuse,sample_specular);
             float3 baseline_sky=0.0;
             [branch] if(baseline_needed) baseline_sky=EnvironmentSkyRadiance(sample.wi);
             const float3 local_sky=local_specular ?

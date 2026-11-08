@@ -38,6 +38,7 @@ static const MeadowDepression MeadowRecords[33]={
 };
 float MeadowQ(MeadowDepression r,float2 p){float c=r.c,s=r.s;float2 d=p-float2(r.x,r.z);if(any(abs(d)>2*(r.rx+r.rz)))return 100;float u=(c*d.x-s*d.y)/r.rx,v=(s*d.x+c*d.y)/r.rz;if(r.kind==0)u-=.24*r.side*max(0,1-v*v)*(v+.35);if(r.kind==1){u-=r.side*.16*max(0,1-4*v*v);u/=.72+.28*saturate((v+1)*.5);}if(r.kind==2)u=(abs(u)-.48)/.43;return u*u+v*v;}
 static const uint MeadowSurfaceSeed=41703u;
+static const float MeadowGroundHeightBound=0.177651;
 static const float4 TerrainSourceMetersPerTile=float4(2,2,2,1.5);
 static const float4 TerrainSourceHeightScale=float4(0.025,0.025,0.035,0.05);
 static const uint TerrainSourceTextureEdge=2048u;

@@ -224,7 +224,7 @@ Result D3D12Renderer::Render(const RenderPackage &source_input, RendererFrameRes
     input.snapshots.current = impl_->render_scene_sample.View(input.snapshots.current);
     sample_header.simulation_time = display_time;
     impl_->prepared_archer_palettes.clear();
-    if (auto r = impl_->ValidateFrameInput(input); !r) return r;
+    if (auto r = impl_->ValidateFrameInput(input, canonical.hero_volumes); !r) return r;
     if (!impl_->owned_views.contains(kMainRenderViewId.value) ||
         !impl_->owned_views.at(kMainRenderViewId.value)->ready)
         return FrameViewFailure("Main render view has no initialized GPU owner.");
@@ -503,7 +503,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         ~GrassHistoryAttempt() { if (!succeeded) state.z = 0.0f; }
     } grass_history_attempt{owned_view.previous_grass_state};
     auto &prepared_scene = impl_->prepared_scene_package;
-    auto &pose_by_id = prepared_scene.poses_by_id;
     auto &pose_by_source = prepared_scene.poses_by_source;
     auto &entity_surface_frame = prepared_scene.entity_surfaces;
     // The package owns this CPU data; no frame slot is touched until the wait below.
@@ -512,15 +511,10 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     if (prepared_scene_this_view)
     {
         auto &prepared_instances = prepared_scene.instances;
-        pose_by_source.resize(snapshots.current.instances.size());
-        pose_by_id.reserve(snapshots.current.poses.size());
+        pose_by_source.assign(prepared_instances.size(), nullptr);
         for (const auto &pose : snapshots.current.poses)
             if (pose.instance_index < snapshots.current.instances.size())
-            {
                 pose_by_source[pose.instance_index] = &pose;
-                const auto stable_id = snapshots.current.instances[pose.instance_index].stable_id;
-                if (stable_id != 0) pose_by_id.insert_or_assign(stable_id, &pose);
-            }
         const auto retained_vfx_start = capture_clock();
         for (std::size_t index = snapshots.current.instances.size(); index < prepared_instances.size(); ++index)
         {
@@ -529,7 +523,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                     command.render_instance_id == prepared_instances[index].stable_id;
             });
             if (found != typed_entity_surfaces.end() && found->has_retained_animation_pose)
-                pose_by_id.insert_or_assign(prepared_instances[index].stable_id, &found->retained_animation_pose);
+                pose_by_source[index] = &found->retained_animation_pose;
         }
         cpu_timings.retained_vfx_us = capture_elapsed(retained_vfx_start);
         auto &original_ordinals = prepared_scene.original_source_ordinals;
@@ -542,6 +536,10 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         for (auto &source : prepared_instances) PopulateRenderInstanceIdentity(source);
 
     }
+    // Filtering and draw ordering retain the original pose ordinal, including anonymous instances.
+    const auto pose_for_source = [&](std::size_t source_index) {
+        return pose_by_source[prepared_scene.original_source_ordinals[source_index]];
+    };
     std::vector<LightView> owned_frame_lights;
     std::span<const LightView> frame_lights = snapshots.current.lights;
     const auto authoritative_light_count = frame_lights.size();
@@ -650,9 +648,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             if (asset.geometry_lods.size() < 2 || asset.geometry_lods.size() > 3 ||
                 !asset.interval_lookup_valid ||
                 asset.deformation_flags != render_data::kMonsterBoundsPositionEnclosure) continue;
-            const AnimationPoseRef *pose = nullptr;
-            if (const auto found = pose_by_id.find(source.stable_id);
-                     found != pose_by_id.end()) pose = found->second;
+            const auto *pose = pose_for_source(source_index);
             if (source.animation_clip_id.value != 0 ||
                 (pose && (pose->secondary_weight != 0.0f || pose->upper_body_weight != 0.0f)))
                 continue;
@@ -843,7 +839,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     if (auto result = impl_->UpdateResidencyBudget(); !result) return result;
     if (auto result = impl_->asset_io.CollectCancelled(impl_->streaming, impl_->residency); !result) return result;
     if (auto result = impl_->texture_feedback.Consume(frame_slot, completed_streaming,
-            owned_view.frame_number, impl_->texture_streaming); !result) return result;
+            impl_->active_render_package_id, impl_->texture_streaming); !result) return result;
     if (auto result = impl_->PumpEnvironmentGeometryStreaming(); !result)
     {
         return result;
@@ -895,7 +891,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     transient_pool.ResetCompletedClaims(impl_->graph_queue_executor.Completed());
 
     cpu_timings.streaming_us = measure_stage();
-    auto snapshot = snapshots.current;
+    const auto &snapshot = snapshots.current;
     const auto &world_batch = frame_input.vfx.world_batch;
     const Tick stateful_target = world_batch.stateful_target;
     const bool world_step_requested = canonical_frame.advance_native_world;
@@ -921,7 +917,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         }
     } world_step_receipt{frame_result, stateful_target, snapshot.header.session_id,
         world_batch.sequence};
-    snapshot.camera.vertical_fov_degrees = view_input.camera.vertical_fov_degrees;
+    const float vertical_fov = view_input.camera.vertical_fov_degrees;
+    const float vertical_fov_radians = DirectX::XMConvertToRadians(vertical_fov);
     const bool scene_new_session = snapshot.header.session_id != impl_->render_session_id;
     const bool new_session = scene_new_session || snapshot.header.session_id != owned_view.view_session_id;
     const auto *last_sample = owned_view.previous_instances.get();
@@ -2165,7 +2162,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     };
     std::vector<FresnelDraw> fresnel_draws;
     fresnel_draws.reserve(typed_fresnels.size());
-    // Immutable typed payloads were admitted by ValidateFramePayload before any view submission.
+    // Immutable typed payloads were admitted by PrepareFramePayload before any view submission.
     for (std::size_t index = 0; index < typed_fresnels.size(); ++index)
     {
         const auto &source = typed_fresnels[index];
@@ -2492,7 +2489,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                           owned_view.reconstruction_provider->Initialized();
     const bool use_native_reconstruction = use_sr_reconstruction;
     const auto projection = DirectX::XMMatrixPerspectiveFovLH(
-        DirectX::XMConvertToRadians(snapshot.camera.vertical_fov_degrees),
+        vertical_fov_radians,
         static_cast<float>(owned_view.render_width) / static_cast<float>(owned_view.render_height), far_plane,
         near_plane);
     const auto halton = [](std::uint64_t index, std::uint32_t base) noexcept {
@@ -2536,8 +2533,10 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             jitter_y = -native_jitter->y * 2.0f / owned_view.render_height;
         }
     }
-    const auto clip_matrix = view * projection *
-        DirectX::XMMatrixTranslation(jitter_x, jitter_y, 0.0f);
+    const auto jitter_translation = DirectX::XMMatrixTranslation(jitter_x, jitter_y, 0.0f);
+    const auto clip_matrix = view * projection * jitter_translation;
+    const auto camera_relative_view = DirectX::XMMatrixTranslationFromVector(eye) * view;
+    const auto camera_relative_clip = DirectX::XMMatrixTranslationFromVector(eye) * clip_matrix;
 #if defined(HS_DEVELOPMENT_TOOLS)
     if (show_devtools)
     {
@@ -2703,7 +2702,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             (view_input.scene_origin.z - owned_view.previous_scene_origin.z));
     if ((owned_view.temporal_history_valid || owned_view.hzb_history_valid) &&
         (camera_delta > std::max(2.0f, camera_distance * 0.25f) ||
-         std::abs(snapshot.camera.vertical_fov_degrees - owned_view.temporal_previous_fov) > 1.0f))
+         std::abs(vertical_fov - owned_view.temporal_previous_fov) > 1.0f))
     {
         owned_view.temporal_history_valid = false;
         owned_view.hzb_history_valid = false;
@@ -2723,7 +2722,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     // basis. Keep that ABI separate from the explicit Surface ViewOrigin.
     DirectX::XMFLOAT4X4 camera_relative_inverse_view_projection;
     DirectX::XMStoreFloat4x4(&camera_relative_inverse_view_projection,
-        DirectX::XMMatrixInverse(nullptr, DirectX::XMMatrixTranslationFromVector(eye) * clip_matrix));
+        DirectX::XMMatrixInverse(nullptr, camera_relative_clip));
     DirectX::XMStoreFloat4x4(&constants->current_unjittered_view_projection, view * projection);
     if (owned_view.temporal_history_valid || owned_view.hzb_history_valid)
         DirectX::XMStoreFloat4x4(&constants->previous_unjittered_view_projection,
@@ -2794,7 +2793,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         static_cast<float>(double(previous_sdk_camera.position.y) + (owned_view.previous_scene_origin.y - view_input.scene_origin.y)),
         static_cast<float>(double(previous_sdk_camera.position.z) + (owned_view.previous_scene_origin.z - view_input.scene_origin.z))};
     sdk_camera.near_plane = near_plane; sdk_camera.far_plane = far_plane;
-    sdk_camera.vertical_fov_radians = DirectX::XMConvertToRadians(snapshot.camera.vertical_fov_degrees);
+    sdk_camera.vertical_fov_radians = vertical_fov_radians;
     sdk_camera.delta_seconds = view_delta_seconds;
     sdk_camera.jitter_pixels[0] = constants->surface_jitter_uv.x * owned_view.render_width;
     sdk_camera.jitter_pixels[1] = constants->surface_jitter_uv.y * owned_view.render_height;
@@ -2825,7 +2824,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 ? GraphicsQuality::Low : impl_->config.vfx_quality == VfxQuality::Medium
                     ? GraphicsQuality::Medium : GraphicsQuality::High;
     const auto &vfx_quality_profile = impl_->QualityProfileFor(vfx_graphics_quality);
-    const float vfx_tangent_y = std::tan(DirectX::XMConvertToRadians(snapshot.camera.vertical_fov_degrees) * .5f);
+    const float vfx_tangent_y = std::tan(vertical_fov_radians * .5f);
     const float vfx_tangent_x = vfx_tangent_y * static_cast<float>(owned_view.render_width) / owned_view.render_height;
     const float vfx_plane_x_scale = std::sqrt(1.0f + vfx_tangent_x * vfx_tangent_x);
     const float vfx_plane_y_scale = std::sqrt(1.0f + vfx_tangent_y * vfx_tangent_y);
@@ -3036,16 +3035,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         return true;
     };
     const auto pose_for_archer = [&](const RenderInstance &instance) -> const AnimationPoseRef & {
-        if (instance.stable_id != 0)
-            if (const auto found = pose_by_id.find(instance.stable_id); found != pose_by_id.end())
-                return *found->second;
         const auto ordered = static_cast<std::size_t>(&instance - render_instances.data());
-        if (ordered < ordered_source_indices.size() &&
-            ordered_source_indices[ordered] < prepared_scene.original_source_ordinals.size() &&
-            prepared_scene.original_source_ordinals[ordered_source_indices[ordered]] < pose_by_source.size())
-            if (const auto *candidate = pose_by_source[
-                    prepared_scene.original_source_ordinals[ordered_source_indices[ordered]]])
-                return *candidate;
+        if (const auto *candidate = pose_for_source(ordered_source_indices[ordered]))
+            return *candidate;
         return pose;
     };
     const auto sample_legacy_pose = [&](const AnimationPoseRef &pose_ref,
@@ -3188,13 +3180,10 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     constants->particle_options = {particle_capacity, gpu_particle_spawn_count,
                                    total_particles_to_spawn,
                                    impl_->archer_material_count};
-    const bool meadow_collision = static_environment_ranges[render_data::kMeadowGeometryBegin * 3u].second != 0 ||
-        std::ranges::any_of(render_instances, [](const RenderInstance &instance) {
-            return instance.mesh == RenderMesh::MeadowSurface && (instance.environment_variant % 2u) == 0u;
-        });
-    constants->particle_terrain = {static_cast<float>(view_input.scene_origin.x),
-        static_cast<float>(view_input.scene_origin.y), static_cast<float>(view_input.scene_origin.z),
-        meadow_collision ? 1.0f : 0.0f};
+    constants->particle_terrain = {std::max(-static_cast<float>(view_input.scene_origin.y),
+        impl_->terrain_frame_meadow_upper[frame_slot]),
+        static_cast<float>(view_input.scene_origin.y), 0.0f,
+        std::bit_cast<float>(impl_->terrain_frame_has_meadow[frame_slot] ? impl_->terrain_frame_section_counts[frame_slot] : 0u)};
     const auto grass_benders = SelectGrassBenders(render_instances);
     constants->grass_bender_count = {grass_benders.count, 0, 0, 0};
     for (std::size_t index = 0; index < grass_benders.count; ++index)
@@ -3280,8 +3269,10 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     if (reconcile_packet_scene) dynamic_canonical_inputs.resize(instance_count);
     else dynamic_canonical_inputs.clear();
     dynamic_skin_slots.assign(instance_count, std::numeric_limits<std::uint32_t>::max());
+    const bool hero_volume_receivers_active =
+        impl_->config.volumetric_quality != GraphicsOptionalQuality::Off && !typed_volumes.empty();
     const bool non_view_skin_consumer =
-        !typed_volumes.empty() ||
+        hero_volume_receivers_active ||
         !prepared_scene.monster_lod_consumers_valid || prepared_scene.vsm_skin_consumer;
     using SkinCullVec = std::array<double, 3>;
     const auto skin_cull_dot = [](SkinCullVec a, SkinCullVec b) {
@@ -3437,13 +3428,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         RenderPoseKey pose_key{};
         if (source.mesh == RenderMesh::Archer) skin_pose = &pose_for_archer(source);
         if (is_monster(source.mesh))
-        {
-            if (const auto pose_it = pose_by_id.find(source.stable_id);
-                     pose_it != pose_by_id.end())
-            {
-                skin_pose = pose_it->second;
-            }
-        }
+            skin_pose = pose_for_source(ordered_source_indices[index]);
         float conservative_radius = 1.0f;
         if (is_environment_mesh(source.mesh))
         {
@@ -3914,8 +3899,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     VirtualShadowInputs inputs;
     VirtualShadowFramePlan shadow_plan;
     bool csm_required = primary_sun != nullptr;
-    const bool hero_volume_receivers_active =
-        impl_->config.volumetric_quality != GraphicsOptionalQuality::Off && !typed_volumes.empty();
     if ((primary_sun && owned_view.virtual_shadows.AllocatedBytes() != 0) || owned_view.local_shadows.AllocatedBytes() != 0)
     {
         auto &shadow_owner = *impl_->owned_views.at(view_input.id.value);
@@ -4852,17 +4835,17 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     if (terrain_needs_demand && !impl_->config.grid_floor_probe && impl_->environment_textures[0].resource)
     {
         const auto inverse = DirectX::XMLoadFloat4x4(&constants->inverse_unjittered_view_projection);
+        const float camera_height = static_cast<float>(view_input.camera.position.y);
         const auto ground_point = [&](float u, float v, DirectX::XMFLOAT3 &point) {
             const auto near_point = DirectX::XMVector3TransformCoord(
                 DirectX::XMVectorSet(u * 2 - 1, 1 - v * 2, 1, 1), inverse);
-            DirectX::XMFLOAT3 origin{}, direction{};
-            DirectX::XMStoreFloat3(&origin, eye);
+            DirectX::XMFLOAT3 direction{};
             DirectX::XMStoreFloat3(&direction, DirectX::XMVectorSubtract(near_point, eye));
-            if (direction.y >= 0.0f || origin.y <= 0.0f) return false;
-            const auto scale = -origin.y / direction.y;
-            point = {origin.x + direction.x * scale, 0, origin.z + direction.z * scale};
+            if (direction.y >= 0.0f || camera_height <= 0.0f) return false;
+            const auto scale = -camera_height / direction.y;
+            point = {direction.x * scale, 0, direction.z * scale};
             return std::isfinite(point.x) && std::isfinite(point.z) &&
-                   std::hypot(point.x - origin.x, point.z - origin.z) <= 500.0f;
+                   std::hypot(point.x, point.z) <= 500.0f;
         };
         for (const auto v : {0.1f, 0.5f, 0.9f})
             for (const auto u : {0.1f, 0.5f, 0.9f})
@@ -4881,7 +4864,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         {
             const auto id = impl_->material_texture_stream_ids[material * render_data::kMaterialTextureSlots + slot];
             if (impl_->texture_streaming.NeedsDemand(id, baseline_consumer, impl_->config.selected_texture_feedback))
-                impl_->texture_streaming.Demand(id, mip, priority, owned_view.frame_number);
+                impl_->texture_streaming.Demand(id, mip, priority, impl_->active_render_package_id);
         }
     };
 #if defined(HS_OFFLINE_PROBE_BAKER)
@@ -4922,29 +4905,48 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     for (const auto &source : render_instances) demand_environment_material(source, false);
     if (static_scene)
     {
-        const bool capture_consumer = capture_demand;
         for (std::size_t ordinal = 0; ordinal < environment_material_requested.size(); ++ordinal)
         {
-            const auto [begin, count] = static_environment_ranges[ordinal * 3];
-            for (std::size_t index = begin; index < begin + count && !environment_material_requested[ordinal]; ++index)
-                demand_environment_material(static_scene->instances[static_draw_refs[index].instance_index], capture_consumer);
+            for (const auto &cell : static_draws.geometry_demand_cells[ordinal])
+            {
+                if (environment_material_requested[ordinal]) break;
+                bool inside = capture_demand, partial = false;
+                if (!inside)
+                {
+                    const float radius = impl_->environment_variant_radii[ordinal] * cell.max_scale +
+                        (cell.any_wind ? grass_visibility_radius : 0.0f);
+                    for (std::size_t consumer = 0; consumer < active_view_count; ++consumer)
+                    {
+                        const auto visibility = ClassifyGeometryDemandCell(cell, radius, demand_views[consumer]);
+                        inside |= visibility == GeometryDemandCellVisibility::Inside;
+                        partial |= visibility == GeometryDemandCellVisibility::Partial;
+                        if (inside) break;
+                    }
+                }
+                if (inside)
+                    demand_environment_material(static_scene->instances[cell.points.front().instance], true);
+                else if (partial)
+                    for (const auto &point : cell.points)
+                    {
+                        demand_environment_material(static_scene->instances[point.instance], false);
+                        if (environment_material_requested[ordinal]) break;
+                    }
+            }
         }
     }
     // Shadow casters can be outside the active camera/CSM views. Their opacity
     // textures still have real VSM/local-shadow consumers even with CSM disabled.
-    // Demand may unset the settled-preferred state, enabling other materials.
-    for (unsigned pass = 0; pass < 2; ++pass)
-        for (std::uint32_t material = 0; material < shadow_opacity_materials.size(); ++material)
+    for (std::uint32_t material = 0; material < shadow_opacity_materials.size(); ++material)
+    {
+        if (!shadow_opacity_materials[material]) continue;
+        for (std::uint32_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
         {
-            if (!shadow_opacity_materials[material]) continue;
-            for (std::uint32_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
-            {
-                const auto id = impl_->material_texture_stream_ids[material * render_data::kMaterialTextureSlots + slot];
-                if (id && impl_->texture_streaming.View(id).opacity_sampling &&
-                    impl_->texture_streaming.NeedsDemand(id, false, impl_->config.selected_texture_feedback))
-                    impl_->texture_streaming.Demand(id, 0, std::bit_cast<UINT>(1.0f), owned_view.frame_number);
-            }
+            const auto id = impl_->material_texture_stream_ids[material * render_data::kMaterialTextureSlots + slot];
+            if (id && impl_->texture_streaming.View(id).opacity_sampling &&
+                impl_->texture_streaming.NeedsDemand(id, false, impl_->config.selected_texture_feedback))
+                impl_->texture_streaming.Demand(id, 0, std::bit_cast<UINT>(1.0f), impl_->active_render_package_id);
         }
+    }
     if (!impl_->config.grid_floor_probe && std::isfinite(terrain_footprint) && terrain_footprint>0.0f)
     {
         constexpr auto smallest_tile=*std::min_element(render_data::kTerrainSourceMetersPerTile.begin(),
@@ -4958,7 +4960,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             const auto logical = impl_->texture_streaming.View(id).logical_description;
             const auto rho = std::max(static_cast<float>(logical.width) * terrain_footprint / smallest_tile, 1.0f);
             impl_->texture_streaming.Demand(id, static_cast<std::uint32_t>(std::floor(std::log2(rho))),
-                std::bit_cast<UINT>(priority), owned_view.frame_number);
+                std::bit_cast<UINT>(priority), impl_->active_render_package_id);
         }
     }
     else if (!impl_->config.grid_floor_probe && terrain_needs_demand &&
@@ -4975,8 +4977,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             demand_material(material,0,1,true);
     }
 #endif
-    impl_->DemandTerrainPages(frame_input.views, owned_view.frame_number);
-    if (auto result = impl_->texture_streaming.Pump(owned_view.frame_number, completed_streaming,
+    impl_->DemandTerrainPages(frame_input.views, impl_->active_render_package_id);
+    if (auto result = impl_->texture_streaming.Pump(impl_->active_render_package_id, completed_streaming,
             impl_->asset_io, impl_->streaming, impl_->residency); !result) return result;
     impl_->PublishEnvironmentMaterialTextures(frame_slot);
     if (auto result = impl_->PublishTerrainStreaming(frame_slot); !result) return result;
@@ -5723,9 +5725,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     // preparation. Later guide and import checks must also qualify a restore.
     AmbientOcclusionConstants ambient_constants;
     DirectX::XMStoreFloat4x4(&ambient_constants.world_to_view,
-        DirectX::XMMatrixTranslationFromVector(eye) * view);
+        camera_relative_view);
     DirectX::XMStoreFloat4x4(&ambient_constants.projection,
-        projection * DirectX::XMMatrixTranslation(jitter_x, jitter_y, 0.0f));
+        projection * jitter_translation);
     DirectX::XMStoreFloat4x4(&ambient_constants.inverse_projection,
         DirectX::XMMatrixInverse(nullptr, DirectX::XMLoadFloat4x4(&ambient_constants.projection)));
     const auto matches_target_shapes = [&](const FrameGraphLayout &saved) {
@@ -5826,18 +5828,15 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     const bool volumetric_reset_history = !previous_view_valid || new_session;
     VolumetricCamera retained_volumetric_camera;
     retained_volumetric_camera.inverse_view_projection = camera_relative_inverse_view_projection;
-    DirectX::XMStoreFloat4x4(&retained_volumetric_camera.view_projection,
-        DirectX::XMMatrixInverse(nullptr,
-            DirectX::XMLoadFloat4x4(&retained_volumetric_camera.inverse_view_projection)));
+    DirectX::XMStoreFloat4x4(&retained_volumetric_camera.view_projection, camera_relative_clip);
     DirectX::XMStoreFloat4x4(&retained_volumetric_camera.world_to_view,
-        DirectX::XMMatrixTranslationFromVector(eye) * view);
+        camera_relative_view);
     retained_volumetric_camera.origin = lod_eye;
     retained_volumetric_camera.near_plane = near_plane;
     retained_volumetric_camera.far_plane = far_plane;
     const auto retained_volumetric_previous_camera = owned_view.previous_volumetric_camera.near_plane > 0
         ? owned_view.previous_volumetric_camera : retained_volumetric_camera;
     VolumetricRevisions retained_volumetric_revisions{};
-    auto projected_volumetric_inputs = VolumetricInputs{};
     const bool projected_volumetric_shadows = primary_sun &&
         owned_view.virtual_shadows.AllocatedBytes() != 0;
     if (impl_->config.volumetric_quality != GraphicsOptionalQuality::Off)
@@ -5866,33 +5865,58 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             mix_volumetric_revision(retained_volumetric_revisions.light, source.shadow_flags);
         }
         retained_volumetric_revisions.volume = impl_->volumetric_revision;
-        projected_volumetric_inputs.hero_blue_noise.resource = impl_->vfx_stbn_scalar.resource.Get();
-        projected_volumetric_inputs.hero_gradient.resource = impl_->vfx_gradient.resource.Get();
-        projected_volumetric_inputs.hero_noise_volume.resource = impl_->vfx_noise_volume.resource.Get();
-        projected_volumetric_inputs.volumes = impl_->volumetric_media;
-        if (impl_->config.vfx_quality == VfxQuality::High)
-            projected_volumetric_inputs.hero_volumes = typed_volumes;
-        projected_volumetric_inputs.frame_slot = frame_slot;
-        projected_volumetric_inputs.frame_index = owned_view.frame_number;
-        projected_volumetric_inputs.reset_history = volumetric_reset_history;
-        projected_volumetric_inputs.revisions = retained_volumetric_revisions;
-        projected_volumetric_inputs.camera = retained_volumetric_camera;
-        projected_volumetric_inputs.previous_camera = retained_volumetric_previous_camera;
-        if (primary_sun && csm_required) projected_volumetric_inputs.compact_shadow.identity.w = 1;
     }
+    VolumetricShapeInput projected_volumetric_shape{};
+    if (impl_->config.volumetric_quality != GraphicsOptionalQuality::Off)
+    {
+        projected_volumetric_shape.frame_slot = frame_slot;
+        projected_volumetric_shape.volume_count = impl_->volumetric_media.size();
+        if (impl_->config.vfx_quality == VfxQuality::High)
+        {
+            projected_volumetric_shape.hero_volumes = typed_volumes;
+            projected_volumetric_shape.prepared_heroes = &canonical_frame.hero_volumes;
+        }
+        projected_volumetric_shape.reset_history = volumetric_reset_history;
+        projected_volumetric_shape.frame_index = owned_view.frame_number;
+        projected_volumetric_shape.revisions = retained_volumetric_revisions;
+        projected_volumetric_shape.previous_camera = &retained_volumetric_previous_camera;
+        projected_volumetric_shape.hero_blue_noise = impl_->vfx_stbn_scalar.resource.Get();
+        projected_volumetric_shape.hero_gradient = impl_->vfx_gradient.resource.Get();
+        projected_volumetric_shape.hero_noise_volume = impl_->vfx_noise_volume.resource.Get();
+        projected_volumetric_shape.compact_shadow = primary_sun && csm_required;
+    }
+    projected_volumetric_shape.shadows = projected_volumetric_shadows;
+    projected_volumetric_shape.local_shadows = local_shadow_planned;
+    projected_volumetric_shape.root_static = projected_volumetric_shadows &&
+        shadow_plan.constants.root_options.x != 0u;
+    projected_volumetric_shape.root_dynamic = projected_volumetric_shadows &&
+        shadow_plan.constants.root_options.w != 0u &&
+        shadow_plan.constants.root_options.x != 0u;
     const auto matches_volumetric_layout = [&](const FrameGraphLayout &saved) {
-        return owned_view.volumetrics.MatchesShape(projected_volumetric_inputs, saved.volumetrics,
-            projected_volumetric_shadows, local_shadow_planned,
-            projected_volumetric_shadows && shadow_plan.constants.root_options.x != 0u,
-            projected_volumetric_shadows && shadow_plan.constants.root_options.w != 0u &&
-                shadow_plan.constants.root_options.x != 0u, saved.local_probe.service.published);
+        return owned_view.volumetrics.MatchesShape(projected_volumetric_shape,
+            saved.volumetrics,saved.local_probe.service.published);
     };
     FrameGraphLayout *source_candidate{};
+    std::array<FrameGraphLayout *, RenderGraphBuilder::RetainedPlanCapacity> source_candidates;
+    std::size_t source_candidate_count{};
     for (auto &saved : impl_->graph_layouts)
     {
         if (!saved.handle || !saved.certified_imports || saved.early != early_key ||
             saved.geometry_page_slots != geometry_page_slots)
             continue;
+        // Newest compatible wins; stable insertion preserves the original tie order.
+        auto insert_at = source_candidate_count;
+        while (insert_at > 0 && source_candidates[insert_at - 1]->last_used < saved.last_used)
+        {
+            source_candidates[insert_at] = source_candidates[insert_at - 1];
+            --insert_at;
+        }
+        source_candidates[insert_at] = &saved;
+        ++source_candidate_count;
+    }
+    for (std::size_t candidate_index = 0; candidate_index < source_candidate_count; ++candidate_index)
+    {
+        auto &saved = *source_candidates[candidate_index];
         if (!matches_direct_shapes(saved.direct_import_shapes) ||
             !impl_->texture_streaming.MatchesLayout(kTextureStreamingFirstPass, saved.texture_streaming) ||
             !impl_->texture_feedback.MatchesLayout(frame_slot, 1200, 1201, saved.texture_feedback) ||
@@ -5960,8 +5984,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         {
             continue;
         }
-        if (!source_candidate || saved.last_used > source_candidate->last_used)
-            source_candidate = &saved;
+        source_candidate = &saved;
+        break;
     }
     HlodRuntimeFrameRecordData hlod_record;
     if (auto prepared = impl_->PrepareHlodFrameRecordData(view_input, frame_slot,
@@ -6187,7 +6211,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             if (terrain_section_version.resource) pass.Read(terrain_section_version, sampling);
         }
         pass.Read(texture_metadata, sampling);
-        if (entity_surface_noise_version.resource)
+        if (!opacity_only && entity_surface_noise_version.resource)
         {
             pass.Read(entity_surface_noise_version, sampling);
             pass.Read(entity_surface_gradient_version, sampling);
@@ -6905,6 +6929,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     {
         pending_graph_layout.particle.pass_index = impl_->graph.PassCount();
         particle_pass = impl_->graph.AddPass(1, kRenderPassNames[1], QueueHint::Compute);
+        if (terrain_section_version.resource) particle_pass->Read(terrain_section_version, Access::ComputeRead);
     }
     std::array<ResourceVersion *, 9> particle_outputs{
         &particles_version, &particle_alive_input_version, &particle_alive_output_version,
@@ -6923,6 +6948,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     particle_pass->SetExecute([&](RenderPassContext &context) {
         auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         bind_compute(list);
+        list->SetComputeRootDescriptorTable(13, character_table);
         list->SetPipelineState(impl_->particle_compute_pipeline.Get());
         list->SetComputeRootShaderResourceView(16, impl_->vfx_mesh_atlas.resource->GetGPUVirtualAddress());
         list->SetComputeRootUnorderedAccessView(
@@ -7595,11 +7621,11 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         gbuffer_pass->Read(hero_binding_version, Access::ShaderRead);
         read_geometry_pages(*gbuffer_pass);
         gbuffer_pass->Read(dynamic_instances_version, Access::ShaderRead);
-        if (separate_previous_instance_scene)
+        if (!use_visibility && separate_previous_instance_scene)
             gbuffer_pass->Read(previous_instance_snapshot_version, Access::VertexShaderRead);
         if (have_skinned_instances)
             gbuffer_pass->Read(skin_cache_version, Access::ShaderRead);
-        if (have_skinned_instances && previous_skin_frame_valid)
+        if (!use_visibility && have_skinned_instances && previous_skin_frame_valid)
             gbuffer_pass->Read(previous_skin_cache_version, Access::ShaderRead);
         if (static_instances_buffer) gbuffer_pass->Read(static_instances_version, Access::ShaderRead);
         if (static_refs_buffer) gbuffer_pass->Read(static_refs_version, Access::ShaderRead);
@@ -8634,10 +8660,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     ScreenReflectionsConstants reflection_constants;
     reflection_constants.inverse_view_projection = camera_relative_inverse_view_projection;
     // Camera-relative reconstruction requires a translation-free view matrix.
-    DirectX::XMStoreFloat4x4(&reflection_constants.world_to_view,
-        DirectX::XMMatrixTranslationFromVector(eye) * view);
-    DirectX::XMStoreFloat4x4(&reflection_constants.projection,
-        projection * DirectX::XMMatrixTranslation(jitter_x, jitter_y, 0.0f));
+    reflection_constants.world_to_view = ambient_constants.world_to_view;
+    reflection_constants.projection = ambient_constants.projection;
     reflection_constants.previous_depth_parameters = ambient_constants.previous_depth_parameters;
     reflection_constants.jitter_uv = constants->surface_jitter_uv;
     ScreenReflectionsInputs reflection_inputs;
@@ -8691,7 +8715,11 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             inputs.probe_irradiance = {local_probe_outputs.irradiance, local_probe_outputs.irradiance_resource};
             inputs.probe_records = {local_probe_outputs.records, local_probe_outputs.record_resource};
         }
-        if (impl_->config.vfx_quality == VfxQuality::High) inputs.hero_volumes = typed_volumes;
+        if (impl_->config.vfx_quality == VfxQuality::High)
+        {
+            inputs.hero_volumes = typed_volumes;
+            inputs.prepared_heroes = &canonical_frame.hero_volumes;
+        }
         if (!typed_volumes.empty() && impl_->config.vfx_quality == VfxQuality::High)
         {
             const auto blue_noise = import_texture(impl_->vfx_stbn_scalar, Access::ShaderRead, "VfxHeroBlueNoise");
@@ -9016,8 +9044,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             {hero_binding_version, Access::ShaderRead}, {dynamic_instances_version, Access::VertexShaderRead},
             {dynamic_visible_refs_version, Access::VertexShaderRead}, {dynamic_draw_args_version, Access::IndirectArgs},
             {static_visible_refs_version, Access::VertexShaderRead}, {static_draw_args_version, Access::IndirectArgs}};
-        if (separate_previous_instance_scene)
-            hero_peel_reads.push_back({previous_instance_snapshot_version, Access::VertexShaderRead});
         if (static_instances_buffer) hero_peel_reads.push_back({static_instances_version, Access::VertexShaderRead});
         if (static_refs_buffer) hero_peel_reads.push_back({static_refs_version, Access::VertexShaderRead});
         if (have_skinned_instances) hero_peel_reads.push_back({skin_cache_version, Access::VertexShaderRead});
@@ -9035,8 +9061,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             {light_outputs.ranges, Access::ShaderRead}, {light_outputs.inline_indices, Access::ShaderRead},
             {light_outputs.spill_indices, Access::ShaderRead}, {ltc_outputs.matrix, Access::ShaderRead},
             {ltc_outputs.amplitude, Access::ShaderRead}};
-        if (separate_previous_instance_scene)
-            hero_scene_reads.push_back({previous_instance_snapshot_version, Access::VertexShaderRead});
         for (auto *texture : {&impl_->family_diffuse, &impl_->family_normal})
             if (texture->resource)
                 hero_scene_reads.push_back({impl_->graph.Version(import_texture(
@@ -9067,8 +9091,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             for (const auto version : {local_shadow_outputs.metadata, local_shadow_outputs.records,
                     local_shadow_outputs.static_bank, local_shadow_outputs.dynamic_bank, local_shadow_outputs.draw_records})
                 hero_scene_reads.push_back({version, Access::ShaderRead});
-        if (have_skinned_instances && previous_skin_frame_valid)
-            hero_scene_reads.push_back({previous_skin_cache_version, Access::ShaderRead});
         if (ambient_outputs.ao.resource) hero_scene_reads.push_back({ambient_outputs.ao, Access::ShaderRead});
         if (ambient_outputs.contact.resource) hero_scene_reads.push_back({ambient_outputs.contact, Access::ShaderRead});
         for (const auto &page : geometry_pages)
@@ -9100,6 +9122,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         hero_inputs.descriptor_stride = impl_->srv_stride;
         hero_inputs.scene_reads = hero_scene_reads;
         hero_inputs.peel_reads = hero_peel_reads;
+        if (separate_previous_instance_scene) hero_inputs.previous_instances = previous_instance_snapshot_version;
+        if (have_skinned_instances && previous_skin_frame_valid) hero_inputs.previous_skin = previous_skin_cache_version;
         hero_inputs.draw = [&](ID3D12GraphicsCommandList *list, ID3D12PipelineState *pipeline,
                               LayeredTranslucencyPhase, std::uint32_t, D3D12_GPU_DESCRIPTOR_HANDLE table) {
             bind_graphics(list);
@@ -9351,7 +9375,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         overlay_inputs.gradient_resource = impl_->vfx_gradient.resource.Get();
         overlay_inputs.render_active = owned_view.state.render_active;
         overlay_inputs.output_active = {owned_view.width, owned_view.height};
-        const auto inverse_view = DirectX::XMMatrixInverse(nullptr, view);
+        const auto inverse_view = DirectX::XMLoadFloat4x4(&sdk_camera.inverse_view);
         DirectX::XMStoreFloat3(&overlay_inputs.camera_right, inverse_view.r[0]);
         DirectX::XMStoreFloat3(&overlay_inputs.camera_up, inverse_view.r[1]);
         overlay_inputs.intensity = screen_intensity;
@@ -10539,7 +10563,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     owned_view.temporal_previous_eye = {current_temporal_eye.x,
                                     current_temporal_eye.y,
                                     current_temporal_eye.z};
-    owned_view.temporal_previous_fov = snapshot.camera.vertical_fov_degrees;
+    owned_view.temporal_previous_fov = vertical_fov;
     if (view_input.camera_cut)
     {
         ++view_owner.history_generation;

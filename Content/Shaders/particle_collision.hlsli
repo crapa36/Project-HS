@@ -1,20 +1,47 @@
 #ifndef HS_PARTICLE_COLLISION_HLSLI
 #define HS_PARTICLE_COLLISION_HLSLI
 #include "meadow_surface.hlsli"
+#include "terrain_page_abi.hlsli"
 
-// ParticleTerrain.xyz is the scene origin; collision_material.y remains the world-zero floor.
+#ifndef HS_TERRAIN_SECTION_DECLARED
+#define HS_TERRAIN_SECTION_DECLARED
+struct HsTerrainPageSection
+{
+#define HS_TERRAIN_F2(name) float2 name;
+#define HS_TERRAIN_U1(name) uint name;
+#define HS_TERRAIN_U2(name) uint2 name;
+    HS_TERRAIN_GPU_SECTION_FIELDS(HS_TERRAIN_F2, HS_TERRAIN_U1, HS_TERRAIN_U2)
+#undef HS_TERRAIN_F2
+#undef HS_TERRAIN_U1
+#undef HS_TERRAIN_U2
+};
+StructuredBuffer<HsTerrainPageSection> HsTerrainSections : register(HS_TERRAIN_JOIN(t,HS_TERRAIN_SECTION_SRV),HS_TERRAIN_JOIN(space,HS_TERRAIN_PAGE_SPACE));
+#endif
+
+// Section transforms and particles share scene-relative coordinates.
 float ParticleCollisionFloor(ParticleData particle, float2 position)
 {
-    const float plane = particle.CollisionMaterial.y + particle.CollisionMaterial.z;
-    return ParticleTerrain.w > 0.5
-        ? plane + MeadowGroundHeight(position + ParticleTerrain.xz) - ParticleTerrain.y : plane;
+    float floor_y = particle.CollisionMaterial.y - ParticleTerrain.y;
+    bool found = false;
+    [loop] for (uint index=0u; index<asuint(ParticleTerrain.w); ++index)
+    {
+        const HsTerrainPageSection section=HsTerrainSections[index];
+        if (section.mesh!=22u || any(section.span==0)) continue;
+        const float2 delta=position-section.center;
+        const float2 local=float2(dot(delta,float2(section.rotation.x,-section.rotation.y)),
+            dot(delta,section.rotation.yx))*24.0/section.span;
+        if (any(abs(local)>12.0)) continue;
+        const float height=particle.CollisionMaterial.y+section.heightTransform.x+section.heightTransform.y*MeadowGroundHeight(local);
+        floor_y=found ? max(floor_y,height) : height;
+        found=true;
+    }
+    return floor_y+particle.CollisionMaterial.z;
 }
-float3 ParticleTerrainNormal(float2 position)
+float3 ParticleTerrainNormal(ParticleData particle, float2 position)
 {
-    const float2 p = position + ParticleTerrain.xz;
     const float e = 0.002;
-    return normalize(float3(MeadowGroundHeight(p - float2(e, 0)) - MeadowGroundHeight(p + float2(e, 0)),
-        2.0 * e, MeadowGroundHeight(p - float2(0, e)) - MeadowGroundHeight(p + float2(0, e))));
+    return normalize(float3(ParticleCollisionFloor(particle,position-float2(e,0))-ParticleCollisionFloor(particle,position+float2(e,0)),
+        2.0 * e, ParticleCollisionFloor(particle,position-float2(0,e))-ParticleCollisionFloor(particle,position+float2(0,e))));
 }
 float3 ParticleBallisticPosition(float3 position, float3 velocity, float3 acceleration, float time)
 {
@@ -22,7 +49,7 @@ float3 ParticleBallisticPosition(float3 position, float3 velocity, float3 accele
 }
 void IntegrateBallisticStep(inout ParticleData particle, float dt)
 {
-    if (ParticleTerrain.w <= 0.5)
+    if (asuint(ParticleTerrain.w) == 0u)
     {
         IntegrateFlatBallisticStep(particle, dt);
         return;
@@ -40,8 +67,7 @@ void IntegrateBallisticStep(inout ParticleData particle, float dt)
         const float turn = clamp(-velocity.y / acceleration.y, 0.0, dt);
         minimum_y = min(minimum_y, ParticleBallisticPosition(position, velocity, acceleration, turn).y);
     }
-    // The authored meadow's macro relief plus largest bank stays below 0.55 m.
-    const float upper_floor = particle.CollisionMaterial.y + particle.CollisionMaterial.z + 0.55 - ParticleTerrain.y;
+    const float upper_floor=particle.CollisionMaterial.y+ParticleTerrain.x+particle.CollisionMaterial.z;
     if (minimum_y > upper_floor)
     {
         particle.PositionLife.xyz = next_position;
@@ -78,7 +104,7 @@ void IntegrateBallisticStep(inout ParticleData particle, float dt)
         position = ParticleBallisticPosition(position, velocity, acceleration, upper);
         position.y = ParticleCollisionFloor(particle, position.xz);
         velocity = lerp(velocity, next_velocity, upper / dt);
-        const float3 normal = ParticleTerrainNormal(position.xz);
+        const float3 normal = ParticleTerrainNormal(particle,position.xz);
         velocity -= normal * ((1.0 + particle.CollisionMaterial.x) * min(dot(velocity, normal), 0.0));
         const float remaining = dt - upper;
         next_velocity = BallisticVelocity(velocity, drag, gravity, remaining);
@@ -87,7 +113,7 @@ void IntegrateBallisticStep(inout ParticleData particle, float dt)
         if (next_position.y <= floor_y)
         {
             next_position.y = floor_y;
-            const float3 contact_normal = ParticleTerrainNormal(next_position.xz);
+            const float3 contact_normal = ParticleTerrainNormal(particle,next_position.xz);
             next_velocity -= contact_normal * min(dot(next_velocity, contact_normal), 0.0);
         }
     }

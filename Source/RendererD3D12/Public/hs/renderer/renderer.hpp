@@ -29,7 +29,6 @@
 #include <hs/render_data/vfx_volume_input.hpp>
 #include <hs/render_data/vfx_screen_input.hpp>
 #include <hs/render_data/vfx_entity_surface_input.hpp>
-#include <hs/render_data/vfx_spawn_command.hpp>
 
 #include <cstdint>
 #include <array>

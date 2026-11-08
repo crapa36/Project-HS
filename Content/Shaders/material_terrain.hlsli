@@ -6,6 +6,7 @@
 #include "terrain_page_abi.hlsli"
 #endif
 #include "meadow_surface.hlsli"
+#include "terrain_histogram_abi.hlsli"
 
 #ifndef HS_MATERIAL_POM_STEPS
 #define HS_MATERIAL_POM_STEPS 24u
@@ -84,13 +85,26 @@ struct TerrainCellSample
     bool active;
 };
 
-TerrainCellSample TerrainPrepareCell(float2 baseUv,float2 baseDx,float2 baseDy,
-    uint seed,float3 parallax)
+struct TerrainCellBasis
+{
+    uint rotation;
+    float2 start;
+};
+
+TerrainCellBasis TerrainPrepareCellBasis(float2 baseUv,uint seed)
+{
+    TerrainCellBasis basis;
+    basis.rotation=TerrainHash(seed)&3;
+    const float2 offset=float2(TerrainRandom(seed+1),TerrainRandom(seed+2));
+    basis.start=TerrainRotate(baseUv,basis.rotation)+offset;
+    return basis;
+}
+
+TerrainCellSample TerrainPrepareCell(TerrainCellBasis basis,float2 baseDx,float2 baseDy,float3 parallax)
 {
     TerrainCellSample cell;
-    cell.rotation=TerrainHash(seed)&3;
-    float2 offset=float2(TerrainRandom(seed+1),TerrainRandom(seed+2));
-    cell.start=TerrainRotate(baseUv,cell.rotation)+offset;
+    cell.rotation=basis.rotation;
+    cell.start=basis.start;
     cell.uv=cell.start;
     cell.dx=TerrainRotate(baseDx,cell.rotation);
     cell.dy=TerrainRotate(baseDy,cell.rotation);
@@ -112,16 +126,16 @@ void TerrainStochasticCoordinates(float2 world,uint layer,float2 warp,
     if(f.x+f.y>=1) {a=i+1;b=i+float2(0,1);c=i+float2(1,0);weights=float3(f.x+f.y-1,1-f.x,1-f.y);}
 }
 
-void TerrainStochasticCells(float2 world,float2 dx,float2 dy,uint layer,uint seed,float2 warp,
-    float3 parallax,out TerrainCellSample x,out TerrainCellSample y,out TerrainCellSample z,out float3 weights)
+void TerrainStochasticBasis(float2 world,uint layer,uint seed,float2 warp,
+    out TerrainCellBasis x,out TerrainCellBasis y,out TerrainCellBasis z,out float3 weights)
 {
     const float tile=TerrainTileSize(layer);
-    const float2 uv=world/tile,gx=dx/tile,gy=dy/tile;
+    const float2 uv=world/tile;
     float2 a,b,c;
     TerrainStochasticCoordinates(world,layer,warp,a,b,c,weights);
-    x=TerrainPrepareCell(uv,gx,gy,TerrainCell(a,seed),parallax);
-    y=TerrainPrepareCell(uv,gx,gy,TerrainCell(b,seed),parallax);
-    z=TerrainPrepareCell(uv,gx,gy,TerrainCell(c,seed),parallax);
+    x=TerrainPrepareCellBasis(uv,TerrainCell(a,seed));
+    y=TerrainPrepareCellBasis(uv,TerrainCell(b,seed));
+    z=TerrainPrepareCellBasis(uv,TerrainCell(c,seed));
 }
 
 void TerrainParallaxCells(Texture2DArray<float4> height, SamplerState environment_wrap,
@@ -196,17 +210,13 @@ float3 TerrainGrassPalette(float3 color)
 float3 DecodeTerrainHistogram(Texture2DArray<float4> histogram, SamplerState linear_clamp,
                               float3 gaussian,uint layer,float lod)
 {
-    float row=(clamp(lod,0,11)+0.5)/16;
-    float3 g=clamp(gaussian,0.5/256,1-0.5/256);
-    float3 p=float3(
-        histogram.SampleLevel(linear_clamp,float3(g.x,row,layer),0).r,
-        histogram.SampleLevel(linear_clamp,float3(g.y,row,layer),0).g,
-        histogram.SampleLevel(linear_clamp,float3(g.z,row,layer),0).b);
-    float3 origin=histogram.Load(int4(0,12,layer,0)).rgb;
-    float3 x=histogram.Load(int4(0,13,layer,0)).rgb;
-    float3 y=histogram.Load(int4(0,14,layer,0)).rgb;
-    float3 z=histogram.Load(int4(0,15,layer,0)).rgb;
-    return saturate(origin+x*p.x+y*p.y+z*p.z);
+    const float mip=clamp(lod,0,HS_TERRAIN_HISTOGRAM_MIPS-1);
+    const float3 rows=(mip+float3(.5,HS_TERRAIN_HISTOGRAM_MIPS+.5,2*HS_TERRAIN_HISTOGRAM_MIPS+.5))/HS_TERRAIN_HISTOGRAM_HEIGHT;
+    const float3 g=clamp(gaussian,.5/HS_TERRAIN_HISTOGRAM_WIDTH,1-.5/HS_TERRAIN_HISTOGRAM_WIDTH);
+    return saturate(
+        histogram.SampleLevel(linear_clamp,float3(g.x,rows.x,layer),0).rgb+
+        histogram.SampleLevel(linear_clamp,float3(g.y,rows.y,layer),0).rgb+
+        histogram.SampleLevel(linear_clamp,float3(g.z,rows.z,layer),0).rgb);
 }
 
 HsMaterialTerrainResult TerrainLayer(
@@ -214,42 +224,32 @@ HsMaterialTerrainResult TerrainLayer(
     Texture2DArray<float4> normal, Texture2DArray<float4> detail,
     Texture2DArray<float4> height, Texture2DArray<float4> histogram,
     SamplerState environment_wrap, SamplerState linear_clamp,
-    float3 world,float3 worldDx,float3 worldDy,uint layer,uint seed,float2 warp,
-    float3 viewTs,float distanceToEye,
+    float2 dx,float2 dy,uint layer,TerrainCellBasis basisX,TerrainCellBasis basisY,TerrainCellBasis basisZ,
+    float3 w,float lod,
+    float3 viewTs,float distanceToEye,bool detail_enabled,float detail_weight,
     uint gaussian_slot,uint surface_slot,uint normal_slot,uint detail_slot,uint height_slot,uint histogram_slot,
     HsTextureGradState gaussian_state,HsTextureGradState surface_state,
     HsTextureGradState normal_state,HsTextureGradState detail_state,
     HsTextureGradState height_state)
 {
-    float tile=TerrainTileSize(layer);
-    float2 dx=worldDx.xz/tile,dy=worldDy.xz/tile;
-    const float2 detail_fade=TerrainDetailFadeRange();
-#ifdef HS_TERRAIN_PAGE_BAKE
-    const bool detail_enabled=false;
-#else
-    const bool detail_enabled=distanceToEye<detail_fade.y;
-#endif
-    const float detail_weight=1-smoothstep(detail_fade.x,detail_fade.y,distanceToEye);
 #ifdef HS_TERRAIN_PAGE_BAKE
     const float3 parallax=0;
 #else
     const float3 parallax=TerrainParallaxFootprint(dx,dy,layer,viewTs,distanceToEye,HS_MATERIAL_POM_STEPS);
 #endif
 
-    TerrainCellSample cellX,cellY,cellZ;float3 w;
-    TerrainStochasticCells(world.xz,worldDx.xz,worldDy.xz,layer,seed,warp,parallax,cellX,cellY,cellZ,w);
+    // Only the compact mapping basis survives the layer loop; POM state is layer-local.
+    TerrainCellSample cellX=TerrainPrepareCell(basisX,dx,dy,parallax);
+    TerrainCellSample cellY=TerrainPrepareCell(basisY,dx,dy,parallax);
+    TerrainCellSample cellZ=TerrainPrepareCell(basisZ,dx,dy,parallax);
     TerrainParallaxCells(height,environment_wrap,layer,parallax.z,height_slot,height_state,cellX,cellY,cellZ);
     HsMaterialTerrainResult x=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,cellX,layer,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
     HsMaterialTerrainResult y=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,cellY,layer,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
     HsMaterialTerrainResult z=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,cellZ,layer,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
-    float lod=0.5*log2(max(max(dot(dx,dx),dot(dy,dy))*
-        float(TerrainSourceTextureEdge)*float(TerrainSourceTextureEdge),1e-8));
-    // Decode with the mip actually available to the Gaussian sample, including streaming fallback.
-#ifndef HS_TERRAIN_PAGE_BAKE
-    lod=max(lod,float(HsTextureMipMetadata[gaussian_slot].y));
-#endif
-    // Row 12 texels 1..12 contain decoded Gaussian means for mips 0..11.
-    float3 mean=histogram.SampleLevel(linear_clamp,float3((clamp(lod,0,11)+1.5)/256.0,12.5/16.0,layer),0).rgb;
+    // The final row holds decoded Gaussian means, distinct from RGB contributions.
+    float3 mean=histogram.SampleLevel(linear_clamp,float3(
+        (clamp(lod,0,HS_TERRAIN_HISTOGRAM_MIPS-1)+1.5)/HS_TERRAIN_HISTOGRAM_WIDTH,
+        (HS_TERRAIN_HISTOGRAM_MEAN_ROW+.5)/HS_TERRAIN_HISTOGRAM_HEIGHT,layer),0).rgb;
     float3 gaussian_value=mean+(x.base_color*w.x+y.base_color*w.y+z.base_color*w.z-mean)*rsqrt(dot(w,w));
     x.base_color=DecodeTerrainHistogram(histogram,linear_clamp,gaussian_value,layer,lod);
     x.normal=normalize(x.normal*w.x+y.normal*w.y+z.normal*w.z);
@@ -265,21 +265,14 @@ float TerrainMeadowBlend(float2 world)
     return smoothstep(0.0,1.5,12.0-max(abs(world.x),abs(world.y)));
 }
 
-float TerrainMeadowRoad(float2 world,float2 warp,float edgeDetail)
-{
-    const float edge=warp.x*.12+warp.y*.07+edgeDetail*.09;
-    return max(MeadowPressed(world)*TerrainMeadowBlend(world),MeadowRoadCoverage(world,edge)*.82);
-}
-
 // Fixed metre-scale environmental marks for terrain materials.
 // Albedo gains preserve the sampled 2K detail; these are shallow material depressions, not water.
-void TerrainGroundTraces(inout HsMaterialTerrainResult m,float3 world,float path,float grassCoverage,uint mesh,uint seed,float wetness,float dryness)
+void TerrainGroundTraces(inout HsMaterialTerrainResult m,float3 world,float2 meadowLocal,float meadow,float path,float grassCoverage,uint mesh,uint seed,float wetness,float dryness)
 {
-    const float meadow=TerrainMeadowBlend(world.xz);
     if(meadow>0)
     {
         const float wet=wetness*meadow;
-        const float rut=MeadowCartWear(world.xz)*meadow;
+        const float rut=MeadowCartWear(meadowLocal)*meadow;
         m.base_color*=lerp(float3(1,1,1),float3(.72,.68,.62),rut);
         m.base_color*=lerp(float3(1,1,1),float3(.65,.60,.53),wet);
         m.roughness=lerp(m.roughness,.48,wet);
@@ -350,31 +343,45 @@ HsMaterialTerrainResult EnvTerrain(
     float3 world,float3 worldDx,float3 worldDy,uint mesh,uint seed,
     float3 viewDirection,float distanceToEye,
     uint gaussian_slot,uint surface_slot,uint normal_slot,uint detail_slot,uint height_slot,uint histogram_slot,
-    float2 authoredControls)
+    float2 authoredControls,float2 meadowLocal)
 {
     if(mesh==22u) seed=MeadowSurfaceSeed;
     const float2 warp=float2(TerrainNoise(world.xz/7,seed+413),TerrainNoise(world.xz/7,seed+827));
     const float meso=TerrainNoise(world.xz/.85,seed+571);
-    const float patch=TerrainNoise((world.xz+warp*2)/16,seed+9);
-    const float bare=smoothstep(.35,.70,patch+meso*.10);
-    const float soilDry=saturate(.5+.5*TerrainNoise(world.xz/22,seed+31));
-    const float stones=.25*smoothstep(.55,.85,TerrainNoise(world.xz/9,seed+71));
-    float4 w=float4(bare*(1-stones)*(1-soilDry),1-bare,bare*(1-stones)*soilDry,bare*stones);
-    const float path=TerrainMeadowRoad(world.xz,warp,meso);
-    // Static controls use meadow UVs; texture mapping remains in world metres.
-    float wetness;
-    [branch] if(mesh==22u)
+    const float meadow=mesh==22u ? TerrainMeadowBlend(meadowLocal) : 0;
+    const float edge=warp.x*.12+warp.y*.07+meso*.09;
+    float path=0,wetness=0,dryness=0;
+    float3 grassGain=1;
+    // Authored marks follow their Meadow; the boundary rejoins generic terrain.
+    [branch] if(meadow>0)
     {
         wetness=saturate(authoredControls.x);
+        const float localRoad=MeadowRoadCoverage(meadowLocal,edge);
+        float road=localRoad;
+        dryness=MeadowSoilDryness(meadowLocal,wetness);
+        [branch] if(meadow<1)
+        {
+            road=lerp(MeadowRoadCoverage(world.xz,edge),localRoad,meadow);
+            dryness=lerp(MeadowSoilDryness(world.xz,wetness),dryness,meadow);
+        }
+        path=max(MeadowPressed(meadowLocal)*meadow,road*.82);
+        grassGain=lerp(1,MeadowDryGrassGain(meadowLocal),meadow);
     }
     else
     {
-        wetness=MeadowWetness(world.xz);
+        path=MeadowRoadCoverage(world.xz,edge)*.82;
+        if(mesh!=20u) dryness=MeadowSoilDryness(world.xz,0);
     }
-    // Road coverage and its derived soil mix must share world coordinates.
-    const float dryness=MeadowSoilDryness(world.xz,wetness);
-    w=lerp(w,float4(1-dryness,0,dryness,0),path);
-    if(mesh==20) w=float4(1,0,0,0);
+    float4 w=float4(1,0,0,0);
+    [branch] if(mesh!=20u)
+    {
+        const float patch=TerrainNoise((world.xz+warp*2)/16,seed+9);
+        const float bare=smoothstep(.35,.70,patch+meso*.10);
+        const float soilDry=saturate(.5+.5*TerrainNoise(world.xz/22,seed+31));
+        const float stones=.25*smoothstep(.55,.85,TerrainNoise(world.xz/9,seed+71));
+        w=float4(bare*(1-stones)*(1-soilDry),1-bare,bare*(1-stones)*soilDry,bare*stones);
+        w=lerp(w,float4(1-dryness,0,dryness,0),path);
+    }
     float total=0,grassWeight=0;
     const float macro=TerrainNoise(world.xz/18,seed+173);
     HsMaterialTerrainResult m=(HsMaterialTerrainResult)0;
@@ -383,17 +390,41 @@ HsMaterialTerrainResult EnvTerrain(
     const HsTextureGradState surface_state=HsTexturePrepareGrad(surface_slot);
     const HsTextureGradState normal_state=HsTexturePrepareGrad(normal_slot);
     const HsTextureGradState height_state=HsTexturePrepareGrad(height_slot);
+    const float2 detail_fade=TerrainDetailFadeRange();
+#ifdef HS_TERRAIN_PAGE_BAKE
+    const bool detail_enabled=false;
+#else
+    const bool detail_enabled=distanceToEye<detail_fade.y;
+#endif
+    const float detail_weight=1-smoothstep(detail_fade.x,detail_fade.y,distanceToEye);
     HsTextureGradState detail_state=(HsTextureGradState)0;
-    if(distanceToEye<TerrainDetailFadeRange().y) detail_state=HsTexturePrepareGrad(detail_slot);
+    if(detail_enabled) detail_state=HsTexturePrepareGrad(detail_slot);
+    TerrainCellBasis basisX=(TerrainCellBasis)0,basisY=(TerrainCellBasis)0,basisZ=(TerrainCellBasis)0;
+    float3 cell_weights=0;
+    float2 layer_dx=0,layer_dy=0;
+    float prepared_tile=0,layer_lod=0;
     [loop] for(uint layer=0;layer<4;++layer)
     {
         if(w[layer]<=0) continue;
-        HsMaterialTerrainResult n=TerrainLayer(gaussian,surface,normal,detail,height,histogram,environment_wrap,linear_clamp,world,worldDx,worldDy,layer,seed,warp,viewTs,distanceToEye,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,histogram_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
+        const float tile=TerrainTileSize(layer);
+        if(tile!=prepared_tile)
+        {
+            TerrainStochasticBasis(world.xz,layer,seed,warp,basisX,basisY,basisZ,cell_weights);
+            layer_dx=worldDx.xz/tile;layer_dy=worldDy.xz/tile;
+            layer_lod=0.5*log2(max(max(dot(layer_dx,layer_dx),dot(layer_dy,layer_dy))*
+                float(TerrainSourceTextureEdge)*float(TerrainSourceTextureEdge),1e-8));
+#ifndef HS_TERRAIN_PAGE_BAKE
+            // Histogram reconstruction needs logical MinMip, not the physical SampleGrad clamp.
+            layer_lod=max(layer_lod,float(HsTextureMipMetadata[gaussian_slot].y));
+#endif
+            prepared_tile=tile;
+        }
+        HsMaterialTerrainResult n=TerrainLayer(gaussian,surface,normal,detail,height,histogram,environment_wrap,linear_clamp,layer_dx,layer_dy,layer,basisX,basisY,basisZ,cell_weights,layer_lod,viewTs,distanceToEye,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,histogram_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
         float weight=w[layer]*exp2((n.height-0.5)*(2+3*path*(1-path)));
         n.roughness=saturate(n.roughness+macro*0.04);
         if(layer==1u)
         {
-            n.base_color=TerrainGrassPalette(n.base_color)*MeadowDryGrassGain(world.xz);
+            n.base_color=TerrainGrassPalette(n.base_color)*grassGain;
             n.ao*=0.1;
             n.roughness=lerp(n.roughness,1.0,0.8);
             grassWeight=weight;
@@ -415,7 +446,7 @@ HsMaterialTerrainResult EnvTerrain(
     // Keep terrain reflectance below the washed-out daylight range without darkening UI or actors.
     m.base_color*=0.6*(1+macro*0.08+meso*0.04);
     m.normal=normalize(m.normal);m.detail=normalize(m.detail);
-    TerrainGroundTraces(m,world,path,grassCoverage,mesh,seed,wetness,dryness);
+    TerrainGroundTraces(m,world,meadowLocal,meadow,path,grassCoverage,mesh,seed,wetness,dryness);
     return m;
 }
 
@@ -427,6 +458,8 @@ struct HsTerrainSection
 };
 
 #ifndef HS_TERRAIN_PAGE_BAKE
+#ifndef HS_TERRAIN_SECTION_DECLARED
+#define HS_TERRAIN_SECTION_DECLARED
 struct HsTerrainPageSection
 {
 #define HS_TERRAIN_F2(name) float2 name;
@@ -438,8 +471,14 @@ struct HsTerrainPageSection
 #undef HS_TERRAIN_U2
 };
 StructuredBuffer<HsTerrainPageSection> HsTerrainSections : register(HS_TERRAIN_JOIN(t,HS_TERRAIN_SECTION_SRV),HS_TERRAIN_JOIN(space,HS_TERRAIN_PAGE_SPACE));
-// Physical base, published logical MinMip, logical mip count, quality finest+1 (0=unavailable).
-StructuredBuffer<uint4> HsTerrainPlaneMips : register(HS_TERRAIN_JOIN(t,HS_TERRAIN_MIP_SRV),HS_TERRAIN_JOIN(space,HS_TERRAIN_PAGE_SPACE));
+#endif
+struct HsTerrainPlaneMip
+{
+#define HS_TERRAIN_U1(name) uint name;
+    HS_TERRAIN_GPU_PLANE_MIP_FIELDS(HS_TERRAIN_U1)
+#undef HS_TERRAIN_U1
+};
+StructuredBuffer<HsTerrainPlaneMip> HsTerrainPlaneMips : register(HS_TERRAIN_JOIN(t,HS_TERRAIN_MIP_SRV),HS_TERRAIN_JOIN(space,HS_TERRAIN_PAGE_SPACE));
 Texture2D<float4> HsTerrainPlanes[HS_TERRAIN_PAGE_PLANE_CAPACITY] : register(HS_TERRAIN_JOIN(t,HS_TERRAIN_PLANE_SRV),HS_TERRAIN_JOIN(space,HS_TERRAIN_PAGE_SPACE));
 
 float4 TerrainPageSample(SamplerState page_sampler,uint plane,float2 uv,float2 gx,float2 gy,float clamp_mip)
@@ -495,11 +534,23 @@ float3 TerrainPageDetail(Texture2DArray<float4> detail,SamplerState environment_
     const HsTextureGradState state=HsTexturePrepareGrad(detail_slot);
     const float2 warp=float2(TerrainNoise(world/7,seed+413),TerrainNoise(world/7,seed+827));
     float3 combined=0;
+    TerrainCellBasis basisX=(TerrainCellBasis)0,basisY=(TerrainCellBasis)0,basisZ=(TerrainCellBasis)0;
+    float2 layer_dx=0,layer_dy=0;
+    float3 cell_weights=0;
+    float prepared_tile=0;
     [unroll] for(uint layer=0;layer<4;++layer)
     {
         if(weights[layer]<=0) continue;
-        TerrainCellSample x,y,z;float3 cell_weights;
-        TerrainStochasticCells(world,dx,dy,layer,seed,warp,0,x,y,z,cell_weights);
+        const float tile=TerrainTileSize(layer);
+        if(tile!=prepared_tile)
+        {
+            TerrainStochasticBasis(world,layer,seed,warp,basisX,basisY,basisZ,cell_weights);
+            layer_dx=dx/tile;layer_dy=dy/tile;
+            prepared_tile=tile;
+        }
+        const TerrainCellSample x=TerrainPrepareCell(basisX,layer_dx,layer_dy,0);
+        const TerrainCellSample y=TerrainPrepareCell(basisY,layer_dx,layer_dy,0);
+        const TerrainCellSample z=TerrainPrepareCell(basisZ,layer_dx,layer_dy,0);
         const float3 nx=TerrainPageDetailCell(detail,environment_wrap,detail_slot,state,layer,x,weight);
         const float3 ny=TerrainPageDetailCell(detail,environment_wrap,detail_slot,state,layer,y,weight);
         const float3 nz=TerrainPageDetailCell(detail,environment_wrap,detail_slot,state,layer,z,weight);
@@ -518,10 +569,13 @@ HsMaterialTerrainResult HsMaterialTerrainPage(
     uint gaussian_slot,uint surface_slot,uint normal_slot,uint detail_slot,uint height_slot,uint histogram_slot,
     float2 authored_controls)
 {
-    // Every terrain draw owns an admitted record; source-only records have zero span.
+    // Every terrain draw owns an admitted record; source-only records have no page.
     const HsTerrainPageSection section=HsTerrainSections[section_index];
-    const bool has_page=all(section.span!=0);
+    const bool has_page=section.pageSlice!=0xffffffffu;
+    const float2 meadowLocal=mesh==22u && all(section.span!=0)
+        ? TerrainSectionLocal(world.xz-section.center,section.rotation)*24.0/section.span : world.xz;
     const float2 fade=TerrainDetailFadeRange();
+    const float detail_weight=1-smoothstep(fade.x,fade.y,distance_to_eye);
     float2 uv=0,gx=0,gy=0,ray=0;
     float pom_weight=0;
     float3 clamp_mips=0;
@@ -538,11 +592,11 @@ HsMaterialTerrainResult HsMaterialTerrainPage(
         const float2 local=section_uv*counts-float2(tile);
         tile_span=section.span/counts;
         slice+=(tile.y*section.tileCount.x+tile.x)*3u;
-        const uint4 color_mip=HsTerrainPlaneMips[slice];
-        const uint4 base_mip=HsTerrainPlaneMips[slice+1u];
-        const uint4 weight_mip=HsTerrainPlaneMips[slice+2u];
-        const uint resident=max(color_mip.y,max(base_mip.y,weight_mip.y));
-        clamp_mips=float(resident)-float3(color_mip.x,base_mip.x,weight_mip.x);
+        const HsTerrainPlaneMip color_mip=HsTerrainPlaneMips[slice];
+        const HsTerrainPlaneMip base_mip=HsTerrainPlaneMips[slice+1u];
+        const HsTerrainPlaneMip weight_mip=HsTerrainPlaneMips[slice+2u];
+        const uint resident=max(max(color_mip.residentMinMip,base_mip.residentMinMip),detail_weight>0 ? weight_mip.residentMinMip : 0u);
+        clamp_mips=float(resident)-float3(color_mip.firstMip,base_mip.firstMip,weight_mip.firstMip);
         uv=(apron+local*interior)/extent;
         gx=TerrainSectionLocal(dx.xz,section.rotation)/tile_span*interior/extent;
         gy=TerrainSectionLocal(dy.xz,section.rotation)/tile_span*interior/extent;
@@ -561,14 +615,14 @@ HsMaterialTerrainResult HsMaterialTerrainPage(
         // Section indices name the admitted draw; apron contains its own
         // material continuation beyond the receiver rectangle.
         // Texture quality selects stored mips without changing the source route.
-        const float wanted_mip=max(float(color_mip.w)-1.0,floor(log2(max(minor*.5,1.0))));
-        supported=all(uint3(color_mip.w,base_mip.w,weight_mip.w)!=0u) &&
+        const float wanted_mip=max(float(color_mip.qualityMipPlusOne)-1.0,floor(log2(max(minor*.5,1.0))));
+        supported=color_mip.qualityMipPlusOne!=0 && base_mip.qualityMipPlusOne!=0 && (detail_weight<=0 || weight_mip.qualityMipPlusOne!=0) &&
             float(resident)<=wanted_mip && minor>=2.0*(extent.x/4096.0) && all(edge>=support);
     }
     [branch] if(!supported)
         return EnvTerrain(gaussian,surface,normal,detail,height,histogram,environment_wrap,linear_clamp,
             world,dx,dy,mesh,section.seed,view,distance_to_eye,
-            gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,histogram_slot,authored_controls);
+            gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,histogram_slot,authored_controls,meadowLocal);
     const float2 start_uv=uv;
     uv=TerrainPageParallax(environment_wrap,uv,gx,gy,ray,pom_weight,slice+1u,clamp_mips.y);
     const float4 color=TerrainPageSample(environment_wrap,slice,uv,gx,gy,clamp_mips.x);
@@ -579,7 +633,6 @@ HsMaterialTerrainResult HsMaterialTerrainPage(
     page.ao=base.b;
     page.normal=normalize(TerrainDecode(base.rg));
     page.detail=float3(0,0,1);
-    const float detail_weight=1-smoothstep(fade.x,fade.y,distance_to_eye);
     [branch] if(detail_weight>0)
     {
         float4 weights=max(TerrainPageSample(environment_wrap,slice+2u,uv,gx,gy,clamp_mips.z),0);

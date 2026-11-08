@@ -1,6 +1,8 @@
 #include "renderer_texture_streaming.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <array>
 #include <cassert>
 #include <bit>
@@ -272,6 +274,7 @@ struct RendererTextureStreaming::Impl
     std::uint32_t frame_count{};
     std::uint64_t budget{};
     std::vector<TextureOwner> textures;
+    std::size_t next_read_owner{};
     std::vector<TextureStreamId> preferred_working_set;
     bool settled_preferred{};
     std::uint64_t settled_planned{}, settled_physical{}, settled_host_budget{};
@@ -507,6 +510,7 @@ Result RendererTextureStreaming::RegisterBatch(std::span<TextureStreamRegistrati
             !existing.generation_lease.owner_before(registration.generation_lease) &&
             !registration.generation_lease.owner_before(existing.generation_lease) &&
             existing.fallback_graph_access == registration.fallback_graph_access &&
+            existing.sampler_feedback == registration.sampler_feedback &&
             existing.pinned == registration.pinned && existing.srgb_view == registration.srgb_view &&
             existing.opacity_sampling == registration.opacity_sampling;
     };
@@ -605,7 +609,7 @@ Result RendererTextureStreaming::RegisterBatch(std::span<TextureStreamRegistrati
     bool tiled_format = typed_supported && native_supported &&
         (format.Support2 & D3D12_FORMAT_SUPPORT2_TILED) != 0 &&
         (native_format.Support2 & D3D12_FORMAT_SUPPORT2_TILED) != 0;
-    texture.feedback_supported = impl_->capabilities.sampler_feedback && typed_supported &&
+    texture.feedback_supported = texture.registration.sampler_feedback && impl_->capabilities.sampler_feedback && typed_supported &&
         (format.Support2 & D3D12_FORMAT_SUPPORT2_SAMPLER_FEEDBACK) != 0;
     if (texture.registration.srgb_view)
     {
@@ -1057,10 +1061,20 @@ Result RendererTextureStreaming::Impl::Prepare(TextureOwner &texture, std::uint3
             hr = batch->upload.resource->Map(0, &no_read, reinterpret_cast<void **>(&mapped));
             if (FAILED(hr)) { rollback(); return NativeFailure("Map streamed texture upload", hr); }
             for (std::size_t index = 0; index < footprints.size(); ++index)
+            {
+                const auto &source = package.subresources[source_indices[index]].bytes;
+                auto *destination = mapped + footprints[index].Offset;
+                const auto pitch = footprints[index].Footprint.RowPitch;
+                const auto row_size = static_cast<SIZE_T>(row_bytes[index]);
+                if (pitch == row_size)
+                {
+                    std::memcpy(destination, source.data(), source.size());
+                    continue;
+                }
                 for (UINT row = 0; row < rows[index]; ++row)
-                    std::memcpy(mapped + footprints[index].Offset + static_cast<SIZE_T>(row) * footprints[index].Footprint.RowPitch,
-                        package.subresources[source_indices[index]].bytes.data() + static_cast<SIZE_T>(row) * row_bytes[index],
-                        static_cast<SIZE_T>(row_bytes[index]));
+                    std::memcpy(destination + static_cast<SIZE_T>(row) * pitch,
+                        source.data() + static_cast<SIZE_T>(row) * row_size, row_size);
+            }
             batch->upload.resource->Unmap(0, nullptr);
         }
         hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&batch->allocator));
@@ -1089,7 +1103,7 @@ Result RendererTextureStreaming::Impl::Prepare(TextureOwner &texture, std::uint3
         // already have capacity before any GPU command can start.
         retired.reserve(retired.size() + textures.size());
         const bool began = mapping_only_shrink
-            ? streaming.BeginMappingOnly(texture.request, texture.registration.generation)
+            ? streaming.BeginResidentTransfer(texture.request, texture.registration.generation)
             : streaming.BeginUpload(texture.request, texture.registration.generation);
         if (!began)
         { rollback(); return Failure(mapping_only_shrink
@@ -1252,7 +1266,7 @@ Result RendererTextureStreaming::Impl::PrepareSoftwareCopy(TextureOwner &texture
 
         // Reserve publication retirement before the copy can be submitted.
         retired.reserve(retired.size() + textures.size());
-        if (!streaming.BeginGpuCopy(texture.request, texture.registration.generation))
+        if (!streaming.BeginResidentTransfer(texture.request, texture.registration.generation))
         {
             rollback();
             return Failure("Software texture copy request was stale or invalid.");
@@ -1690,9 +1704,15 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
         }
         if (auto result = impl_->Prepare(texture, texture.request_target_mip, residency, streaming); !result) return result;
     }
-    for (std::size_t owner_index = 0; owner_index < impl_->textures.size(); ++owner_index)
+    // Pace optional reads at ingress, before host allocation and later copy preparation.
+    // One 4K BC7 mip fits the quantum; a larger indivisible read can always go first.
+    constexpr std::uint64_t read_quantum = 16ull * 1024 * 1024;
+    std::uint64_t remaining_read_bytes = read_quantum;
+    auto owner_index = impl_->next_read_owner;
+    for (std::size_t visited = 0; visited < impl_->textures.size(); ++visited)
     {
-        auto &texture = impl_->textures[owner_index];
+        if (owner_index >= impl_->textures.size()) owner_index = 0;
+        auto &texture = impl_->textures[owner_index++];
         if (texture.registration.pinned || texture.pending) continue;
         if (texture.software_transaction && !texture.request &&
             TextureSoftwareTransactionSuperseded(texture.transaction_target_mip, texture.desired_mip,
@@ -1718,7 +1738,8 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
         }
         const bool active = texture.reserved_published || texture.software.resource;
         if (!texture.software_transaction && !texture.request && active && texture.resident_mip == texture.desired_mip) continue;
-        if (!texture.software_transaction && !texture.request && !active && !texture.reserved &&
+        if (!texture.software_transaction && !texture.request && !active &&
+            (!texture.reserved || !texture.feedback_supported) &&
             texture.first_mip == texture.desired_mip) continue;
         if (!texture.request)
         {
@@ -1815,6 +1836,7 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
         }
         if (page->state == StreamingPageState::Requested)
         {
+            if (!remaining_read_bytes) continue;
             const auto metadata_needed = texture.decode_ticket ? 0u : texture.metadata_reservation_bytes;
             if (!texture.request_reserved && texture.software_transaction &&
                 !texture.ranged_descriptor.subresources.empty() && texture.request_subresources.empty())
@@ -1886,6 +1908,12 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
                 continue;
             }
             if (!residency.CanStage(host_peak)) continue;
+            if (remaining_read_bytes != read_quantum && size > remaining_read_bytes)
+            {
+                impl_->next_read_owner = owner_index - 1;
+                remaining_read_bytes = 0;
+                continue;
+            }
             texture.read_ticket = residency.ReserveHost(size);
             if (!texture.decode_ticket) texture.decode_ticket = residency.ReserveHost(texture.metadata_reservation_bytes);
             if (!texture.read_ticket || !texture.decode_ticket)
@@ -1900,6 +1928,11 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
             auto result = io.Enqueue({texture.request, texture.registration.generation, texture.registration.logical_id,
                 texture.registration.source, size, texture.registration.generation_lease, {}, texture.request_ranges}, streaming, residency,
                 texture.read_ticket, submitted, true);
+            if (submitted)
+            {
+                remaining_read_bytes -= std::min(remaining_read_bytes, size);
+                impl_->next_read_owner = owner_index;
+            }
             if (!submitted)
             {
                 static_cast<void>(residency.ReleaseNow(texture.read_ticket));
@@ -1940,7 +1973,7 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
                 return false;
             const auto target = texture.preferred ? texture.resident_mip : texture.tail_mip;
             if (texture.desired_mip != target || texture.resident_mip != target ||
-                (!texture.IsStreamed() && (texture.reserved || texture.first_mip != target))) return false;
+                (!texture.IsStreamed() && ((texture.reserved && texture.feedback_supported) || texture.first_mip != target))) return false;
             return texture.preferred || !texture.demand_valid || texture.demand_frame > frame ||
                 frame - texture.demand_frame > impl_->frame_count;
         });
@@ -1994,11 +2027,11 @@ bool RendererTextureStreaming::MatchesLayout(std::uint32_t first_pass,
         const auto batch=texture.pending;
         const bool pending=batch&&!batch->submitted;
         const auto &entry=layout.entries[index];
+        // Resident clamp and import state are rebound live, not graph topology.
         if(!view.resource||!entry.sampled||entry.sampled_version.resource!=entry.sampled||
             entry.sampled_version.ordinal!=(pending&&!entry.separate_target?1u:0u)||
             !Same(entry.description,view.logical_description)||
-            entry.first_mip!=view.first_mip||entry.resident_min_mip!=view.resident_min_mip||
-            entry.access!=view.access||entry.pending!=pending||
+            entry.first_mip!=view.first_mip||entry.pending!=pending||
             entry.opacity_sampling!=view.opacity_sampling)return false;
         if(pending)
         {
@@ -2075,8 +2108,7 @@ Result RendererTextureStreaming::AddPendingPassesImpl(RenderGraphBuilder &graph,
         if(layout)
         {
             capture->sampled=handle;capture->description=view.logical_description;
-            capture->first_mip=view.first_mip;capture->resident_min_mip=view.resident_min_mip;
-            capture->access=view.access;
+            capture->first_mip=view.first_mip;
         }
         auto version = graph.Version(handle); const auto batch = texture.pending;
         if (batch && !batch->submitted)

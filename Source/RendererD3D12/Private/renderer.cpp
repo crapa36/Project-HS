@@ -79,6 +79,61 @@ Result D3D12Renderer::Impl::PrepareScreenOverlay(const RendererConfig &candidate
         }, candidate_config.screen_overlay_intensity > 0, pipeline_cache, candidate);
 }
 
+Result D3D12Renderer::Impl::PrepareViewFeatures(const OwnedView &owner,
+    const RendererConfig &candidate_config, ViewExtent capacity, ViewExtent output_extent,
+    bool decal_work, ViewFeatureCandidates &candidates) const
+{
+    if (auto prepared = PrepareAdaptiveShading(owner, candidate_config, capacity, candidates.adaptive); !prepared)
+        return prepared;
+    if (auto prepared = PrepareAmbientOcclusion(owner, candidate_config, capacity, candidates.ambient,
+            candidates.adaptive.Status().compute_ready); !prepared)
+        return prepared;
+    if (auto prepared = PrepareSurfaceLighting(owner, candidate_config, capacity,
+            candidates.diffusion, candidates.reflections); !prepared)
+        return prepared;
+    if (auto prepared = PrepareLayeredTranslucency(owner, candidate_config, capacity, candidates.transparency); !prepared)
+        return prepared;
+    if (auto prepared = PrepareHdrPost(owner, candidate_config, capacity, output_extent, candidates.hdr); !prepared)
+        return prepared;
+    if (auto prepared = PrepareScreenOverlay(candidate_config, capacity, candidates.overlay); !prepared)
+        return prepared;
+    if (auto prepared = PrepareDecalSurface(candidate_config, capacity, decal_work, candidates.decals); !prepared)
+        return prepared;
+    if (auto prepared = PrepareLightList(owner, candidate_config, capacity, candidates.lights); !prepared)
+        return prepared;
+    if (auto prepared = PrepareVirtualShadows(owner, candidate_config, capacity, candidates.shadows); !prepared)
+        return prepared;
+    if (auto prepared = PrepareAdditionalShadows(owner, candidate_config, capacity, candidates.additional); !prepared)
+        return prepared;
+    return PrepareVolumetrics(owner, candidate_config, capacity, candidates.volume);
+}
+
+Result D3D12Renderer::Impl::CommitViewFeaturePrefix(OwnedView &owner,
+    ViewFeatureCandidates &candidates, const CompletionSet &completed)
+{
+    if (auto committed = owner.adaptive_shading.Commit(std::move(candidates.adaptive), completed); !committed)
+        return committed;
+    if (auto committed = owner.ambient_occlusion.Commit(std::move(candidates.ambient), completed); !committed)
+        return committed;
+    if (auto committed = owner.subsurface.Commit(std::move(candidates.diffusion), completed); !committed)
+        return committed;
+    if (auto committed = owner.screen_reflections.Commit(std::move(candidates.reflections), completed); !committed)
+        return committed;
+    if (auto committed = owner.translucency.Commit(std::move(candidates.transparency), completed); !committed)
+        return committed;
+    if (auto committed = owner.hdr_post.Commit(std::move(candidates.hdr), completed); !committed)
+        return committed;
+    if (auto committed = owner.screen_overlay.Commit(std::move(candidates.overlay), completed); !committed)
+        return committed;
+    if (auto committed = owner.decal_surface.Commit(std::move(candidates.decals), completed); !committed)
+        return committed;
+    if (auto committed = owner.light_list.Commit(std::move(candidates.lights), completed); !committed)
+        return committed;
+    if (auto committed = owner.virtual_shadows.Commit(std::move(candidates.shadows), completed); !committed)
+        return committed;
+    return Result::Success();
+}
+
 D3D12Renderer::~D3D12Renderer()
 {
     // Failed native retirement must retain the complete device/resource lease.
@@ -563,37 +618,10 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
                 {width, height}, guides, provider->NeedsCompositionGuide()); !prepared) return prepared;
     const auto render_width = capacity.width;
     const auto render_height = capacity.height;
-    AdaptiveShadingCandidate adaptive;
-    if (auto prepared = impl_->PrepareAdaptiveShading(owned_view, impl_->config, capacity, adaptive); !prepared)
+    Impl::ViewFeatureCandidates view_features;
+    if (auto prepared = impl_->PrepareViewFeatures(owned_view, impl_->config, capacity,
+            {width, height}, false, view_features); !prepared)
         return prepared;
-    AmbientOcclusionCandidate ambient;
-    if (auto prepared = impl_->PrepareAmbientOcclusion(owned_view, impl_->config, capacity, ambient,
-            adaptive.Status().compute_ready); !prepared)
-        return prepared;
-    SubsurfaceCandidate diffusion;
-    ScreenReflectionsCandidate reflections;
-    if (auto prepared = impl_->PrepareSurfaceLighting(owned_view, impl_->config, capacity,
-            diffusion, reflections); !prepared) return prepared;
-    LayeredTranslucencyCandidate transparency;
-    if (auto prepared = impl_->PrepareLayeredTranslucency(owned_view, impl_->config, capacity, transparency); !prepared)
-        return prepared;
-    HdrPostCandidate hdr_post;
-    if (auto prepared = impl_->PrepareHdrPost(owned_view, impl_->config, capacity, {width, height}, hdr_post); !prepared)
-        return prepared;
-    ScreenOverlayCandidate screen_overlay;
-    if (auto prepared = impl_->PrepareScreenOverlay(impl_->config, capacity, screen_overlay); !prepared)
-        return prepared;
-    DecalSurfaceCandidate decal_surface;
-    if (auto prepared = impl_->PrepareDecalSurface(impl_->config, capacity, false, decal_surface); !prepared) return prepared;
-    LightListCandidate light_list;
-    if (auto prepared = impl_->PrepareLightList(owned_view, impl_->config, capacity, light_list); !prepared) return prepared;
-    VirtualShadowCandidate virtual_shadows;
-    if (auto prepared = impl_->PrepareVirtualShadows(owned_view, impl_->config, capacity,
-            virtual_shadows); !prepared) return prepared;
-    Impl::AdditionalShadowPrepared additional_shadows;
-    if (auto prepared = impl_->PrepareAdditionalShadows(owned_view, impl_->config, capacity, additional_shadows); !prepared) return prepared;
-    Impl::VolumetricPrepared volumetrics;
-    if (auto prepared = impl_->PrepareVolumetrics(owned_view, impl_->config, capacity, volumetrics); !prepared) return prepared;
     Impl::OptionTargets targets;
     Impl::UiResources ui_targets;
     if (auto prepared = impl_->PrepareUiResources(ui_targets, width, height); !prepared)
@@ -713,7 +741,7 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
     }
     }
 
-    impl_->CommitOptionTargets(*impl_->owned_views.at(impl_->active_view_id.value), targets);
+    impl_->CommitOptionTargets(owned_view, targets);
     impl_->CommitUiResources(owned_view, ui_targets);
     owned_view.transient_textures_common = impl_->enhanced;
     owned_view.width = width;
@@ -726,29 +754,13 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
         return committed;
     }
     owned_view.reconstruction_plan = std::move(reconstruction);
-    if (auto committed = owned_view.adaptive_shading.Commit(std::move(adaptive),
+    if (auto committed = impl_->CommitViewFeaturePrefix(owned_view, view_features,
             impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = owned_view.ambient_occlusion.Commit(std::move(ambient),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = owned_view.subsurface.Commit(std::move(diffusion),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = owned_view.screen_reflections.Commit(std::move(reflections),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = owned_view.translucency.Commit(std::move(transparency),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = owned_view.hdr_post.Commit(std::move(hdr_post),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = owned_view.screen_overlay.Commit(std::move(screen_overlay),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = owned_view.decal_surface.Commit(std::move(decal_surface),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = owned_view.light_list.Commit(std::move(light_list),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = owned_view.virtual_shadows.Commit(std::move(virtual_shadows),
-            impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = impl_->CommitAdditionalShadows(owned_view, std::move(additional_shadows)); !committed) return committed;
+    if (auto committed = impl_->CommitAdditionalShadows(owned_view, std::move(view_features.additional)); !committed)
+        return committed;
     owned_view.render_width = owned_view.reconstruction_plan.render_active.width;
-    if (auto committed = impl_->CommitVolumetrics(owned_view, std::move(volumetrics)); !committed) return committed;
+    if (auto committed = impl_->CommitVolumetrics(owned_view, std::move(view_features.volume)); !committed)
+        return committed;
     owned_view.render_height = owned_view.reconstruction_plan.render_active.height;
     (void)UpdateViewState(owned_view.state, {width, height}, {render_width, render_height},
                           owned_view.reconstruction_plan.render_active);
@@ -997,7 +1009,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
         if (auto committed = impl_->CommitAdditionalShadows(owned_view, std::move(additional_shadows)); !committed) return committed;
     if (recreate_surfaces)
     {
-        impl_->CommitOptionTargets(*impl_->owned_views.at(impl_->active_view_id.value), targets);
+        impl_->CommitOptionTargets(owned_view, targets);
         // Candidate textures start in COMMON with Enhanced barriers. The next
         // frame must import that state even if the previous frame did not.
         owned_view.transient_textures_common = impl_->enhanced;
@@ -1648,7 +1660,10 @@ Result D3D12Renderer::Shutdown()
     impl_->terrain_tiles.clear();
     for (auto &mips : impl_->terrain_frame_mips) mips.Reset();
     for (auto &sections : impl_->terrain_frame_sections) sections.Reset();
-    impl_->static_terrain_indices.clear();
+    impl_->terrain_frame_section_counts.fill(0);
+    impl_->terrain_frame_has_meadow.fill(false);
+    impl_->terrain_frame_meadow_upper.fill(std::numeric_limits<float>::lowest());
+    impl_->static_terrain_source_indices.clear();
     impl_->dynamic_terrain_indices.clear();
     impl_->terrain_archive_digest.clear();
     impl_->terrain_planes_archive_digest.clear();
@@ -1659,11 +1674,10 @@ Result D3D12Renderer::Shutdown()
 #if defined(HS_DEVELOPMENT_TOOLS)
     impl_->terrain_archive_reads = 0;
 #endif
-    impl_->terrain_target_first_mip = UINT_MAX;
-    impl_->terrain_target_budget_mib = UINT_MAX;
     impl_->terrain_retry_budget_bytes = 0;
-    impl_->terrain_sections.clear();
+    impl_->terrain_slot_static_sections_valid.fill(false);
     impl_->static_terrain_sections.clear();
+    impl_->terrain_gpu_sections_scratch.clear();
     impl_->terrain_scene.reset();
     for (auto &texture : impl_->environment_textures) texture.Reset();
 #if defined(HS_OFFLINE_PROBE_BAKER)

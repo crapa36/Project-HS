@@ -7,6 +7,7 @@
 #include <hs/core/graphics_settings.hpp>
 #include <hs/render_data/vfx_volume_input.hpp>
 #include <cstddef>
+#include <cstring>
 #include <functional>
 #include <string_view>
 #include <vector>
@@ -32,8 +33,6 @@ inline constexpr std::uint32_t kVolumetricLightOffset=VmExternalLight;
 inline constexpr std::uint32_t kVolumetricShadowOffset=VmExternalShadow;
 inline constexpr std::uint32_t kVolumetricShadowRootOffset=VmExternalShadowRoot;
 inline constexpr std::uint32_t kVolumetricLocalShadowOffset=VmExternalLocalShadow;
-// Pure authored-input admission, shared by frame preflight and graph registration.
-[[nodiscard]] Result ValidateVfxHeroVolumes(VfxVolumeInputs, std::uint32_t gradient_rows);
 enum class VolumetricShape : std::uint32_t { Global, Box, Sphere };
 struct alignas(16) VolumetricVolume
 {
@@ -57,6 +56,33 @@ struct alignas(16) VolumetricHeroVolume
     DirectX::XMUINT4 episode_output{}; // Actual episode lo/hi, output index, effect handle.
 };
 static_assert(sizeof(VolumetricHeroVolume)==176);
+struct VolumetricHeroState
+{
+    VfxVolumeIdentity identity;
+    VolumetricHeroVolume gpu;
+    std::array<float,16> local_to_world;
+    std::array<float,6> bounds;
+    std::array<std::uint64_t,3> revisions;
+    bool operator==(const VolumetricHeroState &other) const
+    {
+        return identity==other.identity && std::memcmp(&gpu,&other.gpu,sizeof(gpu))==0 &&
+            local_to_world==other.local_to_world && bounds==other.bounds && revisions==other.revisions;
+    }
+};
+class PreparedVfxHeroVolumes
+{
+  public:
+    [[nodiscard]] bool Matches(VfxVolumeInputs inputs) const noexcept
+    { return admitted_ && source_.data()==inputs.data() && source_.size()==inputs.size(); }
+    [[nodiscard]] const std::vector<VolumetricHeroState> &Records() const noexcept { return records_; }
+  private:
+    VfxVolumeInputs source_;
+    std::vector<VolumetricHeroState> records_;
+    bool admitted_{};
+    friend Result PrepareVfxHeroVolumes(VfxVolumeInputs, std::uint32_t, PreparedVfxHeroVolumes &);
+};
+[[nodiscard]] Result PrepareVfxHeroVolumes(VfxVolumeInputs, std::uint32_t gradient_rows, PreparedVfxHeroVolumes &);
+[[nodiscard]] Result ValidateVfxHeroVolumes(VfxVolumeInputs, std::uint32_t gradient_rows);
 struct VolumetricCamera
 {
     // Camera-relative row-major row-vector transforms; translation is expressed
@@ -94,6 +120,7 @@ struct VolumetricInputs
     VolumetricCompactShadow compact_shadow;
     std::span<const VolumetricVolume> volumes;
     VfxVolumeInputs hero_volumes;
+    const PreparedVfxHeroVolumes *prepared_heroes{};
     // Resident authored VFX STBN: exactly R8_UNORM, Texture2DArray 64x64x64,
     // one mip and one sample. Required/read/retained only with active heroes.
     VolumetricGuide hero_blue_noise;
@@ -141,6 +168,21 @@ struct VolumetricLayout
     bool history{}, hero{}, shadows{}, local_shadows{}, compact_shadow{};
     bool root_static{}, root_dynamic{}, probe_ready{};
 };
+// Minimal values needed to compare graph topology and volumetric history.
+// Native graph bindings remain in VolumetricInputs and are checked at bind time.
+struct VolumetricShapeInput
+{
+    std::uint32_t frame_slot{};
+    std::size_t volume_count{};
+    VfxVolumeInputs hero_volumes;
+    const PreparedVfxHeroVolumes *prepared_heroes{};
+    bool reset_history{};
+    std::uint64_t frame_index{};
+    VolumetricRevisions revisions{};
+    const VolumetricCamera *previous_camera{};
+    ID3D12Resource *hero_blue_noise{}, *hero_gradient{}, *hero_noise_volume{};
+    bool shadows{}, local_shadows{}, compact_shadow{}, root_static{}, root_dynamic{};
+};
 struct VolumetricStorage;
 class RendererPipelineCache;
 class VolumetricCandidate
@@ -170,9 +212,8 @@ class VolumetricSystem
         const VolumetricLayout &,VolumetricOutputs &);
     [[nodiscard]] bool MatchesLayout(const VolumetricInputs &,const VolumetricLayout &) const noexcept;
     // Pre-restore shape comparison excludes graph versions, checked at binding.
-    [[nodiscard]] bool MatchesShape(const VolumetricInputs &,
-        const VolumetricLayout &,bool shadows,bool local_shadows,
-        bool root_static,bool root_dynamic,bool probe_ready) const noexcept;
+    [[nodiscard]] bool MatchesShape(const VolumetricShapeInput &,
+        const VolumetricLayout &,bool probe_ready) const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &,const CompletionSet &,bool success);
     void ResetHistory() noexcept;
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);

@@ -6,6 +6,7 @@
 #include <DirectXPackedVector.h>
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -1140,6 +1141,10 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         };
         write_floats("jitter_uv", &captured_constants.surface_jitter_uv.x, 4);
         write_floats("options", &captured_constants.temporal_options.x, 4);
+        metadata_output << std::format(
+            "    \"particle_terrain\": {{\"upper_bound\": {}, \"origin_y\": {}, \"section_count\": {}}},\n",
+            captured_constants.particle_terrain.x, captured_constants.particle_terrain.y,
+            std::bit_cast<std::uint32_t>(captured_constants.particle_terrain.w));
         write_floats("camera_time", &captured_constants.camera_time.x, 4);
         write_floats("previous_grass_state", &captured_constants.previous_grass_state.x, 4);
         write_floats("previous_grass_origin_delta", &captured_constants.previous_grass_origin_delta.x, 4);

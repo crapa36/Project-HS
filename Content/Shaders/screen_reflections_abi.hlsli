@@ -56,10 +56,10 @@
 // Conditional lists are consumed only when the matching topology is present.
 #define HS_SSR_SURFACE_READS(R) R(Depth) R(Base) R(Normal) R(Metadata) R(Material) R(Parameters)
 #define HS_SSR_TRACE_READS(R) R(Opaque) R(Environment)
-#define HS_SSR_TRACE_WRITES(W) W(Hierarchy) W(Raw)
-#define HS_SSR_TEMPORAL_READS(R,U) U(Raw) R(Motion) R(SurfaceHistory)
+#define HS_SSR_TRACE_WRITES(W) W(Hierarchy) W(Raw) W(Validation)
+#define HS_SSR_TEMPORAL_READS(R,U) U(Raw) U(Validation) R(Motion) R(SurfaceHistory)
 #define HS_SSR_HISTORY_READS(U) U(Previous) U(PreviousValidation)
-#define HS_SSR_TEMPORAL_WRITES(W) W(Current) W(Validation)
+#define HS_SSR_TEMPORAL_WRITES(W) W(Current)
 #define HS_SSR_SPATIAL_READS(R,U) U(Current) U(Validation) R(Opaque) R(Environment)
 #define HS_SSR_SPATIAL_WRITES(W) W(Composed)
 

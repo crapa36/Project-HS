@@ -85,7 +85,8 @@ struct TranslucencyDiagnosticsCapture::Impl
         ComPtr<ID3D12CommandQueue> queue;
         std::uint64_t frame{}, tick{}, frequency{};
         std::uint32_t view{}, width{}, height{};
-        bool pending{}, success{};
+        bool pending{}, success{}, shader_zero_initialized{};
+        std::uint32_t shader_zero_width{}, shader_zero_height{};
     };
     std::vector<std::unique_ptr<Slot>> slots;
     ComPtr<ID3D12Device> device;
@@ -96,6 +97,29 @@ struct TranslucencyDiagnosticsCapture::Impl
     std::uint64_t qpc_frequency{};
     D3D12_QUERY_TYPE statistics_type{D3D12_QUERY_TYPE_PIPELINE_STATISTICS};
     UINT statistics_bytes{sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS)};
+
+    Result PrepareShaderZero(Slot &slot)
+    {
+        if (slot.shader_zero_initialized && slot.shader_zero_width == slot.width && slot.shader_zero_height == slot.height)
+            return Result::Success();
+        void *zero{}; const D3D12_RANGE no_read{0, 0};
+        const auto mapped = slot.shader_zero.resource->Map(0, &no_read, &zero);
+        if (FAILED(mapped)) return Native("Map translucency shader zero upload", mapped);
+        if (!slot.shader_zero_initialized)
+            std::memset(zero, 0, static_cast<std::size_t>(shader_layout.phase_bytes));
+        for (UINT contributor = 0; contributor < kContributors; ++contributor)
+        {
+            const std::array<UINT, 8> header{kTranslucencyDiagnosticsShaderMagic, kTranslucencyDiagnosticsShaderVersion,
+                slot.width, slot.height, shader_layout.bitmap_words, shader_layout.pixels, 0, static_cast<UINT>(mode)};
+            std::memcpy(static_cast<std::byte *>(zero) + contributor * shader_layout.contributor_bytes,
+                header.data(), sizeof(header));
+        }
+        const D3D12_RANGE written{0, static_cast<SIZE_T>(shader_layout.phase_bytes)};
+        slot.shader_zero.resource->Unmap(0, &written);
+        slot.shader_zero_initialized = true;
+        slot.shader_zero_width = slot.width; slot.shader_zero_height = slot.height;
+        return Result::Success();
+    }
 };
 
 TranslucencyDiagnosticsCapture::TranslucencyDiagnosticsCapture() : impl_(std::make_unique<Impl>()) {}
@@ -166,11 +190,11 @@ void TranslucencyDiagnosticsCapture::Pipeline(std::uint32_t index, const D3D12_G
     std::span<const std::byte> vertex, std::span<const std::byte> pixel, std::string_view product)
 {
     auto &out = impl_->pipelines.at(index);
-    out.vertex_product = index == 3 ? "render/shader/layered_translucency_vs.dxil"
-                                    : "render/shader/layered_translucency_current_vs.dxil";
+    out.vertex_product = index == 3 || index == 5 ? "render/shader/scene_vs.dxil"
+                                                : "render/shader/scene_current_vs.dxil";
     out.pixel_product = product;
     out.vertex_sha256 = Sha256(vertex); out.pixel_sha256 = Sha256(pixel);
-    out.source_requested_flags = "RenderMaterialShader: -nologo -WX -O3 -Ges; VS vs_6_0 / PS ps_6_0; HS_GENERATED_CHARACTER_MATERIAL=1; HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS=1; product/source flags, not binary attestation";
+    out.source_requested_flags = "VS RenderRuntimeShader: -nologo -WX -O3 -Ges vs_6_0; PS RenderMaterialShader: -nologo -WX -O3 -Ges ps_6_0 HS_GENERATED_CHARACTER_MATERIAL=1 HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS=1; product/source flags, not binary attestation";
     out.cull_mode = desc.RasterizerState.CullMode; out.fill_mode = desc.RasterizerState.FillMode;
     out.front_counter_clockwise = desc.RasterizerState.FrontCounterClockwise != FALSE;
     out.depth_clip_enabled = desc.RasterizerState.DepthClipEnable != FALSE;
@@ -227,18 +251,7 @@ Result TranslucencyDiagnosticsCapture::Begin(RenderGraphBuilder &graph, const La
     slot.view = inputs.view_id; slot.width = inputs.render_active.width; slot.height = inputs.render_active.height;
     slot.frequency = inputs.direct_timestamp_frequency; slot.success = false;
     if (slot.contributors.empty()) return Result::Success();
-    void *zero{}; const D3D12_RANGE no_read{0, 0};
-    auto zero_result = slot.shader_zero.resource->Map(0, &no_read, &zero);
-    if (FAILED(zero_result)) return Native("Map translucency shader zero-upload owner", zero_result);
-    std::memset(zero, 0, static_cast<std::size_t>(impl_->shader_layout.phase_bytes));
-    for (UINT contributor = 0; contributor < kContributors; ++contributor)
-    {
-        const std::array<UINT, 8> header{kTranslucencyDiagnosticsShaderMagic, kTranslucencyDiagnosticsShaderVersion, slot.width, slot.height,
-            impl_->shader_layout.bitmap_words, impl_->shader_layout.pixels, 0, static_cast<UINT>(impl_->mode)};
-        std::memcpy(static_cast<std::byte *>(zero) + contributor * impl_->shader_layout.contributor_bytes, header.data(), sizeof(header));
-    }
-    const D3D12_RANGE zero_written{0, static_cast<SIZE_T>(impl_->shader_layout.phase_bytes)};
-    slot.shader_zero.resource->Unmap(0, &zero_written);
+    if (auto prepared = impl_->PrepareShaderZero(slot); !prepared) return prepared;
     for (auto *resource : {&slot.shader_zero, &slot.arguments})
         if (auto certified = resource->EnsureNativeContract(impl_->device.Get()); !certified)
             return certified;
@@ -377,20 +390,7 @@ Result TranslucencyDiagnosticsCapture::BindRetainedBegin(RenderGraphBuilder &gra
     slot.height = inputs.render_active.height;
     slot.frequency = inputs.direct_timestamp_frequency; slot.success = false;
     if (slot.contributors.empty()) return Result::Success();
-    void *zero{}; const D3D12_RANGE no_read{0, 0};
-    const auto mapped = slot.shader_zero.resource->Map(0, &no_read, &zero);
-    if (FAILED(mapped)) return Native("Map retained translucency shader zero upload", mapped);
-    std::memset(zero, 0, static_cast<std::size_t>(impl_->shader_layout.phase_bytes));
-    for (UINT contributor = 0; contributor < kContributors; ++contributor)
-    {
-        const std::array<UINT, 8> header{kTranslucencyDiagnosticsShaderMagic, kTranslucencyDiagnosticsShaderVersion,
-            slot.width, slot.height, impl_->shader_layout.bitmap_words,
-            impl_->shader_layout.pixels, 0, static_cast<UINT>(impl_->mode)};
-        std::memcpy(static_cast<std::byte *>(zero) + contributor *
-            impl_->shader_layout.contributor_bytes, header.data(), sizeof(header));
-    }
-    const D3D12_RANGE zero_written{0, static_cast<SIZE_T>(impl_->shader_layout.phase_bytes)};
-    slot.shader_zero.resource->Unmap(0, &zero_written);
+    if (auto prepared = impl_->PrepareShaderZero(slot); !prepared) return prepared;
     if (!graph.BindBuffer(layout.zero_upload, {slot.shader_zero.resource.Get(),
             slot.shader_zero.graph_completion, slot.shader_zero.graph_queue, {},
             slot.shader_zero.NativeContract()},

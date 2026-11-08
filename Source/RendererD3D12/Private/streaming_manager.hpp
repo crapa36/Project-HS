@@ -57,11 +57,8 @@ class StreamingManager
                                     std::string_view content_generation) noexcept;
     [[nodiscard]] bool BeginUpload(StreamingRequestId request,
                                    std::string_view content_generation) noexcept;
-    [[nodiscard]] bool BeginMappingOnly(StreamingRequestId request,
-                                        std::string_view content_generation) noexcept;
-    // Starts a payloadless GPU copy from already-resident source data. This is
-    // distinct from AssetIO decode and from reserved-tile mapping operations.
-    [[nodiscard]] bool BeginGpuCopy(StreamingRequestId request,
+    // The mapping or copy uses resident backing and needs no decoded host payload.
+    [[nodiscard]] bool BeginResidentTransfer(StreamingRequestId request,
                                     std::string_view content_generation) noexcept;
     [[nodiscard]] bool SubmitUpload(StreamingRequestId request,
                                     std::string_view content_generation,

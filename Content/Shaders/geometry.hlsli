@@ -26,7 +26,7 @@ struct GeometryPrimitive
     uint CanonicalPrimitive : SV_PrimitiveID;
 };
 
-void EmitGeometryMesh(uint3 group_id, uint thread_id, bool shadow,
+void EmitGeometryMesh(uint3 group_id, uint thread_id, bool shadow, bool evaluate_history,
                       out SceneOutput vertices[64], out uint3 triangles[124],
                       out GeometryPrimitive primitives[124])
 {
@@ -64,7 +64,7 @@ void EmitGeometryMesh(uint3 group_id, uint thread_id, bool shadow,
             (first_ref + thread_id) * 4u);
         const SceneInput input = LoadGeometryVertex(descriptors, unique_vertex);
         SceneOutput output = EvaluateSceneVertex(input, visible, unique_vertex,
-            (record.Flags & 1u) != 0u, !shadow, PassValue);
+            (record.Flags & 1u) != 0u, evaluate_history && !shadow, PassValue);
         if (shadow)
             output.Position = cached_shadow ? HsShadowProject(output.WorldPosition, PassValue)
                 : mul(float4(output.WorldPosition, 1.0), ShadowViewProjection[(PassValue & 3u) - 1u]);

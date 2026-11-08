@@ -31,12 +31,10 @@ bool HsGpuSceneSlotValid(uint slot, out uint4 header0, out uint4 header1,
                                header2, header3);
 }
 
-InstanceData HsLoadGpuSceneInstance(ByteAddressBuffer scene, uint slot)
+// Header arguments come from HsGpuSceneSlotValid on this scene and slot.
+InstanceData HsLoadGpuSceneInstance(ByteAddressBuffer scene, uint slot,
+    uint4 header1, uint4 header2, uint4 header3)
 {
-    uint4 header0, header1, header2, header3;
-    if (!HsGpuSceneSlotValid(scene, slot, header0, header1, header2, header3))
-        return (InstanceData)0;
-
     // header1: instance/transform/mesh/material offsets
     // header2: bounds/skin offsets, instance/transform strides
     // header3: mesh/material/bounds/skin strides
@@ -64,6 +62,14 @@ InstanceData HsLoadGpuSceneInstance(ByteAddressBuffer scene, uint slot)
     return result;
 }
 
+InstanceData HsLoadGpuSceneInstance(ByteAddressBuffer scene, uint slot)
+{
+    uint4 header0, header1, header2, header3;
+    if (!HsGpuSceneSlotValid(scene, slot, header0, header1, header2, header3))
+        return (InstanceData)0;
+    return HsLoadGpuSceneInstance(scene, slot, header1, header2, header3);
+}
+
 InstanceData HsLoadGpuSceneInstance(uint slot)
 {
     return HsLoadGpuSceneInstance(HsGpuSceneTables, slot);
@@ -80,17 +86,28 @@ float4 HsLoadGpuSceneLocalBounds(uint slot)
         header2.x + bounds_index * header3.z));
 }
 
-uint4 HsLoadGpuSceneSkin(ByteAddressBuffer scene, uint slot)
+// Reuse the same validated scene header for skin data and its deformation strides.
+uint4 HsLoadGpuSceneSkin(ByteAddressBuffer scene, uint slot,
+    uint4 header1, uint4 header2, uint4 header3, out uint2 strides)
 {
-    uint4 header0, header1, header2, header3;
-    if (!HsGpuSceneSlotValid(scene, slot, header0, header1, header2, header3))
-        return uint4(0xffffffffu, 0u, 0u, 0u);
+    strides = 0u;
     const uint instance_address = header1.x + slot * header2.z;
     const uint skin_index = scene.Load(instance_address + 16);
     if (skin_index == 0xffffffffu)
         return uint4(0xffffffffu, 0u, 0u, 0u);
-    return scene.Load4(
-        header2.y + skin_index * header3.w);
+    const uint address = header2.y + skin_index * header3.w;
+    if (header3.w == 32u) strides = scene.Load2(address + 16u);
+    return scene.Load4(address);
+}
+
+uint4 HsLoadGpuSceneSkin(uint slot, out uint2 strides)
+{
+    uint bytes;
+    HsViewSkinBindings.GetDimensions(bytes);
+    strides = 0u;
+    if (slot >= bytes / 32u) return uint4(0xffffffffu, 0u, 0u, 0u);
+    strides = HsViewSkinBindings.Load2(slot * 32u + 16u);
+    return HsViewSkinBindings.Load4(slot * 32u);
 }
 
 uint4 HsLoadGpuSceneSkin(uint slot)
@@ -99,22 +116,6 @@ uint4 HsLoadGpuSceneSkin(uint slot)
     HsViewSkinBindings.GetDimensions(bytes);
     return slot < bytes / 32u ? HsViewSkinBindings.Load4(slot * 32u)
         : uint4(0xffffffffu, 0u, 0u, 0u);
-}
-
-uint2 HsLoadGpuSceneSkinStrides(ByteAddressBuffer scene, uint slot)
-{
-    uint4 header0, header1, header2, header3;
-    if (!HsGpuSceneSlotValid(scene, slot, header0, header1, header2, header3)) return 0u;
-    const uint instance_address = header1.x + slot * header2.z;
-    const uint skin_index = scene.Load(instance_address + 16);
-    if (skin_index == 0xffffffffu || header3.w != 32u) return 0u;
-    return scene.Load2(header2.y + skin_index * header3.w + 16u);
-}
-uint2 HsLoadGpuSceneSkinStrides(uint slot)
-{
-    uint bytes;
-    HsViewSkinBindings.GetDimensions(bytes);
-    return slot < bytes / 32u ? HsViewSkinBindings.Load2(slot * 32u + 16u) : 0u;
 }
 
 #endif

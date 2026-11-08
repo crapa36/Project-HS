@@ -14,6 +14,10 @@
 
 #define HS_TERRAIN_GPU_SECTION_FIELDS(F2, U1, U2) \
     F2(center) F2(span) F2(rotation) \
-    U1(mesh) U1(seed) U1(pageSlice) U1(pageEdge) U2(tileCount)
+    U1(mesh) U1(seed) U1(pageSlice) U1(pageEdge) U2(tileCount) F2(heightTransform)
+
+// qualityMipPlusOne is zero until the plane is available to this frame.
+#define HS_TERRAIN_GPU_PLANE_MIP_FIELDS(U1) \
+    U1(firstMip) U1(residentMinMip) U1(mipCount) U1(qualityMipPlusOne)
 
 #endif

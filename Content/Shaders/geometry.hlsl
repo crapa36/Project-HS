@@ -21,6 +21,11 @@ SceneOutput ClusterSceneVS(uint vertex_id : SV_VertexID, uint instance_id : SV_I
     return EvaluateClusterVertex(vertex_id, instance_id, true);
 }
 
+SceneOutput ClusterSceneCurrentVS(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
+{
+    return EvaluateClusterVertex(vertex_id, instance_id, false);
+}
+
 SceneOutput ClusterShadowVS(uint vertex_id : SV_VertexID, uint instance_id : SV_InstanceID)
 {
     SceneOutput output = EvaluateClusterVertex(vertex_id, instance_id, false);
@@ -36,7 +41,16 @@ void SceneMS(uint3 group_id : SV_GroupID, uint thread_id : SV_GroupIndex,
              out vertices SceneOutput vertices[64], out indices uint3 triangles[124],
              out primitives GeometryPrimitive primitives[124])
 {
-    EmitGeometryMesh(group_id, thread_id, false, vertices, triangles, primitives);
+    EmitGeometryMesh(group_id, thread_id, false, true, vertices, triangles, primitives);
+}
+
+[outputtopology("triangle")]
+[numthreads(64, 1, 1)]
+void SceneCurrentMS(uint3 group_id : SV_GroupID, uint thread_id : SV_GroupIndex,
+             out vertices SceneOutput vertices[64], out indices uint3 triangles[124],
+             out primitives GeometryPrimitive primitives[124])
+{
+    EmitGeometryMesh(group_id, thread_id, false, false, vertices, triangles, primitives);
 }
 
 [outputtopology("triangle")]
@@ -45,5 +59,5 @@ void ShadowMS(uint3 group_id : SV_GroupID, uint thread_id : SV_GroupIndex,
               out vertices SceneOutput vertices[64], out indices uint3 triangles[124],
               out primitives GeometryPrimitive primitives[124])
 {
-    EmitGeometryMesh(group_id, thread_id, true, vertices, triangles, primitives);
+    EmitGeometryMesh(group_id, thread_id, true, false, vertices, triangles, primitives);
 }

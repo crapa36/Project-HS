@@ -163,6 +163,12 @@ struct SsrGuide
     uint2 metadata;
     bool valid;
 };
+HsSurfaceClosure SsrLoadClosure(SsrGuide g)
+{
+    const int3 pixel = int3(g.pixel, 0);
+    return HsReflectionLoadClosure(uint2(g.pixel), g.metadata,
+        GBufferBase.Load(pixel), GBufferNormal.Load(pixel).xy, GBufferMaterial.Load(pixel));
+}
 SsrGuide SsrLoadGuide(int2 pixel)
 {
     SsrGuide g = (SsrGuide)0;
@@ -178,7 +184,7 @@ SsrGuide SsrLoadGuide(int2 pixel)
     }
     if (g.valid)
     {
-        HsSurfaceClosure closure = HsReflectionLoadClosure(uint2(g.pixel));
+        HsSurfaceClosure closure = SsrLoadClosure(g);
         g.relative = SsrRelativePosition(g.pixel, g.depth);
         g.view_depth = mul(float4(g.relative, 0.0), SsrWorldToView).z;
         g.normal = normalize(closure.normal);
@@ -314,10 +320,15 @@ void ScreenReflectionTraceCS(uint3 dispatch : SV_DispatchThreadID)
 {
     if (any(dispatch.xy >= uint2(SsrTraceSize.xy))) return;
     SsrGuide g = SsrGuideForTrace(dispatch.xy);
+    // Share the selected surface guide with temporal/spatial filtering before
+    // the ray's thin-surface orientation changes its lighting normal.
+    SsrCurrentValidation[dispatch.xy] = g.valid
+        ? uint4(asuint(g.view_depth), SsrPackNormalRoughness(g.normal, g.roughness),
+            HsPackSurfaceMetadata(g.metadata), 0u) : uint4(0, 0, 0, 0);
     float4 accumulated = 0.0;
     if (g.valid && g.roughness < SsrTraceParameters.w)
     {
-        HsSurfaceClosure closure = HsReflectionLoadClosure(uint2(g.pixel));
+        HsSurfaceClosure closure = SsrLoadClosure(g);
         float3 view = normalize(-g.relative);
         closure = HsBsdfOrientThinSurface(closure, view);
         g.normal = normalize(closure.normal);
@@ -330,7 +341,7 @@ void ScreenReflectionTraceCS(uint3 dispatch : SV_DispatchThreadID)
             HsBsdfSampleResult sample = HsBsdfSamplePrepared(closure, view, sampling,
                 SsrRandom(dispatch.xy, sampleIndex, 0),
                 float2(SsrRandom(dispatch.xy, sampleIndex, 1), SsrRandom(dispatch.xy, sampleIndex, 2)));
-            float cosine = dot(normalize(closure.normal), sample.wi);
+            float cosine = dot(g.normal, sample.wi);
             if (!sample.valid || sample.pdf <= 0.0 || cosine <= 0.0) continue;
             int2 hitPixel; float confidence;
             if (!SsrTraceRay(g, sample.wi, hitPixel, confidence)) continue;
@@ -387,22 +398,18 @@ void ScreenReflectionTemporalCS(uint3 dispatch : SV_DispatchThreadID)
             [unroll] for (int x = -1; x <= 1; ++x)
             {
                 int2 p = clamp(int2(pixel) + int2(x, y), int2(0, 0), int2(SsrTraceSize.xy) - 1);
-                SsrGuide other;
                 float3 value;
                 if (all(uint2(p) == pixel))
                 {
-                    other = g;
                     value = current.rgb;
                 }
                 else
                 {
-                    other = SsrGuideForTrace(uint2(p));
+                    // Use the same packed guide contract as history/spatial;
+                    // do not decode material closures for every neighbor.
+                    if (!SsrCompatible(SsrCurrentValidation[p], g, g.view_depth)) continue;
                     value = SsrRawOutput[p].rgb;
                 }
-                if (!other.valid || any(other.metadata != g.metadata) ||
-                    abs(other.view_depth - g.view_depth) > max(0.01, g.view_depth * SsrFilterParameters.x) ||
-                    dot(other.normal, g.normal) < SsrFilterParameters.y ||
-                    abs(other.roughness - g.roughness) > SsrFilterParameters.w) continue;
                 lo = min(lo, value); hi = max(hi, value);
             }
             history /= weightSum; history.rgb = clamp(history.rgb, lo, hi);
@@ -413,9 +420,6 @@ void ScreenReflectionTemporalCS(uint3 dispatch : SV_DispatchThreadID)
         }
     }
     SsrCurrentRadiance[pixel] = result;
-    SsrCurrentValidation[pixel] = g.valid
-        ? uint4(asuint(g.view_depth), SsrPackNormalRoughness(g.normal, g.roughness),
-            HsPackSurfaceMetadata(g.metadata), 0u) : uint4(0, 0, 0, 0);
 }
 [numthreads(8, 8, 1)]
 void ScreenReflectionSpatialCS(uint3 dispatch : SV_DispatchThreadID)

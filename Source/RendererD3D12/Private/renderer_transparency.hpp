@@ -67,6 +67,8 @@ struct LayeredTranslucencyInputs
     std::uint32_t descriptor_stride{};
     std::span<const LayeredTranslucencySceneRead> peel_reads;
     std::span<const LayeredTranslucencySceneRead> scene_reads;
+    // Previous geometry is consumed only by motion-writing front/water phases.
+    ResourceVersion previous_instances{}, previous_skin{};
     LayeredTranslucencyDraw draw;
     // Optional original CPU descriptor owner with the same logical layout as shader_heap.
     ID3D12DescriptorHeap *descriptor_source_heap{};
@@ -109,6 +111,7 @@ struct LayeredTranslucencyLayout
     std::array<ResourceVersion, 4> inputs{};
     ResourceVersion background{};
     std::vector<LayeredTranslucencySceneRead> peel_reads, scene_reads;
+    ResourceVersion previous_instances{}, previous_skin{};
     std::array<TextureHandle, kLayeredTranslucencyMaxLayers> front{}, identity{}, optical_component{};
     TextureHandle exit{};
     std::array<TextureHandle, 2> color{};

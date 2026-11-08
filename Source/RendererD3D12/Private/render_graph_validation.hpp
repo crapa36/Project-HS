@@ -4,6 +4,7 @@
 
 #include <array>
 #include <span>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -64,6 +65,7 @@ struct CompiledSchedule
     std::vector<std::uint32_t> execution_order;
     std::array<std::vector<std::uint32_t>, 3> queue_orders;
     std::vector<QueueDependency> cross_queue_dependencies;
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> explicit_ordering;
     std::vector<std::vector<std::uint32_t>> predecessors;
 
     void Clear() noexcept
@@ -71,6 +73,7 @@ struct CompiledSchedule
         execution_order.clear();
         for (auto &order : queue_orders) order.clear();
         cross_queue_dependencies.clear();
+        explicit_ordering.clear();
         predecessors.clear();
     }
 };

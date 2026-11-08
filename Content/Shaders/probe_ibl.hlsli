@@ -10,7 +10,8 @@ StructuredBuffer<float4> HsProbeCosineSh : register(t2, space15);
 float3 HsProbeLocalDirection(float3 worldDirection)
 {
     // Inverse of the authored positive +Y rotation: local probe -> world.
-    const float3 d=normalize(worldDirection);
+    // Explicit-LOD cubemap lookups use direction ratios; only SH needs unit length.
+    const float3 d=worldDirection;
     return float3(ProbeOptions.x*d.x-ProbeOptions.y*d.z,d.y,
                   ProbeOptions.y*d.x+ProbeOptions.x*d.z);
 }
@@ -34,7 +35,7 @@ void HsProbeShBasis(float3 n, out float basis[9])
 }
 float3 HsProbeIrradiance(float3 worldNormal, float3 kernel)
 {
-    float basis[9]; HsProbeShBasis(HsProbeLocalDirection(worldNormal),basis);
+    float basis[9]; HsProbeShBasis(HsProbeLocalDirection(normalize(worldNormal)),basis);
     float3 irradiance=0;
     [unroll] for(uint i=0;i<9;++i)
         irradiance+=HsProbeCosineSh[i].rgb*basis[i]*kernel[i==0?0:i<4?1:2];

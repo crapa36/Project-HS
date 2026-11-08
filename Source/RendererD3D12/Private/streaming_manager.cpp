@@ -87,18 +87,7 @@ bool StreamingManager::BeginUpload(StreamingRequestId request,
     return true;
 }
 
-bool StreamingManager::BeginMappingOnly(StreamingRequestId request,
-                                       std::string_view content_generation) noexcept
-{
-    const auto found = pages_.find(request.value);
-    if (found == pages_.end() || found->second.state != StreamingPageState::Requested ||
-        found->second.content_generation != content_generation)
-        return false;
-    found->second.state = StreamingPageState::Uploading;
-    return true;
-}
-
-bool StreamingManager::BeginGpuCopy(StreamingRequestId request,
+bool StreamingManager::BeginResidentTransfer(StreamingRequestId request,
                                    std::string_view content_generation) noexcept
 {
     const auto found = pages_.find(request.value);

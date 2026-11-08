@@ -291,12 +291,6 @@ struct TopologyValues
     std::vector<Resource> resources;
     std::vector<PassValues> passes;
     std::vector<std::pair<std::uint32_t, std::uint32_t>> ordering;
-    struct AliasValues
-    {
-        std::vector<D3D12_RESOURCE_DESC> descriptors;
-        bool aliased{};
-    };
-    std::vector<AliasValues> alias_values;
 
     enum class MismatchKind : std::uint8_t
     {
@@ -415,7 +409,7 @@ struct TopologyValues
 
     void Capture(std::span<LogicalResource> current_resources, std::span<Pass> current_passes,
                  const std::vector<std::pair<std::uint32_t, std::uint32_t>> &current_ordering,
-                 const render_graph::CompiledSchedule &schedule, const render_graph::AliasPlan &aliases)
+                 const render_graph::CompiledSchedule &schedule)
     {
         resources.clear(); resources.reserve(current_resources.size());
         passes.clear(); passes.reserve(current_passes.size());
@@ -465,18 +459,6 @@ struct TopologyValues
                 if (resource.first_use == UINT32_MAX) resource.first_use = position;
                 resource.last_use = position;
             }
-        alias_values.clear();
-        alias_values.reserve(aliases.groups.size());
-        for (const auto &group : aliases.groups)
-        {
-            auto &values = alias_values.emplace_back();
-            values.descriptors.reserve(group.resources.size());
-            for (const auto resource : group.resources)
-            {
-                values.descriptors.push_back(resources[resource].descriptor);
-                values.aliased |= aliases.resource_groups[resource] != render_graph::AliasPlan::kExcluded;
-            }
-        }
         // Finish allocations before transferring declaration storage and redirecting borrows.
         for (std::size_t i = 0; i < current_resources.size(); ++i)
         {
@@ -511,14 +493,6 @@ struct TopologyValues
     if (!completion.native_fence_owner && !completion.value) return true;
     return completion.native_fence_owner && completion.value && completion.value != UINT64_MAX &&
         SameDevice(static_cast<ID3D12Fence *>(completion.native_fence_owner.get()), device);
-}
-
-[[nodiscard]] const ExternalResourceAccess *ExternalAccess(const Pass &pass, ResourceHandle resource)
-{
-    if (!pass.external) return nullptr;
-    const auto found = std::find_if(pass.external->accesses.begin(), pass.external->accesses.end(),
-        [&](const auto &access) { return access.resource.value == resource.value && access.resource.kind == resource.kind; });
-    return found == pass.external->accesses.end() ? nullptr : &*found;
 }
 
 [[nodiscard]] D3D12_RESOURCE_STATES LegacyState(ResourceKind kind, Access access) noexcept
@@ -1190,7 +1164,9 @@ struct RenderGraphQueueExecutor::Impl
     GraphExecutionStats stats{};
     std::vector<ExternalRetention> external_retained;
     // Only CPU values survive Execute; recording tasks join before these are reused.
+    // Keep synthesized batch capacity; Execute exposes only its current active prefix.
     std::vector<Batch> batches;
+    std::size_t active_batch_count{};
     std::vector<RecordingBatch> recording_batches;
     std::vector<std::size_t> submission_ends;
     // Indexed by batch slot so scratch for synthesized join/export batches
@@ -1198,11 +1174,11 @@ struct RenderGraphQueueExecutor::Impl
     std::vector<std::vector<std::uint64_t>> batch_resource_memberships;
     std::vector<ResourceState> resource_states;
     std::vector<std::uint32_t> submission_order;
-    std::vector<std::size_t> counted_blocks, ordering_predecessor;
+    std::vector<std::size_t> ordering_predecessor;
     std::vector<bool> shareable, waits_before, signal_after;
     std::vector<Result> record_results;
     std::vector<std::uint64_t> signals;
-    std::vector<std::pair<std::uint32_t, std::size_t>> pass_positions;
+    std::vector<std::size_t> pass_submission_positions;
     std::vector<ID3D12CommandList *> lists;
 
     void ReleaseCompletedExternal(const CompletionSet &completed)
@@ -1554,21 +1530,17 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     };
     impl_->stats.transient_resource_count = 0;
     impl_->stats.transient_backing_bytes = 0;
-    auto &counted_blocks = impl_->counted_blocks;
-    counted_blocks.clear();
+    // Prepare claims a distinct pool entry for each alias group.
     for (const auto &group : g.alias_plan.groups)
     {
         impl_->stats.transient_resource_count += static_cast<std::uint32_t>(group.resources.size());
         if (group.resources.empty()) continue;
         const auto pool_index = g.resources[group.resources.front()].pool_index;
-        if (pool_index == SIZE_MAX ||
-            std::find(counted_blocks.begin(), counted_blocks.end(), pool_index) != counted_blocks.end())
-            continue;
-        counted_blocks.push_back(pool_index);
+        if (pool_index == SIZE_MAX) continue;
+        ++impl_->stats.transient_block_count;
         if (pool_index < g.pool->entries.size())
             impl_->stats.transient_backing_bytes += g.pool->entries[pool_index].size;
     }
-    impl_->stats.transient_block_count = static_cast<std::uint32_t>(counted_blocks.size());
     impl_->stats.alias_activation_count = g.alias_plan.alias_activation_count;
     impl_->stats.transient_bytes_without_aliasing = g.alias_plan.transient_bytes_without_aliasing;
     auto *tasks = options ? options->task_system : nullptr;
@@ -1583,11 +1555,9 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     auto &slot = impl_->frames[frame_slot];
     if (auto result = Wait(slot.completion); !result) return result;
     slot.completion = {};
-    impl_->ReleaseCompletedExternal(Completed());
 
     using BarrierOperation = Impl::BarrierOperation;
     using PlannedBarrier = Impl::PlannedBarrier;
-    using Batch = Impl::Batch;
     using ResourceState = Impl::ResourceState;
     // Legacy ownership, promotion and decay retain the single-queue path.
     const bool shared_readers = barriers == BarrierMode::Enhanced;
@@ -1604,11 +1574,11 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
                 !g.topology.resources[index].excludes_shared_reads;
         }
     }
-    auto &batches = impl_->batches;
+    auto &batch_storage = impl_->batches;
     auto &batch_resource_memberships = impl_->batch_resource_memberships;
-    for (std::size_t index = 0; index < batches.size(); ++index)
+    for (std::size_t index = 0; index < impl_->active_batch_count; ++index)
     {
-        auto &batch = batches[index];
+        auto &batch = batch_storage[index];
         if (index < batch_resource_memberships.size())
             render_graph::ResetBatchResourceMembership(batch.resources, batch_resource_memberships[index]);
         else
@@ -1616,9 +1586,18 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             assert(batch.resources.empty());
             batch.resources.clear();
         }
+        batch.Reset();
     }
-    batches.resize(g.passes.size());
-    for (auto &batch : batches) batch.Reset();
+    if (batch_storage.size() < g.passes.size()) batch_storage.resize(g.passes.size());
+    auto &batch_count = impl_->active_batch_count;
+    batch_count = g.passes.size();
+    const auto append_batch = [&](QueueHint queue) {
+        const auto index = static_cast<std::uint32_t>(batch_count);
+        if (index == batch_storage.size()) batch_storage.emplace_back();
+        ++batch_count;
+        batch_storage[index].queue = queue;
+        return index;
+    };
     auto &submission_order = impl_->submission_order;
     submission_order.clear();
     auto &states = impl_->resource_states;
@@ -1634,7 +1613,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
                           resource.initial_queue});
     }
     const auto include_resource = [&](std::uint32_t batch, std::uint32_t resource) {
-        auto &target = batches[batch];
+        auto &target = batch_storage[batch];
         // A pass batch already contains each validated use in declaration order.
         // Only synthesized batches need dynamic membership tracking.
         if (target.pass != UINT32_MAX) return;
@@ -1648,23 +1627,20 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     };
     const auto depend = [&](std::uint32_t consumer, std::uint32_t producer) {
         if (producer == UINT32_MAX || consumer == producer) return;
-        auto &dependencies = batches[consumer].dependencies;
+        auto &dependencies = batch_storage[consumer].dependencies;
         if (std::find(dependencies.begin(), dependencies.end(), producer) == dependencies.end())
             dependencies.push_back(producer);
     };
     const auto include_external_import = [&](std::uint32_t batch, std::uint32_t resource) {
         const auto &external = g.resources[resource].imported_external_completion;
         if (!external.native_fence_owner && !external.resource_lease) return;
-        auto &imports = batches[batch].external_imports;
+        auto &imports = batch_storage[batch].external_imports;
         if (std::find(imports.begin(), imports.end(), resource) == imports.end()) imports.push_back(resource);
     };
     const auto join_readers = [&](std::uint32_t resource, ResourceState &state) {
         // A release cannot run in one concurrent reader's list. Join all readers
         // before a barrier-only list changes the shared SHADER_RESOURCE layout.
-        Batch joined;
-        joined.queue = state.queue;
-        const auto index = static_cast<std::uint32_t>(batches.size());
-        batches.push_back(std::move(joined));
+        const auto index = append_batch(state.queue);
         for (const auto reader : state.readers) depend(index, reader);
         include_resource(index, resource);
         submission_order.push_back(index);
@@ -1679,18 +1655,15 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             auto &initial = initial_releases[QueueIndex(state.queue)];
             if (initial == UINT32_MAX)
             {
-                Batch prefix;
-                prefix.queue = state.queue;
-                initial = static_cast<std::uint32_t>(batches.size());
-                batches.push_back(std::move(prefix));
+                initial = append_batch(state.queue);
                 submission_order.push_back(initial);
             }
             state.batch = initial;
-            batches[initial].imported.Merge(g.resources[resource].imported_completion);
+            batch_storage[initial].imported.Merge(g.resources[resource].imported_completion);
             include_external_import(state.batch, resource);
         }
         const auto released = Access::Common;
-        batches[state.batch].after.push_back(
+        batch_storage[state.batch].after.push_back(
             {resource, state.physical, released, BarrierOperation::Release});
         include_resource(state.batch, resource);
         state.physical = released;
@@ -1699,12 +1672,12 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     {
         const auto index = g.schedule.execution_order[position];
         const auto &pass = g.passes[index];
-        batches[index].queue = pass.queue;
-        batches[index].pass = index;
-        batches[index].position = position;
+        batch_storage[index].queue = pass.queue;
+        batch_storage[index].pass = index;
+        batch_storage[index].position = position;
         const auto &execution = g.topology.passes[index];
-        batches[index].pass_resources = execution.execution_resources;
-        const auto uses = pass.Uses();
+        batch_storage[index].pass_resources = execution.execution_resources;
+        const auto &uses = pass.Uses();
         for (std::size_t use_index = 0; use_index < uses.size(); ++use_index)
         {
             const auto &use = uses[use_index];
@@ -1750,17 +1723,17 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             if (handoff && !alias_activation) release(resource, state);
             if (state.batch == UINT32_MAX || g.resources[resource].first_use == position)
             {
-                batches[index].imported.Merge(g.resources[resource].imported_completion);
+                batch_storage[index].imported.Merge(g.resources[resource].imported_completion);
                 include_external_import(index, resource);
             }
             if (handoff && !alias_activation) depend(index, state.batch);
             if (!alias_activation && !handoff && NeedsMemoryBarrier(state.physical, incoming))
-                batches[index].before.push_back({resource, state.physical, incoming, BarrierOperation::Uav});
-            batches[index].before.push_back({resource, state.physical, incoming,
+                batch_storage[index].before.push_back({resource, state.physical, incoming, BarrierOperation::Uav});
+            batch_storage[index].before.push_back({resource, state.physical, incoming,
                 alias_activation ? BarrierOperation::Alias :
                     (handoff ? BarrierOperation::Acquire : BarrierOperation::Transition)});
             if (alias_activation)
-                batches[index].before.back().before = alias_previous;
+                batch_storage[index].before.back().before = alias_previous;
             include_resource(index, resource);
             state.logical = outgoing;
             state.physical = barriers == BarrierMode::Legacy && BufferDecays(g.resources[resource])
@@ -1777,12 +1750,9 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         if (pass.external)
         {
             // Outgoing barriers run only after the provider fence bridge.
-            Batch tail;
-            tail.queue = pass.queue;
-            tail.position = position;
-            tail.external_finish = index;
-            const auto tail_index = static_cast<std::uint32_t>(batches.size());
-            batches.push_back(std::move(tail));
+            const auto tail_index = append_batch(pass.queue);
+            batch_storage[tail_index].position = position;
+            batch_storage[tail_index].external_finish = index;
             depend(tail_index, index);
             for (const auto &use : pass.Uses())
             {
@@ -1807,7 +1777,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         if (pass == UINT32_MAX || state.physical == Access::Common ||
             state.physical == Access::Undefined)
             continue;
-        batches[pass].after.push_back(
+        batch_storage[pass].after.push_back(
             {resource, state.physical, Access::Common, BarrierOperation::Release});
         include_resource(pass, resource);
         state.physical = Access::Common;
@@ -1825,17 +1795,14 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         {
             const bool cross_queue_readers = std::any_of(state.readers.begin(), state.readers.end(),
                 [&](const auto reader) {
-                    return reader != UINT32_MAX && batches[reader].queue != state.queue;
+                    return reader != UINT32_MAX && batch_storage[reader].queue != state.queue;
                 });
             if (cross_queue_readers)
             {
                 auto &joined = final_reader_joins[QueueIndex(state.queue)];
                 if (joined == UINT32_MAX)
                 {
-                    Batch tail;
-                    tail.queue = state.queue;
-                    joined = static_cast<std::uint32_t>(batches.size());
-                    batches.push_back(std::move(tail));
+                    joined = append_batch(state.queue);
                     submission_order.push_back(joined);
                 }
                 for (const auto reader : state.readers) depend(joined, reader);
@@ -1862,17 +1829,14 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             auto export_index = external_import ? UINT32_MAX : shared_export;
             if (export_index == UINT32_MAX)
             {
-                Batch exported;
-                exported.queue = queue;
-                export_index = static_cast<std::uint32_t>(batches.size());
-                batches.push_back(std::move(exported));
+                export_index = append_batch(queue);
                 if (external_import) submission_order.push_back(export_index);
                 else shared_export = export_index;
             }
-            batches[export_index].imported.Merge(logical.imported_completion);
+            batch_storage[export_index].imported.Merge(logical.imported_completion);
             if (previous == UINT32_MAX) include_external_import(export_index, resource);
             depend(export_index, previous);
-            batches[export_index].before.push_back({resource, state.physical, target,
+            batch_storage[export_index].before.push_back({resource, state.physical, target,
                 queue != state.queue ? BarrierOperation::Acquire : BarrierOperation::Transition});
             include_resource(export_index, resource);
             state.batch = export_index;
@@ -1881,7 +1845,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         {
             // The final transition is inside the producer list, before any
             // Legacy buffer decay at ExecuteCommandLists completion.
-            batches[state.batch].after.push_back({resource, state.logical, target, BarrierOperation::Transition});
+            batch_storage[state.batch].after.push_back({resource, state.logical, target, BarrierOperation::Transition});
         }
         state.logical = target;
         state.physical = barriers == BarrierMode::Legacy && BufferDecays(logical)
@@ -1900,21 +1864,19 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         auto last_query_producer = UINT32_MAX;
         for (const auto index : submission_order)
         {
-            const auto &batch = batches[index];
+            const auto &batch = batch_storage[index];
             if (batch.queue != queue ||
                 (batch.pass == UINT32_MAX && batch.external_finish == UINT32_MAX) ||
                 query_slot_for(batch.position) == UINT32_MAX) continue;
             last_query_producer = index;
         }
         if (last_query_producer == UINT32_MAX) continue;
-        Batch resolve;
-        resolve.queue = queue;
-        resolve.resolve_timestamps = true;
-        const auto resolve_index = static_cast<std::uint32_t>(batches.size());
-        batches.push_back(std::move(resolve));
+        const auto resolve_index = append_batch(queue);
+        batch_storage[resolve_index].resolve_timestamps = true;
         depend(resolve_index, last_query_producer);
         submission_order.push_back(resolve_index);
     }
+    const auto batches = std::span(batch_storage).first(batch_count);
     auto &signals = impl_->signals;
     signals.assign(batches.size(), 0);
     auto &waits_before = impl_->waits_before;
@@ -1923,15 +1885,14 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     signal_after.assign(batches.size(), false);
     auto &ordering_predecessor = impl_->ordering_predecessor;
     ordering_predecessor.assign(batches.size(), SIZE_MAX);
-    auto &pass_positions = impl_->pass_positions;
-    pass_positions.clear();
-    pass_positions.reserve(g.passes.size());
+    auto &pass_positions = impl_->pass_submission_positions;
+    pass_positions.resize(g.passes.size());
     for (std::size_t position = 0; position < submission_order.size(); ++position)
     {
         const auto index = submission_order[position];
         const auto &batch = batches[index];
         if (batch.pass != UINT32_MAX)
-            pass_positions.emplace_back(g.passes[batch.pass].id, position);
+            pass_positions[batch.pass] = position;
         for (const auto queue : {QueueHint::Direct, QueueHint::Compute, QueueHint::Copy})
             if (queue != batch.queue && batch.imported.Required(queue)) waits_before[index] = true;
         for (const auto producer : batch.dependencies)
@@ -1941,16 +1902,11 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
                 signal_after[producer] = true;
             }
     }
-    std::sort(pass_positions.begin(), pass_positions.end());
-    const auto &ordering = g.restored_plan ? g.topology.ordering : g.ordering_dependencies;
-    for (const auto &[producer_id, consumer_id] : ordering)
+    for (const auto &[producer, consumer] : g.schedule.explicit_ordering)
     {
-        const auto producer = std::lower_bound(pass_positions.begin(), pass_positions.end(),
-            std::pair{producer_id, std::size_t{0}})->second;
-        const auto consumer = std::lower_bound(pass_positions.begin(), pass_positions.end(),
-            std::pair{consumer_id, std::size_t{0}})->second;
-        auto &previous = ordering_predecessor[submission_order[consumer]];
-        previous = previous == SIZE_MAX ? producer : std::max(previous, producer);
+        auto &previous = ordering_predecessor[consumer];
+        const auto position = pass_positions[producer];
+        previous = previous == SIZE_MAX ? position : std::max(previous, position);
     }
     const auto standalone = [&](std::uint32_t index) {
         const auto &batch = batches[index];
@@ -2218,11 +2174,18 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
 
     // Allocate completion/ownership storage before any submission. Callback
     // failure must not leave retirement dependent on a later host allocation.
-    std::vector<Impl::ExternalRetention> pending_operations(batches.size());
-    std::vector<Impl::ExternalRetention> pending_imports(g.resources.size());
-    std::vector<std::size_t> import_retention(g.resources.size(), SIZE_MAX);
-    std::vector<std::size_t> operation_retention(batches.size(), SIZE_MAX);
-    impl_->external_retained.reserve(impl_->external_retained.size() + g.resources.size() + g.passes.size());
+    const bool has_external_operations = std::ranges::any_of(batches, [&](const auto &batch) {
+        return batch.pass != UINT32_MAX && g.passes[batch.pass].external;
+    });
+    const bool has_external_imports = std::ranges::any_of(batches, [](const auto &batch) {
+        return !batch.external_imports.empty();
+    });
+    std::vector<Impl::ExternalRetention> pending_operations(has_external_operations ? batches.size() : 0);
+    std::vector<Impl::ExternalRetention> pending_imports(has_external_imports ? g.resources.size() : 0);
+    std::vector<std::size_t> import_retention(has_external_imports ? g.resources.size() : 0, SIZE_MAX);
+    std::vector<std::size_t> operation_retention(has_external_operations ? batches.size() : 0, SIZE_MAX);
+    impl_->external_retained.reserve(impl_->external_retained.size() +
+        (has_external_imports ? g.resources.size() : 0) + (has_external_operations ? g.passes.size() : 0));
     for (std::size_t index = 0; index < batches.size(); ++index)
     {
         const auto &batch = batches[index];
@@ -2236,7 +2199,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
                                                       IID_PPV_ARGS(&pending.retirement_fence));
         if (FAILED(result)) return QueueFailure("Create graph provider retirement fence", result);
     }
-    for (std::size_t resource = 0; resource < g.resources.size(); ++resource)
+    for (std::size_t resource = 0; has_external_imports && resource < g.resources.size(); ++resource)
     {
         const auto &logical = g.resources[resource];
         if (!logical.imported_external_completion.native_fence_owner &&
@@ -2252,7 +2215,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         completion.Include(batch.queue, value);
         slot.completion.Include(batch.queue, value);
         impl_->submitted.Include(batch.queue, value);
-        if (operation_retention[index] != SIZE_MAX)
+        if (has_external_operations && operation_retention[index] != SIZE_MAX)
         {
             auto &retained = impl_->external_retained[operation_retention[index]];
             retained.bridge.Include(batch.queue, value);
@@ -2262,7 +2225,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         {
             auto &resource = g.resources[resource_index];
             resource.completion.Include(batch.queue, value);
-            if (import_retention[resource_index] != SIZE_MAX)
+            if (has_external_imports && import_retention[resource_index] != SIZE_MAX)
             {
                 auto &retained = impl_->external_retained[import_retention[resource_index]];
                 retained.bridge.Include(batch.queue, value);
@@ -2392,13 +2355,15 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             for (const auto &barrier : submitted_batch.before)
                 g.resources[barrier.resource].current = states[barrier.resource].physical = barrier.after;
             if (submitted_batch.pass != UINT32_MAX)
-                for (const auto &use : g.passes[submitted_batch.pass].Uses())
+            {
+                const auto &pass = g.topology.passes[submitted_batch.pass];
+                for (std::size_t i = 0; i < pass.uses.size(); ++i)
                 {
-                    const auto resource_index = use.predecessor.resource.value - 1;
-                    const auto *boundary = ExternalAccess(g.passes[submitted_batch.pass], use.predecessor.resource);
+                    const auto resource_index = pass.execution_resources[i];
                     g.resources[resource_index].current = states[resource_index].physical =
-                        boundary ? boundary->outgoing : use.access;
+                        pass.execution_uses.empty() ? pass.uses[i].access : pass.execution_uses[i].outgoing;
                 }
+            }
             for (const auto &barrier : submitted_batch.after)
             {
                 states[barrier.resource].physical = barrier.after;
@@ -3341,7 +3306,7 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             const auto &pass = impl_->passes[index];
             pass_infos.push_back({pass.id, pass.queue,
                 static_cast<bool>(pass.execute) || static_cast<bool>(pass.owner_execute) || static_cast<bool>(pass.external),
-                pass.Uses(), std::move(predecessor_ids[index])});
+                pass.Uses(), predecessor_ids[index]});
         }
         render_graph::CompiledSchedule schedule;
         render_graph::AliasPlan aliases;
@@ -3357,7 +3322,7 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
         if (impl_->reusable_pass_uses.size() < scratch_passes)
             impl_->reusable_pass_uses.resize(scratch_passes);
         TopologyValues compiled_topology;
-        compiled_topology.Capture(impl_->resources, impl_->passes, impl_->ordering_dependencies, schedule, aliases);
+        compiled_topology.Capture(impl_->resources, impl_->passes, impl_->ordering_dependencies, schedule);
         compiled_topology.handle = impl_->next_plan_handle++;
         if (impl_->topology.valid)
         {
@@ -3391,10 +3356,11 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
     }
     // Validation is complete before any allocation or command callback.
     auto &entries = pool.impl_->entries;
-    std::vector<std::size_t> claims;
+    std::size_t claimed_group_count{};
     const auto allocation_failure = [&](std::string message) {
-        for (const auto index : claims)
+        for (std::size_t group_index = 0; group_index < claimed_group_count; ++group_index)
         {
+            const auto index = impl_->resources[impl_->alias_plan.groups[group_index].resources.front()].pool_index;
             entries[index].claimed = false;
             entries[index].active_members = 0;
             entries[index].active_views.clear();
@@ -3414,8 +3380,8 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
     for (std::size_t group_index = 0; group_index < impl_->alias_plan.groups.size(); ++group_index)
     {
         const auto &group = impl_->alias_plan.groups[group_index];
-        const auto &member_descs = impl_->topology.alias_values[group_index].descriptors;
-        if (!pool.impl_->allocator) return allocation_failure("RenderGraph transient pool has no allocator.");
+        const auto &member_resources = group.resources;
+        const auto &topology_resources = impl_->topology.resources;
         const auto heap_flags = static_cast<D3D12_HEAP_FLAGS>(group.heap_class);
         auto found = entries.end();
         for (auto candidate = entries.begin(); candidate != entries.end(); ++candidate)
@@ -3447,8 +3413,12 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             entries.push_back(std::move(entry)); found = entries.end() - 1;
         }
         found->claimed = true;
+        const auto pool_index = static_cast<std::size_t>(found - entries.begin());
+        // The prepared prefix already records every claim, including a failed first view.
+        impl_->resources[group.resources.front()].pool_index = pool_index;
+        ++claimed_group_count;
         found->active_members = static_cast<std::uint32_t>(group.resources.size());
-        const bool alias_group = impl_->topology.alias_values[group_index].aliased;
+        const bool alias_group = impl_->alias_plan.resource_groups[group.resources.front()] != render_graph::AliasPlan::kExcluded;
         // A previous export or partial submission can leave a view owned by a
         // different queue in a non-COMMON state. The block is completed here;
         // recreate those views so activation starts from a legal neutral state.
@@ -3456,11 +3426,14 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             std::all_of(found->active_view_states.begin(), found->active_view_states.end(),
                         [](auto state) { return state == Access::Common; });
         const bool reuse_views = neutral_views &&
-            found->active_views.size() == member_descs.size() &&
-            found->active_view_descs.size() == member_descs.size() &&
-            found->active_view_states.size() == member_descs.size() &&
-            found->active_view_queues.size() == member_descs.size() &&
-            std::equal(member_descs.begin(), member_descs.end(), found->active_view_descs.begin(), SameDescriptor);
+            found->active_views.size() == member_resources.size() &&
+            found->active_view_descs.size() == member_resources.size() &&
+            found->active_view_states.size() == member_resources.size() &&
+            found->active_view_queues.size() == member_resources.size() &&
+            std::equal(member_resources.begin(), member_resources.end(), found->active_view_descs.begin(),
+                [&](std::uint32_t resource, const D3D12_RESOURCE_DESC &desc) {
+                    return SameDescriptor(topology_resources[resource].descriptor, desc);
+                });
         if (!reuse_views)
         {
             found->active_views.clear();
@@ -3470,23 +3443,23 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
         }
         else
         {
-            found->active_view_states.resize(member_descs.size(), Access::Common);
-            found->active_view_queues.resize(member_descs.size(), QueueHint::Direct);
+            found->active_view_states.resize(member_resources.size(), Access::Common);
+            found->active_view_queues.resize(member_resources.size(), QueueHint::Direct);
         }
-        const auto pool_index = static_cast<std::size_t>(found - entries.begin());
-        claims.push_back(pool_index);
-        for (std::size_t member = 0; member < group.resources.size(); ++member)
+        for (std::size_t member = 0; member < member_resources.size(); ++member)
         {
-            const auto resource_index = group.resources[member];
+            const auto resource_index = member_resources[member];
             auto &r = impl_->resources[resource_index];
             if (!reuse_views)
             {
                 found->active_views.emplace_back();
                 auto &view = found->active_views.back();
+                const auto &descriptor = topology_resources[resource_index].descriptor;
                 const auto hr = pool.impl_->allocator->CreateAliasingResource(
-                    found->allocation.allocation, 0, &member_descs[member], D3D12_RESOURCE_STATE_COMMON,
+                    found->allocation.allocation, 0, &descriptor, D3D12_RESOURCE_STATE_COMMON,
                     nullptr, IID_PPV_ARGS(&view));
                 if (FAILED(hr)) return allocation_failure("RenderGraph alias view creation failed for " + r.Name() + " (HRESULT " + std::to_string(hr) + ").");
+                found->active_view_descs.push_back(descriptor);
                 found->active_view_states.push_back(Access::Common);
                 found->active_view_queues.push_back(QueueHint::Direct);
             }
@@ -3511,7 +3484,6 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             }
             r.final_queue = r.initial_queue;
         }
-        if (!reuse_views) found->active_view_descs = member_descs;
     }
     impl_->pool = pool.impl_.get(); impl_->state = Preparation::Ready;
     capture_stage(captured_cpu.cpu_prepare_transient_us);

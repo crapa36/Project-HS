@@ -87,6 +87,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes(
         material.metallic = descriptor.metallic; material.roughness_scale = descriptor.roughness_scale;
         material.two_sided = (descriptor.flags & render_data::kMaterialFlagTwoSided) != 0;
         material.alpha_mask = (descriptor.flags & render_data::kMaterialFlagAlphaMask) != 0;
+        material.opacity_texture_mask = descriptor.opacity_texture_mask;
         if (ordinal == kTerrainMaterialOrdinal && (material.two_sided || material.alpha_mask || descriptor.textures.size() != 6))
             throw std::runtime_error("Compiled terrain requires opaque single-sided material and six textures");
         for (const auto &texture : descriptor.textures)
@@ -279,6 +280,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes(
                     render_data::EnvironmentMaterialVariant::MaskedTwoSided) != masked)
                     throw std::runtime_error("Canonical environment material program domain mismatch");
                 environment_material_variants[material_ordinal] = variant;
+                selected_bindings.opacity_texture_mask = packaged_material.opacity_texture_mask;
                 material_bindings = std::move(selected_bindings);
                 material_bindings_initialized[material_ordinal] = true;
             }

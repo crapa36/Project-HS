@@ -159,19 +159,7 @@ bool Affine(const DirectX::XMFLOAT4X4 &m)
     const float determinant=DirectX::XMVectorGetX(DirectX::XMMatrixDeterminant(DirectX::XMLoadFloat4x4(&m)));
     return Finite(m)&&std::isfinite(determinant)&&determinant!=0&&m._14==0&&m._24==0&&m._34==0&&m._44==1;
 }
-struct HeroState
-{
-    VfxVolumeIdentity identity;
-    VolumetricHeroVolume gpu;
-    std::array<float,16> local_to_world;
-    std::array<float,6> bounds;
-    std::array<std::uint64_t,3> revisions;
-    bool operator==(const HeroState &other)const
-    {
-        return identity==other.identity&&std::memcmp(&gpu,&other.gpu,sizeof(gpu))==0&&
-            local_to_world==other.local_to_world&&bounds==other.bounds&&revisions==other.revisions;
-    }
-};
+using HeroState = VolumetricHeroState;
 Result HeroRecords(VfxVolumeInputs inputs,std::vector<HeroState> &states)
 {
     states.reserve(inputs.size());
@@ -358,17 +346,20 @@ bool HeroHistoryMatches(VfxVolumeInputs inputs,const std::vector<HeroState> &pre
     }
     return true;
 }
-bool HistoryEligible(const VolumetricStorage &s,const VolumetricInputs &in,bool probe_ready) noexcept
+bool HistoryEligible(const VolumetricStorage &s,const VolumetricShapeInput &in,
+    bool probe_ready) noexcept
 {
     return s.history_valid&&!in.reset_history&&in.frame_index==s.previous_frame+1&&
-        in.revisions==s.previous_revisions&&probe_ready==s.previous_probe_ready&&HeroHistoryMatches(in.hero_volumes,s.previous_heroes)&&
+        in.revisions==s.previous_revisions&&probe_ready==s.previous_probe_ready&&
+        (in.prepared_heroes ? in.prepared_heroes->Matches(in.hero_volumes) &&
+            in.prepared_heroes->Records()==s.previous_heroes : HeroHistoryMatches(in.hero_volumes,s.previous_heroes))&&
         (in.hero_volumes.empty()?s.previous_hero_gradient.Get()==nullptr:
-            s.previous_hero_gradient.Get()==in.hero_gradient.resource)&&
+            s.previous_hero_gradient.Get()==in.hero_gradient)&&
         (in.hero_volumes.empty()?s.previous_hero_blue_noise.Get()==nullptr:
-            s.previous_hero_blue_noise.Get()==in.hero_blue_noise.resource)&&
+            s.previous_hero_blue_noise.Get()==in.hero_blue_noise)&&
         (in.hero_volumes.empty()?s.previous_hero_noise_volume.Get()==nullptr:
-            s.previous_hero_noise_volume.Get()==in.hero_noise_volume.resource)&&
-        SameCamera(in.previous_camera,s.previous_camera);
+            s.previous_hero_noise_volume.Get()==in.hero_noise_volume)&&
+        in.previous_camera&&SameCamera(*in.previous_camera,s.previous_camera);
 }
 }
 struct VolumetricSystem::Impl
@@ -408,14 +399,23 @@ struct VolumetricSystem::Impl
         pending.imports.push_back({&r,h});return graph.Version(h);
     }
 };
-Result ValidateVfxHeroVolumes(VfxVolumeInputs inputs, std::uint32_t gradient_rows)
+Result PrepareVfxHeroVolumes(VfxVolumeInputs inputs, std::uint32_t gradient_rows, PreparedVfxHeroVolumes &prepared)
 {
-    std::vector<HeroState> states;
-    if (auto result = HeroRecords(inputs, states); !result) return result;
+    prepared.admitted_ = false;
+    prepared.source_ = {};
+    prepared.records_.clear();
+    if (auto result = HeroRecords(inputs, prepared.records_); !result) return result;
     for (const auto &input : inputs)
         if (input.gradient_row >= gradient_rows)
             return Fail(ErrorCode::InvalidArgument,"Hero volume output references a row outside the actual resident authored gradient LUT.");
+    prepared.source_ = inputs;
+    prepared.admitted_ = true;
     return Result::Success();
+}
+Result ValidateVfxHeroVolumes(VfxVolumeInputs inputs, std::uint32_t gradient_rows)
+{
+    PreparedVfxHeroVolumes prepared;
+    return PrepareVfxHeroVolumes(inputs, gradient_rows, prepared);
 }
 
 VolumetricSystem::VolumetricSystem():impl_(std::make_unique<Impl>()){}
@@ -503,29 +503,32 @@ Result VolumetricSystem::Commit(VolumetricCandidate &&candidate,const Completion
 bool VolumetricSystem::MatchesLayout(const VolumetricInputs &in,
     const VolumetricLayout &layout) const noexcept
 {
-    if(!MatchesShape(in,layout,in.shadows.resources[0]!=nullptr,
-        in.local_shadows.resources[0]!=nullptr,in.shadows.resources[5]!=nullptr,
-        in.shadows.resources[6]!=nullptr,in.probe_ready))return false;
+    const VolumetricShapeInput shape{in.frame_slot,in.volumes.size(),in.hero_volumes,
+        in.prepared_heroes,in.reset_history,in.frame_index,in.revisions,&in.previous_camera,
+        in.hero_blue_noise.resource,in.hero_gradient.resource,in.hero_noise_volume.resource,
+        in.shadows.resources[0]!=nullptr,in.local_shadows.resources[0]!=nullptr,
+        bool(in.compact_shadow.identity.w),in.shadows.resources[5]!=nullptr,
+        in.shadows.resources[6]!=nullptr};
+    if(!MatchesShape(shape,layout,in.probe_ready))return false;
     const auto versions=InputVersions(in);
     for(std::size_t index=0;index<versions.size();++index)
         if(!(versions[index]==layout.input_versions[index]))return false;
     return true;
 }
-bool VolumetricSystem::MatchesShape(const VolumetricInputs &in,
-    const VolumetricLayout &layout,bool shadows,bool local_shadows,
-    bool root_static,bool root_dynamic,bool probe_ready) const noexcept
+bool VolumetricSystem::MatchesShape(const VolumetricShapeInput &in,
+    const VolumetricLayout &layout,bool probe_ready) const noexcept
 {
     const auto s=impl_->storage;
     if(!s||!s->enabled||!s->usable||!layout.storage_generation||
         layout.storage_generation!=s->generation||in.frame_slot>=s->slots.size()||
-        in.volumes.size()>s->max_volumes||
-        in.hero_volumes.size()>s->max_volumes-in.volumes.size()||
+        in.volume_count>s->max_volumes||
+        in.hero_volumes.size()>s->max_volumes-in.volume_count||
         layout.hero!=!in.hero_volumes.empty()||
-        layout.shadows!=shadows||
-        layout.local_shadows!=local_shadows||
-        layout.compact_shadow!=bool(in.compact_shadow.identity.w)||
-        layout.root_static!=root_static||
-        layout.root_dynamic!=root_dynamic||
+        layout.shadows!=in.shadows||
+        layout.local_shadows!=in.local_shadows||
+        layout.compact_shadow!=in.compact_shadow||
+        layout.root_static!=in.root_static||
+        layout.root_dynamic!=in.root_dynamic||
         layout.probe_ready!=probe_ready||
         layout.history!=HistoryEligible(*s,in,probe_ready))return false;
     return true;
@@ -574,7 +577,14 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
     if(!in.hero_volumes.empty())for(const auto &hero:in.hero_volumes)
         if(hero.gradient_row>=in.hero_gradient.resource->GetDesc().Height)
             return Fail(ErrorCode::InvalidArgument,"Hero volume output references a row outside the actual resident authored gradient LUT.");
-    std::vector<HeroState> heroes;if(auto result=HeroRecords(in.hero_volumes,heroes);!result)return result;
+    std::vector<HeroState> heroes;
+    if(in.prepared_heroes)
+    {
+        if(!in.prepared_heroes->Matches(in.hero_volumes))
+            return Fail(ErrorCode::InvalidArgument,"Prepared hero volumes do not match this frame's input.");
+        heroes=in.prepared_heroes->Records();
+    }
+    else if(auto result=HeroRecords(in.hero_volumes,heroes);!result)return result;
     for(const auto &volume:in.volumes)
     {
         const auto d=volume.density_extinction;const auto scatter=volume.scattering;

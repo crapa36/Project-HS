@@ -151,7 +151,16 @@ bool CandidateValid(ClusterCandidate candidate, out InstanceData instance)
     {
         Fault(FailureCatalog); return false;
     }
-    if (Groups[candidate.FirstRoot].Parent != Invalid) { Fault(FailureCatalog); return false; }
+    const ClusterGroup root = Groups[candidate.FirstRoot];
+    if (root.Parent != Invalid || root.CatalogIndex != candidate.CatalogIndex ||
+        root.Generation != ContentGeneration)
+    {
+        Fault(FailureCatalog); return false;
+    }
+    if ((root.Flags & ReferencePose) != 0u && (candidate.PolicyFlags & FineOnlyDeformationBound) == 0u)
+    {
+        Fault(FailureErrorDomain); return false;
+    }
     const uint address = h1.x + candidate.InstanceIndex * h2.z;
     if (HsGpuSceneTables.Load(address + 20u) != candidate.InstanceGeneration)
     {
@@ -172,20 +181,7 @@ bool GroupValid(uint id, ClusterCandidate candidate, out ClusterGroup group)
         Fault(FailureAncestorRange); return false;
     }
     group = Groups[id];
-    if (group.CatalogIndex != candidate.CatalogIndex || group.Generation != ContentGeneration ||
-        (group.NextSubtree != Invalid && (group.NextSubtree < candidate.FirstGroup ||
-            group.NextSubtree - candidate.FirstGroup >= candidate.GroupCount)) ||
-        group.ClusterCount == 0u || !Range(group.FirstCluster, group.ClusterCount, ClusterCount) ||
-        group.RepresentationPages.y == 0u ||
-        !Range(group.RepresentationPages.x, group.RepresentationPages.y, RepresentationPageCount) ||
-        !Range(group.FirstChild, group.ChildCount, ChildCount))
-    {
-        Fault(FailureCatalog); return false;
-    }
-    if ((group.Flags & ReferencePose) != 0u && (candidate.PolicyFlags & FineOnlyDeformationBound) == 0u)
-    {
-        Fault(FailureErrorDomain); return false;
-    }
+    // Generation table construction admits the immutable child, cluster and page spans.
     return true;
 }
 bool ClusterValid(uint id, uint group_id, ClusterGroup group, out ClusterRecord cluster)
@@ -326,10 +322,15 @@ void CountCuts(uint3 dispatch : SV_DispatchThreadID)
     ClusterCandidate candidate = Candidates[candidate_index];
     InstanceData instance;
     if (!CandidateValid(candidate, instance)) return;
+    candidate.ViewMask &= ActiveViewMask & HsHlodLeafViewMask(candidate.InstanceIndex, candidate.InstanceGeneration);
+    if (candidate.ViewMask == 0u)
+    {
+        CutCounts[CandidateCount + candidate_index] = uint2(0u, 0u);
+        return;
+    }
     const float scale = max(abs(instance.Scale.x), max(abs(instance.Scale.y), abs(instance.Scale.z)));
     float sine_yaw, cosine_yaw;
     sincos(instance.Yaw, sine_yaw, cosine_yaw);
-    candidate.ViewMask &= ActiveViewMask & HsHlodLeafViewMask(candidate.InstanceIndex, candidate.InstanceGeneration);
     const uint cache_stride = OutputCapacity / CandidateCount;
     const uint cache_base = CandidateCount * 2u + candidate_index * cache_stride;
     uint selected_groups = 0u;
@@ -510,15 +511,15 @@ void EmitCuts(uint3 dispatch : SV_DispatchThreadID)
     ClusterCandidate candidate = Candidates[candidate_index];
     InstanceData instance;
     if (!CandidateValid(candidate, instance)) return;
-    const float scale = max(abs(instance.Scale.x), max(abs(instance.Scale.y), abs(instance.Scale.z)));
-    float sine_yaw, cosine_yaw;
-    sincos(instance.Yaw, sine_yaw, cosine_yaw);
-    candidate.ViewMask &= ActiveViewMask & HsHlodLeafViewMask(candidate.InstanceIndex, candidate.InstanceGeneration);
     const uint2 base = CutOffsets[candidate_index];
     if (base.y != 0u) { Fault(FailureCapacity); return; }
     const uint2 expected = CutCounts[candidate_index];
     // Count validated the immutable cut; an empty cut has no records or history to emit.
     if (all(expected == uint2(0u, 0u))) return;
+    const float scale = max(abs(instance.Scale.x), max(abs(instance.Scale.y), abs(instance.Scale.z)));
+    float sine_yaw, cosine_yaw;
+    sincos(instance.Yaw, sine_yaw, cosine_yaw);
+    candidate.ViewMask &= ActiveViewMask & HsHlodLeafViewMask(candidate.InstanceIndex, candidate.InstanceGeneration);
     uint cache_elements, cache_element_stride;
     CutCounts.GetDimensions(cache_elements, cache_element_stride);
     if (CandidateCount > cache_elements / 2u ||

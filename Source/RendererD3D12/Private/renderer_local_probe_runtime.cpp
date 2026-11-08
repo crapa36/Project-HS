@@ -2128,13 +2128,22 @@ Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
         for (std::size_t index = 0; index < scene->instances.size(); ++index)
         {
             terrain_records[index] = {};
-            terrain_records[index].seed = scene->instances[index].environment_seed;
+            const auto &source=scene->instances[index];
+            auto &record=terrain_records[index];
+            record.seed=source.environment_seed; record.pageSlice=UINT_MAX;
+            if(const auto section=Impl::TerrainSectionFrom(source))
+            {
+                record.center={section->x,section->z}; record.span={section->span_x,section->span_z};
+                record.rotation={section->cosine,section->sine}; record.mesh=section->mesh;
+                record.heightTransform={source.position.y,source.scale.y};
+            }
         }
         terrain_source->resource->Unmap(0, nullptr);
         terrain_source->graph_access = Access::AllShaderRead;
         terrain_source->graph_queue = QueueHint::Direct;
         for (UINT frame = 0; frame < kFrameCount; ++frame)
         {
+            renderer.terrain_descriptor_banks[frame].descriptors_initialized = false;
             auto handle = renderer.srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
             handle.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + kTerrainPageDescriptorOffset) * renderer.srv_stride;
             const auto terrain_base = handle.ptr;
@@ -2147,7 +2156,7 @@ Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
             renderer.device->CreateShaderResourceView(terrain_source->resource.Get(), &srv, handle);
             handle.ptr = terrain_base + SIZE_T(HS_TERRAIN_MIP_SRV) * renderer.srv_stride;
             srv.Buffer.NumElements = 1;
-            srv.Buffer.StructureByteStride = sizeof(UINT) * 4;
+            srv.Buffer.StructureByteStride = sizeof(Impl::GpuTerrainPlaneMip);
             renderer.device->CreateShaderResourceView(nullptr, &srv, handle);
             handle.ptr = terrain_base + SIZE_T(HS_TERRAIN_PLANE_SRV) * renderer.srv_stride;
             srv = {};

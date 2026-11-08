@@ -939,14 +939,12 @@ void D3D12Renderer::Impl::ResetInactiveClusterViewResources() noexcept
 
 void D3D12Renderer::Impl::ResetClusterResources() noexcept
 {
-    // Caller drains all GPU queues first. Async readers own only immutable paths
-    // and byte vectors; join them before releasing the selected Generation.
+    // Caller drains all GPU queues first; cancel outstanding streaming requests.
     ResetInactiveClusterViewResources();
     if (!cluster_runtime) return;
     auto &runtime = *cluster_runtime;
     for (auto &stream : runtime.streams)
     {
-        if (stream.read_future.valid()) stream.read_future.wait();
         if (stream.request) static_cast<void>(streaming.Cancel(stream.request));
         for (const auto ticket : {stream.read_residency, stream.decoded_residency, stream.upload_residency,
             stream.page ? stream.page->residency : ResidencyTicket{}})

@@ -540,7 +540,7 @@ Result ScreenReflectionsSystem::RegisterFrame(RenderGraphBuilder &graph, const S
     auto traceBinding = pass_binding(0,70,"SSRTrace");
     if (!traceBinding) return ReflectionFailure(ErrorCode::InvalidState, "Reflection retained trace pass is missing.");
     auto &trace = *traceBinding;
-    if (retained) { hierarchy = retained->hierarchy; raw = retained->raw; }
+    if (retained) { hierarchy = retained->hierarchy; raw = retained->raw; validation = retained->validation; }
     else
     {
 #define HS_SSR_READ(name) trace.Read(guides[SsrSrv##name], Access::ComputeRead);
@@ -555,7 +555,7 @@ Result ScreenReflectionsSystem::RegisterFrame(RenderGraphBuilder &graph, const S
     auto temporalBinding = pass_binding(1,71,"SSRTemporal");
     if (!temporalBinding) return ReflectionFailure(ErrorCode::InvalidState, "Reflection retained temporal pass is missing.");
     auto &temporal = *temporalBinding;
-    if (retained) { current = retained->current; validation = retained->validation; }
+    if (retained) current = retained->current;
     else
     {
 #define HS_SSR_READ(name) temporal.Read(guides[SsrSrv##name], Access::ComputeRead);

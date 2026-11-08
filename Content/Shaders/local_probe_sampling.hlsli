@@ -19,9 +19,9 @@ float HsLocalProbeWeight(HsLocalProbeRecord p,float3 world)
     const float3 inside=min(world-p.influence_min_fade.xyz,p.influence_max_bias.xyz-world);
     return p.position_weight.w*smoothstep(0,p.influence_min_fade.w,min(inside.x,min(inside.y,inside.z)));
 }
-float3 HsLocalProbeProjectedDirection(HsLocalProbeRecord p,float3 worldPosition,float3 worldDirection)
+float3 HsLocalProbeProjectedDirection(HsLocalProbeRecord p,float3 worldPosition,float3 unit_direction)
 {
-    const float3 d=normalize(worldDirection);
+    const float3 d=unit_direction;
     // Influence is contained in the projection box. Compute the ray's forward
     // exit from that box from the receiver, then look up from the probe center.
     float exit=1e30;
@@ -109,6 +109,7 @@ void HsLocalProbeEvaluateIbl(float3 world,HsProbeGridCell cell,float3 normal,flo
     float total=0;
     if(local_specular && cell.dims.x)
     {
+        const float3 projected_direction=normalize(reflected);
         const uint2 candidates=asuint(HsLocalProbeCosineSh[cell.metadata+4u].xy);
         [unroll] for(uint word=0;word<2;++word)
         {
@@ -122,7 +123,7 @@ void HsLocalProbeEvaluateIbl(float3 world,HsProbeGridCell cell,float3 normal,flo
                 {
                     const float next_total=total+weight;
                     const float previous_weight=total/next_total,current_weight=weight/next_total;
-                    const float4 dir=float4(HsLocalProbeProjectedDirection(p,world,reflected),id);
+                    const float4 dir=float4(HsLocalProbeProjectedDirection(p,world,projected_direction),id);
                     local_base=previous_weight*local_base+current_weight*
                         HsLocalProbeGgxCube.SampleLevel(LinearClamp,dir,roughness.x*p.parameters.x).rgb;
                     if(need_coat) local_coat=previous_weight*local_coat+current_weight*
@@ -163,10 +164,12 @@ float3 HsLocalProbeRadiance(float3 world,float3 direction,HsLocalProbeBlend blen
 {
     float3 result=0;
     if(blend.global_weight>0) result=blend.global_weight*HsProbeRadiance(direction);
+    if(blend.count==0u) return result;
+    const float3 projected_direction=normalize(direction);
     [loop] for(uint i=0;i<blend.count;++i)
     {
         const uint id=blend.indices[i];
-        const float4 d=float4(HsLocalProbeProjectedDirection(HsLocalProbeRecords[id],world,direction),id);
+        const float4 d=float4(HsLocalProbeProjectedDirection(HsLocalProbeRecords[id],world,projected_direction),id);
         result+=blend.weights[i]*HsLocalProbeRawCube.SampleLevel(LinearClamp,d,0).rgb;
     }
     return result;

@@ -505,7 +505,7 @@ void D3D12Renderer::Impl::SwapResidentAssetData(Impl &candidate) noexcept
     HS_SWAP_RESIDENT(vfx_fracture_decals);
     HS_SWAP_RESIDENT(vfx_organic_decals);
     HS_SWAP_RESIDENT(vfx_curve_lut);
-    HS_SWAP_RESIDENT(terrain_sections);
+    HS_SWAP_RESIDENT(terrain_slot_static_sections_valid);
     HS_SWAP_RESIDENT(terrain_tile_counts);
     HS_SWAP_RESIDENT(static_terrain_sections);
     HS_SWAP_RESIDENT(terrain_scene);
@@ -523,13 +523,14 @@ void D3D12Renderer::Impl::SwapResidentAssetData(Impl &candidate) noexcept
     HS_SWAP_RESIDENT(terrain_archive_reads);
 #endif
     HS_SWAP_RESIDENT(terrain_frame_sections);
-    HS_SWAP_RESIDENT(static_terrain_indices);
+    HS_SWAP_RESIDENT(terrain_frame_section_counts);
+    HS_SWAP_RESIDENT(terrain_frame_has_meadow);
+    HS_SWAP_RESIDENT(terrain_frame_meadow_upper);
+    HS_SWAP_RESIDENT(static_terrain_source_indices);
     HS_SWAP_RESIDENT(dynamic_terrain_indices);
     HS_SWAP_RESIDENT(terrain_archive_digest);
     HS_SWAP_RESIDENT(terrain_planes_archive_digest);
     HS_SWAP_RESIDENT(terrain_static_pages_current);
-    HS_SWAP_RESIDENT(terrain_target_first_mip);
-    HS_SWAP_RESIDENT(terrain_target_budget_mib);
     HS_SWAP_RESIDENT(terrain_retry_budget_bytes);
     HS_SWAP_RESIDENT(environment_textures);
     HS_SWAP_RESIDENT(environment_texture_ids);

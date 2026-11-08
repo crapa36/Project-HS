@@ -252,6 +252,7 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
             const auto producer = pass_indices.find(producer_id);
             if (producer == pass_indices.end() || producer->second == consumer)
                 return fail("RenderGraph ordering dependency names an absent or identical pass.");
+            schedule.explicit_ordering.emplace_back(producer->second, consumer);
             edge(producer->second, consumer);
         }
     const auto interval_slice = [&](RangeSlice slice) {
@@ -477,7 +478,7 @@ Result PlanTransientAliases(std::span<const ResourceInfo> resources,
     };
 
     std::vector<std::vector<std::uint32_t>> users(resources.size());
-    for (std::uint32_t pass = 0; pass < passes.size(); ++pass)
+    for (const auto pass : schedule.execution_order)
         for (const auto &use : passes[pass].uses)
         {
             if (!use.predecessor.resource || use.predecessor.resource.value > resources.size())
@@ -503,11 +504,7 @@ Result PlanTransientAliases(std::span<const ResourceInfo> resources,
         plan.transient_bytes_without_aliasing += info.allocation_size;
     }
     std::sort(candidates.begin(), candidates.end(), [&](auto left, auto right) {
-        const auto first = [&](auto resource) {
-            return *std::min_element(users[resource].begin(), users[resource].end(),
-                [&](auto a, auto b) { return position[a] < position[b]; });
-        };
-        const auto left_pass = first(left), right_pass = first(right);
+        const auto left_pass = users[left].front(), right_pass = users[right].front();
         return position[left_pass] == position[right_pass] ? left < right
                                                             : position[left_pass] < position[right_pass];
     });
@@ -549,13 +546,9 @@ Result PlanTransientAliases(std::span<const ResourceInfo> resources,
         {
             auto &candidate = plan.groups[group];
             if (candidate.heap_class != info.heap_class) continue;
-            if (std::any_of(candidate.resources.begin(), candidate.resources.end(),
-                            [&](auto member) { return resources[member].final_set; }))
-                continue;
-            bool ordered = true;
-            for (const auto member : candidate.resources)
-                if (!can_follow(member, resource)) { ordered = false; break; }
-            if (!ordered) continue;
+            // Earlier owners already precede every use of the last owner.
+            const auto last = candidate.resources.back();
+            if (resources[last].final_set || !can_follow(last, resource)) continue;
             const auto alignment = std::max(candidate.alignment, info.allocation_alignment);
             const auto size = aligned_size(std::max(candidate.size, info.allocation_size), alignment);
             if (!size) return fail("RenderGraph alias planner alignment overflow.");

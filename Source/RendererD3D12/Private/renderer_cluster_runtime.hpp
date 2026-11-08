@@ -10,7 +10,6 @@
 #include "streaming_manager.hpp"
 
 #include <array>
-#include <future>
 #include <functional>
 #include <filesystem>
 #include <memory>
@@ -65,7 +64,6 @@ struct ClusterPageStream
     std::uint64_t last_demand_epoch{};
     std::uint64_t read_bytes{};
     StreamingRequestId request;
-    std::future<std::vector<std::byte>> read_future;
     std::vector<std::byte> read_storage;
     render_data::GeometryData decoded;
     std::shared_ptr<render_data::GeometryData> decoded_result;

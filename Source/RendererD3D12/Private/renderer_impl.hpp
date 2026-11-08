@@ -110,7 +110,6 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
 #include <filesystem>
 #include <format>
 #include <fstream>
-#include <future>
 #include <limits>
 #include <map>
 #include <memory>
@@ -960,6 +959,7 @@ struct NativeGraphicsCapabilitySnapshot
 struct D3D12Renderer::CanonicalFrame
 {
     RenderPackage input;
+    PreparedVfxHeroVolumes hero_volumes;
     float interpolation{1.0f};
     bool advance_native_world{};
     double native_display_tick{};
@@ -1191,8 +1191,8 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result ResetOwnedViewAfterCompletion(OwnedView &);
     [[nodiscard]] Result ResetOwnedViewsAfterCompletion();
     void InvalidateCanonicalDeformationAfterCompletion() noexcept;
-    [[nodiscard]] Result ValidateFrameInput(const RenderPackage &);
-    [[nodiscard]] Result ValidateFramePayload(const RenderPackage &);
+    [[nodiscard]] Result ValidateFrameInput(const RenderPackage &, PreparedVfxHeroVolumes &);
+    [[nodiscard]] Result PrepareFramePayload(const RenderPackage &, PreparedVfxHeroVolumes &);
 #if defined(HS_DEVELOPMENT_TOOLS)
     [[nodiscard]] RendererDiagnosticsMemory DiagnosticsMemory() const;
 #endif
@@ -1273,7 +1273,6 @@ struct D3D12Renderer::Impl
         std::string source_id;
         std::string content_generation;
         StreamingRequestId request;
-        std::future<std::vector<std::byte>> read_future;
         std::vector<std::byte> decoded_storage;
         std::shared_ptr<PreparedGeometryUpload> preparation;
         ResidencyTicket decoded_residency;
@@ -1307,9 +1306,6 @@ struct D3D12Renderer::Impl
             source_id.clear();
             content_generation.clear();
             request = {};
-            if (read_future.valid())
-                read_future.wait();
-            read_future = {};
             std::vector<std::byte>{}.swap(decoded_storage);
             preparation.reset();
             decoded_residency = {};
@@ -1517,6 +1513,25 @@ struct D3D12Renderer::Impl
     };
     [[nodiscard]] Result PrepareVolumetrics(const OwnedView &, const RendererConfig &, ViewExtent, VolumetricPrepared &) const;
     [[nodiscard]] Result CommitVolumetrics(OwnedView &owner, VolumetricPrepared &&);
+    struct ViewFeatureCandidates
+    {
+        AdaptiveShadingCandidate adaptive;
+        AmbientOcclusionCandidate ambient;
+        SubsurfaceCandidate diffusion;
+        ScreenReflectionsCandidate reflections;
+        LayeredTranslucencyCandidate transparency;
+        HdrPostCandidate hdr;
+        ScreenOverlayCandidate overlay;
+        DecalSurfaceCandidate decals;
+        LightListCandidate lights;
+        VirtualShadowCandidate shadows;
+        AdditionalShadowPrepared additional;
+        VolumetricPrepared volume;
+    };
+    [[nodiscard]] Result PrepareViewFeatures(const OwnedView &, const RendererConfig &, ViewExtent capacity,
+        ViewExtent output_extent, bool decal_work, ViewFeatureCandidates &) const;
+    // Additional shadows and volumetrics commit at the caller's publication boundaries.
+    [[nodiscard]] Result CommitViewFeaturePrefix(OwnedView &, ViewFeatureCandidates &, const CompletionSet &);
     [[nodiscard]] RendererFeaturePlan ResolveFeatures(const RendererConfig &) const noexcept;
     [[nodiscard]] Result PrepareLightList(const OwnedView &, const RendererConfig &, ViewExtent, LightListCandidate &) const;
     [[nodiscard]] Result PrepareCharacterBindings(ID3D12GraphicsCommandList *,
@@ -1837,18 +1852,25 @@ struct D3D12Renderer::Impl
 #undef HS_TERRAIN_U1
 #undef HS_TERRAIN_U2
     };
-    static_assert(sizeof(GpuTerrainSection)==48);
+    static_assert(sizeof(GpuTerrainSection)==56);
+    struct GpuTerrainPlaneMip
+    {
+#define HS_TERRAIN_U1(name) UINT name{};
+        HS_TERRAIN_GPU_PLANE_MIP_FIELDS(HS_TERRAIN_U1)
+#undef HS_TERRAIN_U1
+        bool operator==(const GpuTerrainPlaneMip &) const = default;
+    };
+    static_assert(sizeof(GpuTerrainPlaneMip)==16);
     static std::optional<TerrainSection> TerrainSectionFrom(const RenderInstance &);
     [[nodiscard]] Result TerrainPageSourceIdentity(std::array<std::byte,32> &) const;
     UINT TerrainSectionIndex(bool immutable, std::size_t source_ordinal, const RenderInstance &) const;
-    void WriteTerrainPageDescriptors(UINT frame_slot, UINT section_count) const;
     struct TerrainPagePreparation;
     std::shared_ptr<TerrainPagePreparation> pending_terrain_pages;
 #if defined(HS_OFFLINE_PROBE_BAKER)
     [[nodiscard]] Result BakeTerrainPages(const std::shared_ptr<const StaticRenderScene> &,
         std::shared_ptr<TerrainPagePreparation> &);
 #endif
-    std::vector<TerrainSection> terrain_sections, static_terrain_sections;
+    std::vector<TerrainSection> static_terrain_sections;
     struct TerrainPlaneBacking
     {
         std::shared_ptr<const void> generation_lease;
@@ -1864,13 +1886,12 @@ struct D3D12Renderer::Impl
         struct Entry
         {
             ComPtr<ID3D12Resource> resource;
-            std::uint64_t revision{};
-            TextureMipMetadata metadata{};
-            UINT mip_levels{};
-            bool written{};
+            GpuTerrainPlaneMip metadata{};
         };
         ComPtr<ID3D12DescriptorHeap> heap;
         ComPtr<ID3D12Resource> metadata_resource;
+        ComPtr<ID3D12Resource> section_resource;
+        UINT section_count{};
         D3D12_CPU_DESCRIPTOR_HANDLE first{};
         UINT stride{};
         UINT published_count{};
@@ -1880,12 +1901,16 @@ struct D3D12Renderer::Impl
     mutable std::array<TerrainDescriptorBank,kFrameCount> terrain_descriptor_banks;
     std::vector<std::array<UINT,2>> terrain_tile_counts;
     std::shared_ptr<const StaticRenderScene> terrain_scene;
+    std::vector<GpuTerrainSection> terrain_gpu_sections_scratch;
     std::array<AllocationResource, kFrameCount> terrain_frame_sections;
-    std::vector<UINT> static_terrain_indices, dynamic_terrain_indices;
+    std::array<bool, kFrameCount> terrain_slot_static_sections_valid{};
+    std::array<UINT, kFrameCount> terrain_frame_section_counts{};
+    std::array<bool, kFrameCount> terrain_frame_has_meadow{};
+    std::array<float, kFrameCount> terrain_frame_meadow_upper{};
+    std::vector<UINT> static_terrain_source_indices, dynamic_terrain_indices;
     std::string terrain_archive_digest, terrain_planes_archive_digest;
     bool terrain_static_pages_current{};
     UINT64 terrain_retry_budget_bytes{};
-    UINT terrain_target_first_mip{UINT_MAX}, terrain_target_budget_mib{UINT_MAX};
     std::array<std::byte, 32> terrain_generation_parameters{};
     bool terrain_generation_parameters_valid{}, terrain_parameters_match{true}, terrain_parameters_changed{};
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -1897,6 +1922,7 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result PublishTerrainStreaming(UINT frame_slot);
     struct EnvironmentMaterialBindingsGpu
     {
+        std::uint32_t opacity_texture_mask{};
         std::array<std::string, render_data::kMaterialTextureSlots> product_ids;
         std::array<std::uint32_t, render_data::kMaterialTextureSlots> texture_indices{
             UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX};
@@ -1974,7 +2000,6 @@ struct D3D12Renderer::Impl
         std::vector<MonsterProjection> monster_projections;
         std::vector<PersistentGpuSceneSlot> gpu_slots;
         std::optional<MonsterLodInstanceOrder> order;
-        std::unordered_map<std::uint64_t, const AnimationPoseRef *> poses_by_id;
         std::vector<const AnimationPoseRef *> poses_by_source;
         std::vector<std::uint32_t> original_source_ordinals;
         struct SkinCullView
@@ -1995,7 +2020,6 @@ struct D3D12Renderer::Impl
 
         void ReleaseBorrowed() noexcept
         {
-            poses_by_id.clear();
             poses_by_source.clear();
             original_source_ordinals.clear();
             monster_projections.clear();

@@ -1,4 +1,5 @@
 #include "renderer_impl.hpp"
+#include "../../../Content/Shaders/terrain_histogram_abi.hlsli"
 
 #include <hs/core/cooked_format.hpp>
 #include <hs/core/sha256.hpp>
@@ -247,7 +248,8 @@ Result D3D12Renderer::Impl::CreateEnvironmentTextures()
         {"leaf_basecolor", DXGI_FORMAT_BC7_UNORM_SRGB,3,6},
         {"leaf_normal", DXGI_FORMAT_BC5_UNORM,3,6},
         {"leaf_roughness", DXGI_FORMAT_BC4_UNORM,3,6},
-        {"terrain_histogram", DXGI_FORMAT_R32G32B32A32_FLOAT,4,1,256,16},
+        {"terrain_histogram", DXGI_FORMAT_R32G32B32A32_FLOAT,HS_TERRAIN_HISTOGRAM_LAYERS,1,
+            HS_TERRAIN_HISTOGRAM_WIDTH,HS_TERRAIN_HISTOGRAM_HEIGHT},
     };
     static_assert(std::size(specs) == kEnvironmentTextureCount);
     constexpr UINT kStreamTextureIndex = 0;
@@ -712,13 +714,18 @@ Result D3D12Renderer::Impl::PrepareHardwareTextureStreaming(const RendererAssetI
         registration.fallback_residency = existing_ticket; registration.pinned = description.mip_count == 1;
         registration.opacity_sampling = false;
         for (std::size_t material = 0; material < environment_material_bindings.size(); ++material)
-            if (environment_material_variants[material] == render_data::EnvironmentMaterialVariant::MaskedTwoSided &&
-                std::ranges::find(environment_material_bindings[material].product_ids, id) !=
-                    environment_material_bindings[material].product_ids.end())
-            {
-                registration.opacity_sampling = true;
-                break;
-            }
+        {
+            if (environment_material_variants[material] != render_data::EnvironmentMaterialVariant::MaskedTwoSided)
+                continue;
+            const auto &bindings = environment_material_bindings[material];
+            for (std::size_t slot = 0; slot < bindings.product_ids.size(); ++slot)
+                if ((bindings.opacity_texture_mask & (1u << slot)) && bindings.product_ids[slot] == id)
+                {
+                    registration.opacity_sampling = true;
+                    break;
+                }
+            if (registration.opacity_sampling) break;
+        }
         return texture_streaming.Register(std::move(registration), residency, stream_id);
     };
     for (std::uint32_t index = 0; index < kEnvironmentTextureCount; ++index)

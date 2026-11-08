@@ -349,7 +349,6 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
         return Result::Success();
     }
 #endif
-    const auto source = read->input.source;
     const auto expected = read->input.expected_bytes;
     const auto key = read->input.request.value;
     read->cpu_task = std::move(*cpu_task);
@@ -359,11 +358,13 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
     { impl_->reads.erase(key); return IoFailure("Async asset request state transition failed."); }
     try
     {
-        const auto prepare = retained->input.prepare;
+        auto source = std::move(retained->input.source);
+        auto prepare = std::move(retained->input.prepare);
         auto ranges = std::move(retained->input.ranges);
         const auto cancellation = retained->cancellation;
-        retained->future = std::async(std::launch::async, [source, expected, prepare,
-                                                               ranges = std::move(ranges), cancellation] {
+        retained->future = std::async(std::launch::async,
+            [source = std::move(source), expected, prepare = std::move(prepare),
+             ranges = std::move(ranges), cancellation] {
             std::vector<std::byte> bytes;
             if (ranges.empty())
             {
@@ -457,14 +458,16 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
                 auto cpu_task = TryAcquireCpuTask(impl_->cpu_tasks);
                 if (!cpu_task) return Result::Success(); // Keep bytes and marker owner until verification can be admitted.
                 read.cpu_task = std::move(*cpu_task);
-                const auto prepare = read.input.prepare;
                 const auto source_proof = read.input.source.AdmittedWholeFileProof();
                 const auto cancellation = read.cancellation;
+                // ReadOwner joins this future before destroying its input or bytes.
+                const auto *prepare = &read.input.prepare;
+                const std::span<const ImmutableAssetRange> ranges{read.input.ranges};
                 auto *bytes = &read.bytes;
                 try
                 {
-                    read.prepare_future = std::async(std::launch::async, [prepare,
-                        ranges = read.input.ranges, source_proof, cancellation, bytes] {
+                    read.prepare_future = std::async(std::launch::async,
+                        [prepare, ranges, source_proof, cancellation, bytes] {
                         if (cancellation->load(std::memory_order_acquire)) return;
                         if (ranges.empty() && source_proof && Sha256(*bytes) != source_proof->digest)
                             throw std::runtime_error("Immutable file digest mismatch.");
@@ -480,7 +483,7 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
                             }
                             if (offset != bytes->size()) throw std::runtime_error("Immutable subresource ranges are incomplete.");
                         }
-                        if (!cancellation->load(std::memory_order_acquire) && prepare) prepare(*bytes);
+                        if (!cancellation->load(std::memory_order_acquire) && *prepare) (*prepare)(*bytes);
                     });
                 }
                 catch (...)

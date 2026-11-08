@@ -56,7 +56,7 @@ cbuffer FrameConstants : register(b0)
     uint4 GrassBenderMasks[16];
     float4 PreviousGrassBenderGrid;
     uint4 PreviousGrassBenderMasks[16];
-    float4 ParticleTerrain; // Scene origin, canonical meadow collision enabled.
+    float4 ParticleTerrain; // Scene-relative upper floor, origin Y, reserved, bit-cast section count.
     row_major float4x4 PreviousInstanceUnjitteredViewProjection;
 };
 
@@ -678,8 +678,10 @@ SceneOutput EvaluateSceneVertex(SceneInput input, HsSceneVertexContext context,
     output.Position = mul(float4(world, 1.0), ViewProjection);
     output.WorldNormal = normal;
     output.WorldPosition = world;
-    output.PreviousUnjitteredClipPosition = mul(float4(previous_world, 1.0),
-        previous_instance_basis ? PreviousInstanceUnjitteredViewProjection : PreviousUnjitteredViewProjection);
+    output.PreviousUnjitteredClipPosition = evaluate_history
+        ? mul(float4(previous_world, 1.0), previous_instance_basis
+            ? PreviousInstanceUnjitteredViewProjection : PreviousUnjitteredViewProjection)
+        : 0.0;
     output.Color = UnpackColor(instance.Color);
     output.Mesh = mesh;
     output.Uv = input.Uv;
@@ -745,23 +747,22 @@ SceneOutput EvaluateSceneVertex(SceneInput input, uint instance_id, uint vertex_
     if (gpu_scene_refs)
     {
         context.draw = StaticSceneDraws[instance_id];
+        context.instance = HsLoadGpuSceneInstance(context.draw.InstanceIndex);
         if (HsShadowIsDraw(PassValue))
         {
             // Shadow proxy coverage is complete, independently of camera LOD fades.
             context.draw.MeshFlags &= ~0x20000u;
-            const uint mesh = HsLoadGpuSceneInstance(context.draw.InstanceIndex).Mesh & 0xffu;
+            const uint mesh = context.instance.Mesh & 0xffu;
             if ((mesh >= 16u && mesh <= 19u) || mesh == 21u || mesh == 22u) context.draw.LodThreshold = 1.0;
         }
         context.instanceKey = uint2(context.draw.InstanceIndex + 1u, context.draw.InstanceGeneration);
-        context.instance = HsLoadGpuSceneInstance(context.draw.InstanceIndex);
         context.cachedSkin = (context.draw.MeshFlags & 0x40000u) != 0;
         context.cachedSkinHistory = (context.draw.MeshFlags & 0x80000u) != 0;
         if (context.cachedSkin)
         {
-            const uint4 skin = HsLoadGpuSceneSkin(context.draw.InstanceIndex);
+            const uint4 skin = HsLoadGpuSceneSkin(context.draw.InstanceIndex, context.skinVertexStrides);
             context.skinSlot = skin.x;
             context.skinVertexOffsets = skin.zw;
-            context.skinVertexStrides = HsLoadGpuSceneSkinStrides(context.draw.InstanceIndex);
         }
         context.instance.Mesh |= context.draw.MeshFlags;
         const uint resolved_mesh = context.instance.Mesh & 0xff;
@@ -798,9 +799,9 @@ SceneOutput SceneVS(SceneInput input, uint instance_id : SV_InstanceID, uint ver
                                (SceneDrawMaterial & 1u) != 0, true, GeometryShadowPass(instance_id));
 }
 
-SceneOutput LayeredTranslucencyCurrentVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
+SceneOutput SceneCurrentVS(SceneInput input, uint instance_id : SV_InstanceID, uint vertex_id : SV_VertexID)
 {
-    // Only the nearest composite writes motion guides; other Hero draws need the current pose.
+    // Coverage/peeling consume current geometry; motion consumers use SceneVS.
     return EvaluateSceneVertex(input, GeometryVisibleInstance(instance_id), vertex_id,
                                (SceneDrawMaterial & 1u) != 0, false, GeometryShadowPass(instance_id));
 }
@@ -1479,7 +1480,7 @@ float ShadowVisibility(float3 world, float3 world_dx, float3 world_dy)
     if (HsShadowMetadata.Load(324u) != 0u && asfloat(HsShadowMetadata.Load(348u)) == 0.0)
         return 1.0;
 #endif
-    float3 cascade_samples[3] = {float3(0.0, 0.0, 0.0), float3(0.0, 0.0, 0.0), float3(0.0, 0.0, 0.0)};
+    float4 cascade_projections[3] = {float4(0.0, 0.0, 0.0, 0.0), float4(0.0, 0.0, 0.0, 0.0), float4(0.0, 0.0, 0.0, 0.0)};
     float cascade_weights[3] = {0.0, 0.0, 0.0};
     int coarsest = 2;
     // A fully weighted finer cascade makes every coarser filter unobservable.
@@ -1491,7 +1492,8 @@ float ShadowVisibility(float3 world, float3 world_dx, float3 world_dy)
         if (any(uv < 0.0) || any(uv > 1.0) || projected.z < 0.0 || projected.z > 1.0)
             continue;
         const float edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
-        cascade_samples[cascade] = float3(uv, projected.z);
+        // Keep NDC and clip W for the receiver-plane derivative below.
+        cascade_projections[cascade] = projected;
         cascade_weights[cascade] = smoothstep(0.02, 0.12, edge);
         if (cascade_weights[cascade] == 1.0) { coarsest = cascade; break; }
     }
@@ -1500,16 +1502,16 @@ float ShadowVisibility(float3 world, float3 world_dx, float3 world_dy)
     [unroll] for (int cascade = 2; cascade >= 0; --cascade)
     {
         if (cascade > coarsest || cascade_weights[cascade] == 0.0) continue;
-        const float3 sample = cascade_samples[cascade];
+        const float4 projected = cascade_projections[cascade];
+        const float3 sample = float3(projected.xy * float2(0.5, -0.5) + 0.5, projected.z);
         const float4 tile = ShadowAtlasScaleOffset[cascade];
         const float2 atlas_uv = sample.xy * tile.xy + tile.zw;
         const float2 lower = tile.zw + ShadowAtlasTexelSize.xy * 0.5;
         const float2 upper = tile.zw + tile.xy - ShadowAtlasTexelSize.xy * 0.5;
-        const float4 projected = mul(float4(world, 1.0), ShadowViewProjection[cascade]);
         const float4 projected_dx = mul(float4(world_dx, 0.0), ShadowViewProjection[cascade]);
         const float4 projected_dy = mul(float4(world_dy, 0.0), ShadowViewProjection[cascade]);
-        const float3 ndc_dx = (projected_dx.xyz - projected.xyz / projected.w * projected_dx.w) / projected.w;
-        const float3 ndc_dy = (projected_dy.xyz - projected.xyz / projected.w * projected_dy.w) / projected.w;
+        const float3 ndc_dx = (projected_dx.xyz - projected.xyz * projected_dx.w) / projected.w;
+        const float3 ndc_dy = (projected_dy.xyz - projected.xyz * projected_dy.w) / projected.w;
         const float3 uv_dx = ndc_dx * float3(0.5, -0.5, 1.0);
         const float3 uv_dy = ndc_dy * float3(0.5, -0.5, 1.0);
         const float2 gradient = HsShadowPlaneGradient(uv_dx, uv_dy);
@@ -1695,7 +1697,7 @@ float3 BallisticVelocity(float3 velocity, float drag, float gravity, float dt)
 }
 void IntegrateFlatBallisticStep(inout ParticleData particle, float dt)
 {
-    const float floor_y = particle.CollisionMaterial.y + particle.CollisionMaterial.z;
+    const float floor_y = particle.CollisionMaterial.y + particle.CollisionMaterial.z - ParticleTerrain.y;
     float3 position = particle.PositionLife.xyz;
     float3 velocity = particle.CurrentVelocityDrag.xyz;
     position.y = max(position.y, floor_y);
@@ -2442,7 +2444,8 @@ Texture2D<float4> LayeredTranslucencyBackground : HS_TRANSLUCENCY_SRV_REGISTER(H
 Texture2D<uint> UnpeeledFragmentCount : HS_TRANSLUCENCY_SRV_REGISTER(HS_TRANSLUCENCY_SRV_UNPEELED);
 RWTexture2D<uint> UnpeeledFragmentCountCounter : register(u0, space14);
 
-float3 HsLayeredTranslucencyBackground(float3 world, float3 direction, float optical_path, float3 background)
+float3 HsLayeredTranslucencyBackground(float3 world, float3 direction, float optical_path,
+    uint2 source_pixel, float3 background)
 {
     // Rejected displaced lookups retain the valid source behind this interface.
     const float3 exit_world=world+direction*optical_path;
@@ -2451,6 +2454,8 @@ float3 HsLayeredTranslucencyBackground(float3 world, float3 direction, float opt
     const float2 uv=HsSurfaceClipUv(exit_clip);
     if(any(uv<0.0) || any(uv>=1.0)) return background;
     const uint2 sample_pixel=uint2(uv*ScreenSize.xy);
+    // Both accepted and rejected lookups return the already-loaded color at this pixel.
+    if(all(sample_pixel==source_pixel)) return background;
     float scene_depth=SurfaceDepth.Load(int3(sample_pixel,0));
 #if !defined(HS_SINGLE_LAYER_WATER)
     const uint next=LayeredTranslucencyInfo.x+1u;
@@ -2486,7 +2491,7 @@ float3 HsTranslucencyLighting(HsSurfaceClosure surface, float3 world,
     const float solid=saturate(surface.solid_transmission_weight);
     const bool total_internal=solid>0.0 && dot(transmitted,transmitted)==0.0;
     const float base_fresnel_override=total_internal ? 1.0 : -1.0;
-    const HsBsdfDirectView prepared=HsBsdfPrepareDirectView(surface,normalize(view),normalize(normal));
+    const HsBsdfDirectView prepared=HsBsdfPrepareDirectView(surface,view,normal);
     float3 diffuse,specular,ambient_specular,ambient_diffuse;
     EnvironmentLightingComponents(solid<1.0,surface,world,view,HsLightAllMask,
         ShadowVisibility(world,world_dx,world_dy),base_fresnel_override,prepared,diffuse,specular,ambient_specular,ambient_diffuse);
@@ -2523,7 +2528,7 @@ float3 HsTranslucencyLighting(HsSurfaceClosure surface, float3 world,
     const float3 exit_world=world+transmitted*optical_path;
     const float4 exit_clip=mul(float4(exit_world,1.0),ViewProjection);
     if(layer_transport && MaterialQualityOptions.w>0.0)
-        background=HsLayeredTranslucencyBackground(world,transmitted,optical_path,layer_background);
+        background=HsLayeredTranslucencyBackground(world,transmitted,optical_path,uint2(pixel),layer_background);
     else if(!layer_transport && MaterialQualityOptions.w>0.0 && exit_clip.w>0.0)
     {
         const float2 uv=HsSurfaceClipUv(exit_clip);
@@ -2767,8 +2772,8 @@ float4 HsLayeredTranslucencyCompositeSurface(SceneOutput input,bool front,HsSurf
     HsSceneGradients gradients)
 {
     const uint layer=LayeredTranslucencyInfo.x;
-    const float3 view=normalize(CameraTime.xyz-input.WorldPosition);
-    const float3 geometric_normal=normalize(input.WorldNormal);
+    const float3 to_eye=CameraTime.xyz-input.WorldPosition;
+    const float3 view=normalize(to_eye);
     float3 normal=normalize(surface.normal);
     if(dot(normal,view)<0.0) normal=-normal;
     const float3 transmitted=refract(-view,normal,front ? 1.0/surface.ior : surface.ior);
@@ -2777,11 +2782,14 @@ float4 HsLayeredTranslucencyCompositeSurface(SceneOutput input,bool front,HsSurf
     float path=-1.0;
     if(exit_depth>0.0 && dot(transmitted,transmitted)>0.0)
     {
-        const float3 exit_world=HsReconstructSurfaceRelative(
-            HsSurfaceRasterUv(int2(input.Position.xy)),exit_depth)+SurfaceViewOrigin.xyz;
+        const float2 exit_uv=HsSurfaceRasterUv(int2(input.Position.xy));
+        const float exit_inverse_w=mul(float4(exit_uv*float2(2.0,-2.0)+float2(-1.0,1.0),exit_depth,1.0),
+            InverseViewProjection).w;
+        const float3 geometric_normal=normalize(input.WorldNormal);
         const float denominator=abs(dot(transmitted,geometric_normal));
         if(denominator>0.0)
-            path=length(exit_world-input.WorldPosition)*abs(dot(view,geometric_normal))/denominator;
+            // Clip-W ratios give the ray distance; its camera length cancels the view cosine.
+            path=abs((input.Position.w-exit_inverse_w)*dot(to_eye,geometric_normal))/(exit_inverse_w*denominator);
     }
     // The paired exit provides a measured local slab. Open geometry uses only
     // the authored metre-valued thickness; another instance can never supply it.

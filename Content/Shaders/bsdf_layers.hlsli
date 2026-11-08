@@ -227,7 +227,6 @@ HsSurfaceClosure HsBsdfCoatSurface(HsSurfaceClosure surface)
 struct HsBsdfDirectView
 {
     HsBsdfGgxView base, coat;
-    float3 coat_normal, coat_view;
     float3 normal, view, f0;
     float no_v, solid_f0, coat_entry;
 };
@@ -236,6 +235,7 @@ float HsBsdfCoatFresnel(float cosine);
 
 HsBsdfDirectView HsBsdfPrepareDirectView(HsSurfaceClosure surface, float3 view, float3 normal)
 {
+    // The oriented unit frame is shared by the substrate and inherited coat.
     HsBsdfDirectView result = (HsBsdfDirectView)0;
     result.normal = normal; result.view = view;
     result.no_v = saturate(dot(normal, view));
@@ -247,9 +247,7 @@ HsBsdfDirectView HsBsdfPrepareDirectView(HsSurfaceClosure surface, float3 view, 
         result.base = HsBsdfPrepareGgxView(surface, normal, view);
     if (surface.coat_weight > 0.0)
     {
-        result.coat_normal = normalize(surface.normal);
-        result.coat_view = normalize(view);
-        result.coat = HsBsdfPrepareGgxView(HsBsdfCoatSurface(surface), result.coat_normal, result.coat_view);
+        result.coat = HsBsdfPrepareGgxView(HsBsdfCoatSurface(surface), normal, view);
     }
     return result;
 }
@@ -415,7 +413,7 @@ float3 HsBsdfEvaluateLayeredComponentsView(HsSurfaceClosure surface, float3 view
     {
         float3 coat_diffuse;
         result += coat_weight * HsBsdfBaseEvaluateOpticalComponentsView(HsBsdfCoatSurface(surface),
-            prepared.coat_normal, prepared.coat_view, normalize(light), -1.0, prepared.coat, float3(0.04, 0.04, 0.04), coat_diffuse);
+            prepared.normal, prepared.view, light, -1.0, prepared.coat, float3(0.04, 0.04, 0.04), coat_diffuse);
     }
     if (no_l < 0.0) diffuse = result;
     return result;

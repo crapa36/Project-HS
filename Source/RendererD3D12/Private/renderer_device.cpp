@@ -1076,7 +1076,7 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
         terrain_sections_null.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
         terrain_sections_null.Buffer.NumElements=1;terrain_sections_null.Buffer.StructureByteStride=sizeof(GpuTerrainSection);
         device->CreateShaderResourceView(nullptr,&terrain_sections_null,cpu(kTerrainPageDescriptorOffset+HS_TERRAIN_SECTION_SRV));
-        terrain_sections_null.Buffer.StructureByteStride=sizeof(TextureMipMetadata);
+        terrain_sections_null.Buffer.StructureByteStride=sizeof(GpuTerrainPlaneMip);
         device->CreateShaderResourceView(nullptr,&terrain_sections_null,cpu(kTerrainPageDescriptorOffset+HS_TERRAIN_MIP_SRV));
         for (UINT plane = 0; plane < kTerrainPagePlaneCapacity; ++plane)
             create_null_texture(kTerrainPageDescriptorOffset+HS_TERRAIN_PLANE_SRV+plane,D3D12_SRV_DIMENSION_TEXTURE2D,

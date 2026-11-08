@@ -13,10 +13,9 @@ StructuredBuffer<uint> MeadowControls : register(t7);
 SamplerState Wrap : register(s0);
 SamplerState Clamp : register(s1);
 RWTexture2DArray<float4> Target : register(u0);
-cbuffer Page : register(b0) { HsTerrainSection Section; uint PlaneIndex, Edge; };
+cbuffer Page : register(b0) { HsTerrainSection Section; uint PlaneIndex, Edge; float2 ParentCenter, ParentSpan; };
 
-[numthreads(8,8,1)]
-void BakeCS(uint3 id : SV_DispatchThreadID)
+void Bake(uint3 id, uint plane)
 {
     if(any(id.xy>=Edge)) return;
     // Continue this receiver's material outside its geometric boundary, as
@@ -27,6 +26,9 @@ void BakeCS(uint3 id : SV_DispatchThreadID)
     float2 c=Section.rotation;
     float2 xAxis=float2(c.x,-c.y), zAxis=c.yx;
     float2 world=Section.center+local.x*xAxis+local.y*zAxis;
+    const float2 parentDelta=world-ParentCenter;
+    const float2 meadowLocal=Section.mesh==22u && all(ParentSpan!=0)
+        ? float2(dot(parentDelta,xAxis),dot(parentDelta,zAxis))*24.0/ParentSpan : world;
     float2 dx=xAxis*Section.span.x/interior, dy=zAxis*Section.span.y/interior;
     float2 controls=0;
     if(Section.mesh==22u) {
@@ -35,11 +37,17 @@ void BakeCS(uint3 id : SV_DispatchThreadID)
     }
     HsMaterialTerrainResult m=EnvTerrain(Sources[0],Sources[1],Sources[2],Sources[3],Sources[4],Sources[5],
         Wrap,Clamp,float3(world.x,0,world.y),float3(dx.x,0,dx.y),float3(dy.x,0,dy.y),
-        Section.mesh,Section.seed,float3(0,1,0),0,0,1,2,3,4,5,controls);
-    if(PlaneIndex==0u) Target[uint3(id.xy,0)]=float4(HsSrgbEncode(m.base_color),m.roughness);
-    else if(PlaneIndex==1u) Target[uint3(id.xy,0)]=float4(m.normal.xy*.5+.5,m.ao,saturate(m.residual_depth/.05));
+        Section.mesh,Section.seed,float3(0,1,0),0,0,1,2,3,4,5,controls,meadowLocal);
+    if(plane==0u) Target[uint3(id.xy,0)]=float4(HsSrgbEncode(m.base_color),m.roughness);
+    else if(plane==1u) Target[uint3(id.xy,0)]=float4(m.normal.xy*.5+.5,m.ao,saturate(m.residual_depth/.05));
     else Target[uint3(id.xy,0)]=m.layer_weights;
 }
+[numthreads(8,8,1)]
+void BakeColorCS(uint3 id : SV_DispatchThreadID) { Bake(id, 0u); }
+[numthreads(8,8,1)]
+void BakeBaseCS(uint3 id : SV_DispatchThreadID) { Bake(id, 1u); }
+[numthreads(8,8,1)]
+void BakeWeightCS(uint3 id : SV_DispatchThreadID) { Bake(id, 2u); }
 [numthreads(8,8,1)]
 void MipCS(uint3 id : SV_DispatchThreadID)
 {

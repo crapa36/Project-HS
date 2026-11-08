@@ -80,14 +80,21 @@ struct HsLightQuery
 };
 HsLightQuery HsBeginLightQuery(float3 world, uint type_mask, bool force_world_query)
 {
-    const uint4 dimensions = HsLightRanges.Load4(224u);
-    const uint4 limits = HsLightRanges.Load4(240u);
     HsLightQuery query = (HsLightQuery)0;
     query.mask = type_mask;
+    query.world_query = force_world_query;
+    if ((type_mask & HsLightAllMask) == 0u) return query;
+    // Directional-only consumers need just the partition boundary. Avoid
+    // loading local-grid dimensions and total-light limits on that path.
+    if ((type_mask & HsLightLocalMask) == 0u)
+    {
+        query.directional_count = HsLightRanges.Load(236u);
+        return query;
+    }
+    const uint4 dimensions = HsLightRanges.Load4(224u);
+    const uint4 limits = HsLightRanges.Load4(240u);
     query.directional_count = dimensions.w;
     query.light_count = limits.x;
-    query.world_query = force_world_query;
-    if ((type_mask & HsLightLocalMask) == 0u) return query;
     if (query.world_query)
     {
         query.local_cursor = query.directional_count;
@@ -200,7 +207,7 @@ bool HsLightIncident(uint index, float3 world, out float3 direction, out float3 
 // is evaluated by HsLightListEvaluateComponents below, not by this accessor.
 bool HsPrimaryDirectional(out float3 toward_light, out float3 incident)
 {
-    const uint count = HsLightRanges.Load4(224u).w;
+    const uint count = HsLightRanges.Load(236u);
     toward_light = float3(0.0, 1.0, 0.0); incident = 0.0;
     if (count == 0u) return false;
     uint owner = 0u;

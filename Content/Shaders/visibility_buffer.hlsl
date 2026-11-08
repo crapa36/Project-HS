@@ -235,7 +235,8 @@ HsVisibilityOutput CharacterVisibilityPS(SceneOutput input, bool front : SV_IsFr
 HsSceneVertexContext HsResolveVertexContext(HsRasterRecord record,
                                             GeometryDrawRecord geometry,
                                             StaticDrawRef draw,
-                                            uint rasterRecordId)
+                                            uint rasterRecordId,
+                                            uint4 sceneHeader1, uint4 sceneHeader2, uint4 sceneHeader3)
 {
     HsSceneVertexContext context = (HsSceneVertexContext)0;
     context.draw = draw;
@@ -251,22 +252,22 @@ HsSceneVertexContext HsResolveVertexContext(HsRasterRecord record,
 #endif
     const bool staticSource = HsRasterSourceIsStatic(record.refSource);
     if (staticSource)
-        context.instance = HsLoadGpuSceneInstance(HsStaticScene, draw.InstanceIndex);
+        context.instance = HsLoadGpuSceneInstance(HsStaticScene, draw.InstanceIndex,
+            sceneHeader1, sceneHeader2, sceneHeader3);
     else
-        context.instance = HsLoadGpuSceneInstance(HsDynamicScene, draw.InstanceIndex);
+        context.instance = HsLoadGpuSceneInstance(HsDynamicScene, draw.InstanceIndex,
+            sceneHeader1, sceneHeader2, sceneHeader3);
 #ifndef HS_TERRAIN_VISIBILITY_RESOLVE
     if (context.cachedSkin)
     {
         uint4 skin;
         if (staticSource)
-            skin = HsLoadGpuSceneSkin(HsStaticScene, draw.InstanceIndex);
+            skin = HsLoadGpuSceneSkin(HsStaticScene, draw.InstanceIndex,
+                sceneHeader1, sceneHeader2, sceneHeader3, context.skinVertexStrides);
         else
-            skin = HsLoadGpuSceneSkin(draw.InstanceIndex);
+            skin = HsLoadGpuSceneSkin(draw.InstanceIndex, context.skinVertexStrides);
         context.skinSlot = skin.x;
         context.skinVertexOffsets = skin.zw;
-        context.skinVertexStrides = staticSource
-            ? HsLoadGpuSceneSkinStrides(HsStaticScene, draw.InstanceIndex)
-            : HsLoadGpuSceneSkinStrides(draw.InstanceIndex);
     }
 #endif
     context.instance.Mesh |= draw.MeshFlags;
@@ -317,7 +318,8 @@ bool HsLoadResolveTriangle(uint2 pixel, uint2 visibility,
     const SceneInput input1 = LoadGeometryVertex(descriptors, indices.y);
     const SceneInput input2 = LoadGeometryVertex(descriptors, indices.z);
     const HsSceneVertexContext context =
-        HsResolveVertexContext(record, geometry, draw, visibility.x);
+        HsResolveVertexContext(record, geometry, draw, visibility.x,
+            sceneHeader1, sceneHeader2, sceneHeader3);
     vertex0 = EvaluateSceneVertex(input0, context, indices.x);
     vertex1 = EvaluateSceneVertex(input1, context, indices.y);
     vertex2 = EvaluateSceneVertex(input2, context, indices.z);
@@ -406,8 +408,9 @@ SceneOutput HsInterpolateSceneOutput(SceneOutput a, SceneOutput b, SceneOutput c
     SceneOutput output = (SceneOutput)0;
     output.Position = float4((float2)pixel + 0.5,
         SurfaceDepth.Load(int3(pixel, 0)), rcp(sample.clipW));
-    output.WorldNormal = normalize(HsInterpolate3(a.WorldNormal, b.WorldNormal,
-                                                   c.WorldNormal, sample.barycentric));
+    // Match raster interpolation; material evaluation normalizes the normal.
+    output.WorldNormal = HsInterpolate3(a.WorldNormal, b.WorldNormal,
+                                      c.WorldNormal, sample.barycentric);
     if ((demand & HsResolveWorld) != 0u)
         output.WorldPosition = HsInterpolate3(a.WorldPosition, b.WorldPosition,
                                                c.WorldPosition, sample.barycentric);

@@ -225,6 +225,7 @@ struct FsrSession::Impl
     FsrUpscaleRequirements requirements;
 #if HS_WITH_FSR
     ComPtr<ID3D12Device> device;
+    std::map<DXGI_FORMAT, D3D12_FEATURE_DATA_FORMAT_SUPPORT> format_support;
     DWORD owner_thread{};
     std::filesystem::path directory;
     NativeApi upscale_api, generation_api;
@@ -353,9 +354,16 @@ struct FsrSession::Impl
             (output ? state != D3D12_RESOURCE_STATE_UNORDERED_ACCESS : !ReadState(state)) ||
             (output && !(resource->GetDesc().Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)))
             return FsrFailure(ErrorCode::InvalidArgument, std::string("Invalid FSR ") + name + " format, rectangle, flags or incoming state.");
-        D3D12_FEATURE_DATA_FORMAT_SUPPORT support{expected};
-        if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))) ||
-            !(support.Support1 & D3D12_FORMAT_SUPPORT1_TEXTURE2D) ||
+        auto found = format_support.find(expected);
+        if (found == format_support.end())
+        {
+            D3D12_FEATURE_DATA_FORMAT_SUPPORT support{expected};
+            if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support))))
+                return FsrFailure(ErrorCode::InvalidArgument, std::string("Device lacks FSR ") + name + " format support.");
+            found = format_support.emplace(expected, support).first;
+        }
+        const auto &support = found->second;
+        if (!(support.Support1 & D3D12_FORMAT_SUPPORT1_TEXTURE2D) ||
             (output ? !(support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) : !(support.Support1 & D3D12_FORMAT_SUPPORT1_SHADER_LOAD)))
             return FsrFailure(ErrorCode::InvalidArgument, std::string("Device lacks FSR ") + name + " format support.");
         return Result::Success();

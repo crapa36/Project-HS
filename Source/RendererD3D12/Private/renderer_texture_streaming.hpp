@@ -202,6 +202,7 @@ struct TextureStreamRegistration
     bool opacity_sampling{true};
     NativeResourceContract fallback_contract{};
     bool srgb_view{};
+    bool sampler_feedback{true};
 };
 struct TextureStreamView
 {
@@ -231,10 +232,9 @@ struct TextureStreamingLayout
         TextureHandle sampled{}, candidate{};
         ResourceVersion sampled_version{};
         render_data::TextureDescription description{};
-        std::uint32_t first_mip{}, resident_min_mip{}, target_mip{};
+        std::uint32_t first_mip{}, target_mip{};
         std::uint32_t map_count{}, unmap_count{}, pass_index{}, pass_id{};
         std::vector<std::uint32_t> mapped_mips, unmapped_mips;
-        Access access{Access::Undefined};
         bool pending{}, separate_target{}, reserved{}, copy_upload{}, software_copy{};
         bool opacity_sampling{true};
     };

@@ -2,8 +2,8 @@
 #include "renderer_reconstruction.hpp"
 #include "renderer_named_animation.hpp"
 #include "renderer_entity_surface.hpp"
+#include <array>
 #include <numbers>
-#include <unordered_set>
 
 namespace hs
 {
@@ -21,7 +21,7 @@ bool ExtentValid(ViewExtent e)
 }
 }
 
-Result D3D12Renderer::Impl::ValidateFrameInput(const RenderPackage &input)
+Result D3D12Renderer::Impl::ValidateFrameInput(const RenderPackage &input, PreparedVfxHeroVolumes &hero_volumes)
 {
     if (input.views.empty()) return ViewFailure("A render frame requires at least one view.");
     {
@@ -122,14 +122,15 @@ Result D3D12Renderer::Impl::ValidateFrameInput(const RenderPackage &input)
     const auto scene = input.snapshots.has_current ? input.snapshots.current.static_scene.get() : nullptr;
     if (scene && !scene->content_generation_id.empty() && scene->content_generation_id != resource_generation_id)
         return ViewFailure("Frame scene generation must match the resident GPU asset generation.");
-    return ValidateFramePayload(input);
+    return PrepareFramePayload(input, hero_volumes);
 }
 
-Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_input)
+Result D3D12Renderer::Impl::PrepareFramePayload(const RenderPackage &frame_input, PreparedVfxHeroVolumes &hero_volumes)
 {
     const auto &input = frame_input;
-    std::unordered_set<std::uint64_t> fresnel_ids;
     if (input.vfx.fresnels.size() > 32) return ViewFailure("Too many Fresnel shell commands.");
+    std::array<std::uint64_t, 32> fresnel_ids;
+    std::size_t fresnel_count{};
     const auto &fresnel_recipe_view = input.vfx.fresnel_recipe_view;
     const auto fresnel_recipes = fresnel_recipe_view.Rows();
     if (!input.vfx.fresnels.empty() && !fresnel_recipe_view.IsAdmitted())
@@ -144,7 +145,6 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_inpu
         };
         if (source.render_instance_id == 0 || source.stable_id == 0 ||
             source.recipe_index >= fresnel_recipes.size() ||
-            !fresnel_ids.insert(source.stable_id).second ||
             !finite_transform(source.current_transform) ||
             !finite_transform(source.previous_transform) ||
             !std::isfinite(source.footprint_radius) || source.footprint_radius <= 0.0f ||
@@ -153,7 +153,13 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_inpu
             !std::isfinite(source.elapsed_seconds) || source.elapsed_seconds < 0.0f)
             return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                    "Invalid Fresnel shell command.");
+        fresnel_ids[fresnel_count++] = source.stable_id;
     }
+    const auto used_fresnel_ids = std::span(fresnel_ids).first(fresnel_count);
+    std::ranges::sort(used_fresnel_ids);
+    if (std::adjacent_find(used_fresnel_ids.begin(), used_fresnel_ids.end()) != used_fresnel_ids.end())
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                               "Invalid Fresnel shell command.");
     const auto &mesh_recipe_view = input.vfx.mesh_recipe_view;
     const auto mesh_recipes = mesh_recipe_view.Rows();
     if (!input.vfx.meshes.empty() && !mesh_recipe_view.IsAdmitted())
@@ -523,7 +529,7 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_inpu
            v.gradient_row>=vfx_gradient_rows||v.shape>VfxScreenShape::DirectionalArc)
             return ViewFailure("Screen overlay command violates its analytic opacity contract.");
     }
-    if (auto r = ValidateVfxHeroVolumes(input.vfx.volumes, vfx_gradient_rows); !r) return r;
+    if (auto r = PrepareVfxHeroVolumes(input.vfx.volumes, vfx_gradient_rows, hero_volumes); !r) return r;
     std::uint64_t gaps{};
     for (const auto &ground : input.vfx.ground) gaps += ground.geometry.GapCount();
     for (const auto &distortion : input.vfx.distortions)
@@ -540,12 +546,10 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_inpu
     {
         for (const auto &command : input.vfx.entity_surfaces)
         {
-            const auto already_present = [&](const auto &instances) {
-                return std::ranges::any_of(instances,
-                    [&](const auto &instance) { return instance.stable_id == command.render_instance_id; });
-            };
-            if (!command.has_retained_instance || already_present(render_instances) ||
-                already_present(prepared_instances)) continue;
+            if (!command.has_retained_instance ||
+                std::ranges::any_of(prepared_instances, [&](const auto &instance) {
+                    return instance.stable_id == command.render_instance_id;
+                })) continue;
             const auto &instance = command.retained_instance;
             if (instance.stable_id != command.render_instance_id ||
                 instance.mesh < RenderMesh::BossFiveMinute || instance.mesh > RenderMesh::BossFinal ||
@@ -555,29 +559,29 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_inpu
             prepared_instances.push_back(instance);
         }
     }
-    const auto retained_instances = std::span(prepared_instances).subspan(render_instances.size());
     const auto render_instance_count = prepared_instances.size();
+    if (render_instance_count > UINT32_MAX / 12u) return ViewFailure("Dynamic visibility output index overflow.");
+    // Admission finishes before LOD ordering reuses this source-index scratch.
+    auto &source_order = prepared_scene_package.order_scratch;
+    source_order.resize(render_instance_count);
+    for (std::size_t index = 0; index < render_instance_count; ++index)
+        source_order[index] = static_cast<std::uint32_t>(index);
+    const auto source_id = [&](std::uint32_t index) { return prepared_instances[index].stable_id; };
+    std::ranges::sort(source_order, {}, source_id);
+    if (std::adjacent_find(source_order.begin(), source_order.end(), [&](auto a, auto b) {
+            return source_id(a) != 0 && source_id(a) == source_id(b);
+        }) != source_order.end())
+        return ViewFailure("Dynamic render scene identities are invalid or duplicated.");
     std::vector<VfxEntitySurfaceCommand> admitted_surfaces;
     for (const auto &command : input.vfx.entity_surfaces)
-        if (std::ranges::any_of(render_instances, [&](const auto &instance) {
-                return instance.stable_id == command.render_instance_id &&
-                    instance.mesh >= RenderMesh::BossFiveMinute && instance.mesh <= RenderMesh::BossFinal;
-            }) || std::ranges::any_of(retained_instances, [&](const auto &instance) {
-                return instance.stable_id == command.render_instance_id &&
-                    instance.mesh >= RenderMesh::BossFiveMinute && instance.mesh <= RenderMesh::BossFinal;
+    {
+        const auto owners = std::ranges::equal_range(source_order, command.render_instance_id, {}, source_id);
+        if (std::ranges::any_of(owners, [&](std::uint32_t index) {
+                const auto mesh = prepared_instances[index].mesh;
+                return mesh >= RenderMesh::BossFiveMinute && mesh <= RenderMesh::BossFinal;
             })) admitted_surfaces.push_back(command);
+    }
     if (auto r = prepared_scene_package.entity_surfaces.Build(admitted_surfaces); !r) return r;
-    std::unordered_set<RenderSceneInstanceKey, RenderSceneInstanceKeyHash> source_keys;
-    bool unique_sources = render_instance_count <= UINT32_MAX;
-    for (std::size_t index = 0; unique_sources && index < render_instances.size(); ++index)
-        unique_sources = source_keys.emplace(MakeRenderSceneInstanceKey(
-            render_instances[index].stable_id, static_cast<std::uint32_t>(index))).second;
-    for (std::size_t index = 0; unique_sources && index < retained_instances.size(); ++index)
-        unique_sources = source_keys.emplace(MakeRenderSceneInstanceKey(
-            retained_instances[index].stable_id,
-            static_cast<std::uint32_t>(render_instances.size() + index))).second;
-    if (!unique_sources)
-        return ViewFailure("Dynamic render scene identities are invalid or duplicated.");
     const auto validate_animation = [&](const RenderInstance &instance) -> Result {
         if (!instance.animation_clip_id.value) return Result::Success();
         if (instance.mesh != RenderMesh::Archer)
@@ -593,9 +597,7 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_inpu
             : SampleNamedCharacterAnimation(archer_named_animations, instance, std::span(prepared.bones.data(), archer_bone_count));
         return sampled;
     };
-    for (const auto &instance : render_instances)
-        if (auto r = validate_animation(instance); !r) return r;
-    for (const auto &instance : retained_instances)
+    for (const auto &instance : prepared_instances)
         if (auto r = validate_animation(instance); !r) return r;
     if (static_scene && (!static_gpu_scene || static_gpu_scene->source != static_scene))
     {
@@ -620,16 +622,11 @@ Result D3D12Renderer::Impl::ValidateFramePayload(const RenderPackage &frame_inpu
     }
     if (static_scene)
     {
-        for (const auto &instance : render_instances)
-            if (instance.stable_id && std::ranges::binary_search(static_scene->static_keys,
-                    instance.stable_id, {}, &RenderSceneInstanceKey::stable_id))
-                return ViewFailure("Dynamic render identity collides with the immutable process scene.");
-        for (const auto &instance : retained_instances)
+        for (const auto &instance : prepared_instances)
             if (instance.stable_id && std::ranges::binary_search(static_scene->static_keys,
                     instance.stable_id, {}, &RenderSceneInstanceKey::stable_id))
                 return ViewFailure("Dynamic render identity collides with the immutable process scene.");
     }
-    if (render_instance_count > UINT32_MAX / 12u) return ViewFailure("Dynamic visibility output index overflow.");
     std::string ribbon_error;
     if (config.ribbon_history_points < kRibbonHistorySamples)
         return ViewFailure("Ribbon point budget must provide at least one 64-sample slot");
@@ -713,6 +710,13 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
     if (auto r = PrepareReconstructionProvider(config.reconstruction_request ? &*config.reconstruction_request : nullptr,
             reconstruction_config.dynamic_resolution, config.dynamic_min_percent, config.dynamic_max_percent, input.output_extent,
             v.reconstruction_plan, native_capacity, v.reconstruction_provider, &config); !r) return r;
+    const auto capacity = input.render_capacity;
+    if (v.reconstruction_provider && (native_capacity.width > capacity.width || native_capacity.height > capacity.height ||
+        input.render_active.width < v.reconstruction_plan.input_minimum.width ||
+        input.render_active.height < v.reconstruction_plan.input_minimum.height ||
+        input.render_active.width > v.reconstruction_plan.input_maximum.width ||
+        input.render_active.height > v.reconstruction_plan.input_maximum.height))
+        return ViewFailure("Requested view capacity/active extent does not cover the selected native reconstruction domain.");
     if (auto r = PrepareOptionTargets(v.targets, input.render_capacity.width, input.render_capacity.height,
             config.shadow_resolution, config.bloom, input.output_extent.width, input.output_extent.height,
             UsesInternalResolveTargets(v.reconstruction_plan),
@@ -731,43 +735,12 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewInput &input, std::
     }
     if (auto r = PrepareExposureResources(v); !r) return r;
     const auto completed = graph_queue_executor.Completed();
-    const auto capacity = input.render_capacity;
-    AdaptiveShadingCandidate adaptive;
-    AmbientOcclusionCandidate ambient;
-    SubsurfaceCandidate diffusion; ScreenReflectionsCandidate reflections;
-    LayeredTranslucencyCandidate transparency; HdrPostCandidate hdr; ScreenOverlayCandidate overlay;
-    DecalSurfaceCandidate decals;
-    LightListCandidate lights;
-    VirtualShadowCandidate shadows; AdditionalShadowPrepared additional; VolumetricPrepared volume;
-    if (auto r = PrepareAdaptiveShading(v, config, capacity, adaptive); !r) return r;
-    if (auto r = PrepareAmbientOcclusion(v, config, capacity, ambient, adaptive.Status().compute_ready); !r) return r;
-    if (auto r = PrepareSurfaceLighting(v, config, capacity, diffusion, reflections); !r) return r;
-    if (auto r = PrepareLayeredTranslucency(v, config, capacity, transparency); !r) return r;
-    if (auto r = PrepareHdrPost(v, config, capacity, input.output_extent, hdr); !r) return r;
-    if (auto r = PrepareScreenOverlay(config, capacity, overlay); !r) return r;
-    if (auto r = PrepareLightList(v, config, capacity, lights); !r) return r;
-    if (auto r = PrepareDecalSurface(config, capacity, decal_work, decals); !r) return r;
-    if (auto r = PrepareVirtualShadows(v, config, capacity, shadows); !r) return r;
-    if (auto r = PrepareAdditionalShadows(v, config, capacity, additional); !r) return r;
-    if (auto r = PrepareVolumetrics(v, config, capacity, volume); !r) return r;
-    if (auto r = v.adaptive_shading.Commit(std::move(adaptive), completed); !r) return r;
-    if (auto r = v.ambient_occlusion.Commit(std::move(ambient), completed); !r) return r;
-    if (auto r = v.subsurface.Commit(std::move(diffusion), completed); !r) return r;
-    if (auto r = v.screen_reflections.Commit(std::move(reflections), completed); !r) return r;
-    if (auto r = v.translucency.Commit(std::move(transparency), completed); !r) return r;
-    if (auto r = v.hdr_post.Commit(std::move(hdr), completed); !r) return r;
-    if (auto r = v.screen_overlay.Commit(std::move(overlay), completed); !r) return r;
-    if (auto r = v.light_list.Commit(std::move(lights), completed); !r) return r;
-    if (auto r = v.decal_surface.Commit(std::move(decals), completed); !r) return r;
-    if (auto r = v.virtual_shadows.Commit(std::move(shadows), completed); !r) return r;
-    if (auto r = v.local_shadows.Commit(std::move(additional.local), completed); !r) return r;
-    if (auto r = v.volumetrics.Commit(std::move(volume.service), completed); !r) return r;
-    if (v.reconstruction_provider && (native_capacity.width > capacity.width || native_capacity.height > capacity.height ||
-        input.render_active.width < v.reconstruction_plan.input_minimum.width ||
-        input.render_active.height < v.reconstruction_plan.input_minimum.height ||
-        input.render_active.width > v.reconstruction_plan.input_maximum.width ||
-        input.render_active.height > v.reconstruction_plan.input_maximum.height))
-        return ViewFailure("Requested view capacity/active extent does not cover the selected native reconstruction domain.");
+    ViewFeatureCandidates features;
+    if (auto r = PrepareViewFeatures(v, config, capacity, input.output_extent, decal_work, features); !r)
+        return r;
+    if (auto r = CommitViewFeaturePrefix(v, features, completed); !r) return r;
+    if (auto r = CommitAdditionalShadows(v, std::move(features.additional)); !r) return r;
+    if (auto r = CommitVolumetrics(v, std::move(features.volume)); !r) return r;
     ReconstructionGuidesCandidate guides;
     if (v.reconstruction_provider)
     {

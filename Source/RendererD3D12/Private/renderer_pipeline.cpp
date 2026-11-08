@@ -516,7 +516,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
         if (auto read = ReadRendererMaterialProgram(pipeline_config, *program, bytes); !read) return read;
         return register_shader_owner(program->product_id, bytes, true);
     };
-    std::vector<std::byte> scene_vertex;
+    std::vector<std::byte> scene_vertex, visibility_vertex;
     std::vector<std::byte> cluster_vertex, cluster_shadow_vertex;
     std::vector<std::byte> scene_mesh;
     std::vector<std::byte> shadow_mesh;
@@ -577,7 +577,8 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     std::vector<std::byte> ribbon_oit_ps;
     for (auto [name, bytes] : {
              std::pair{"scene_vs.dxil", &scene_vertex},
-             std::pair{"cluster_scene_vs.dxil", &cluster_vertex},
+             std::pair{config.surface_frontend == SurfaceFrontend::VisibilityBuffer
+                 ? "cluster_scene_current_vs.dxil" : "cluster_scene_vs.dxil", &cluster_vertex},
              std::pair{"cluster_shadow_vs.dxil", &cluster_shadow_vertex},
              std::pair{"shadow_vs.dxil", &shadow_vertex},
              std::pair{"shadow_ps.dxil", &shadow_pixel},
@@ -691,6 +692,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     if (config.surface_frontend == SurfaceFrontend::VisibilityBuffer)
     {
         for (auto [name, bytes] : {
+                 std::pair{"scene_current_vs.dxil", &visibility_vertex},
                  std::pair{"visibility_ps.dxil", &visibility_pixel},
                  std::pair{"surface_resolve_cs.dxil", &surface_resolve_compute},
                  std::pair{"raster_records_cs.dxil", &raster_records_compute},
@@ -707,7 +709,8 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     ComPtr<ID3D12Device2> mesh_device;
     if (mesh_shader_enabled)
     {
-        if (auto read = read_shader("scene_ms.dxil", scene_mesh); !read)
+        if (auto read = read_shader(config.surface_frontend == SurfaceFrontend::VisibilityBuffer
+                ? "scene_current_ms.dxil" : "scene_ms.dxil", scene_mesh); !read)
             return read;
         if (auto read = read_shader("shadow_ms.dxil", shadow_mesh); !read)
             return read;
@@ -928,6 +931,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     if (config.surface_frontend == SurfaceFrontend::VisibilityBuffer)
     {
         auto visibility = scene;
+        visibility.VS = {visibility_vertex.data(), visibility_vertex.size()};
         visibility.PS = {visibility_pixel.data(), visibility_pixel.size()};
         visibility.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
         visibility.NumRenderTargets = 2;

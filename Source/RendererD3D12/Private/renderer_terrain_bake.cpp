@@ -80,11 +80,12 @@ std::vector<UINT> MeadowControls(std::span<const render_data::ExpandedVertex> ve
 struct D3D12Renderer::Impl::TerrainPagePreparation
 {
     ComPtr<ID3D12RootSignature> root;
-    ComPtr<ID3D12PipelineState> bake,mip;
+    std::array<ComPtr<ID3D12PipelineState>,3> bake;
+    ComPtr<ID3D12PipelineState> mip;
     ComPtr<ID3D12DescriptorHeap> heap;
     AllocationResource output,controls,readback;
     std::array<AllocationResource,6> sources;
-    std::vector<TerrainSection> sections;
+    std::vector<TerrainSection> sections, parent_sections;
     std::vector<render_data::TerrainSurfaceTile> tiles;
     std::vector<render_data::ExpandedVertex> meadow_vertices;
     std::vector<UINT> meadow_indices;
@@ -104,6 +105,7 @@ Result D3D12Renderer::Impl::BakeTerrainPages(const std::shared_ptr<const StaticR
         if(!std::isfinite(s.x)||!std::isfinite(s.z)||!std::isfinite(s.span_x)||!std::isfinite(s.span_z)||
             !std::isfinite(s.cosine)||!std::isfinite(s.sine)) return TerrainFailure("Nonfinite terrain page transform.");
     candidate->tiles=render_data::BuildTerrainSurfaceTiles(sections);
+    candidate->parent_sections=candidate->sections;
     candidate->sections.clear();
     for(const auto &tile:candidate->tiles) candidate->sections.push_back(tile.section);
     if(sections.empty()) return TerrainFailure("Terrain page bake requires a nonempty tile set.");
@@ -176,7 +178,7 @@ Result D3D12Renderer::Impl::BakeTerrainPages(const std::shared_ptr<const StaticR
     D3D12_ROOT_PARAMETER params[5]{};
     for(UINT i=0;i<3;++i){params[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[i].DescriptorTable={1,&ranges[i]};}
     params[3].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;params[3].Descriptor={7,0};
-    params[4].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[4].Constants={0,0,10};
+    params[4].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[4].Constants={0,0,14};
     D3D12_STATIC_SAMPLER_DESC samplers[2]{};
     for(UINT i=0;i<2;++i)
     {
@@ -199,7 +201,10 @@ Result D3D12Renderer::Impl::BakeTerrainPages(const std::shared_ptr<const StaticR
         const auto code=device->CreateComputePipelineState(&desc,IID_PPV_ARGS(&pso));
         return FAILED(code)?HResultFailure("Create terrain page compute pipeline",code):Result::Success();
     };
-    if(auto r=pipeline("terrain/producer/bake_cs.dxil",candidate->bake);!r) return r;
+    constexpr const char *bake_products[]{"terrain/producer/bake_color_cs.dxil",
+        "terrain/producer/bake_base_cs.dxil","terrain/producer/bake_weight_cs.dxil"};
+    for(UINT plane=0;plane<3;++plane)
+        if(auto r=pipeline(bake_products[plane],candidate->bake[plane]);!r) return r;
     if(auto r=pipeline("terrain/producer/mip_cs.dxil",candidate->mip);!r) return r;
     D3D12_DESCRIPTOR_HEAP_DESC heap{};heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap.NumDescriptors=6+2*kMips;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
@@ -379,10 +384,13 @@ Result D3D12Renderer::BakeTerrainSurfacePages(const RendererConfig &configuratio
             list->SetComputeRootDescriptorTable(1, gpu(0));
             list->SetComputeRootDescriptorTable(2, gpu(7));
             list->SetComputeRootShaderResourceView(3, page.controls.resource->GetGPUVirtualAddress());
-            list->SetPipelineState(page.bake.Get());
+            list->SetPipelineState(page.bake[plane].Get());
             list->SetComputeRoot32BitConstants(4, 8, &sections[index], 0);
             list->SetComputeRoot32BitConstant(4, plane, 8);
             list->SetComputeRoot32BitConstant(4, kEdge, 9);
+            const auto &parent=page.parent_sections[page.tiles[index].source_index];
+            list->SetComputeRoot32BitConstants(4, 2, &parent.x, 10);
+            list->SetComputeRoot32BitConstants(4, 2, &parent.span_x, 12);
             list->Dispatch(kEdge / 8, kEdge / 8, 1);
             list->SetPipelineState(page.mip.Get());
             for (UINT level = 0; level < kMips; ++level)
