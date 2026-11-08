@@ -18,17 +18,15 @@ fixture를 준비하며, 별도 변경 영향 추론이나 검증 영수증은 �
 ./Tools/verify.ps1 -Workflow verify -Test integration.render-smoke
 ```
 
-RenderData와 에셋 게시 파이프라인까지 검사하려면 MSVC 개발자 PowerShell에서 다음을 실행합니다. Runtime과 콘텐츠 도구는 끈 상태이며 D3D12 장치, DXC, FBX SDK가 필요하지 않습니다. CI에서도 두 CPU 검증을 실행합니다.
-
-```powershell
-./Tools/cmake.ps1 --workflow --preset verify-portable
-```
+`verify-core`는 RenderData와 에셋 게시 파이프라인의 CPU 검사도 함께 실행합니다. Runtime과 콘텐츠 SDK는 끈 상태이며 D3D12 장치, DXC, FBX SDK가 필요하지 않습니다. CI도 이 구성을 사용합니다.
 
 전체 콘텐츠·렌더러 검증에는 D3D12 GPU, DXC와 동반 DLL, Autodesk FBX SDK 2020.3.7 VS2022가 필요합니다. SDK 경로는 `HS_FBX_SDK_ROOT`로 지정할 수 있습니다. 선택 기능의 SDK는 `cmake/RenderSDKs.cmake`와 `Tools/bootstrap_render_sdks.ps1`을 참고하세요.
 
 ```powershell
 ./Tools/verify.ps1 -Workflow verify
 ```
+
+전체 검사는 기존 `Build/msvc-debug`를 사용합니다. 일반 Debug/Release 빌드 프리셋은 `ProjectHS`만 빌드하고, 테스트 실행 파일은 기본 ALL 빌드에서도 제외합니다. 검사는 선택한 CTest의 준비 타깃만 한 번 빌드합니다. 별도 validation·GPU validation·portable·ASan 빌드 프리셋은 없습니다. D3D12 검증이 필요하면 Debug 실행에 `--validation` 또는 `--gpu-validation`을 지정합니다.
 
 Release는 MSVC 개발자 PowerShell에서 구성한 뒤 정식 빌드 진입점으로 빌드합니다.
 

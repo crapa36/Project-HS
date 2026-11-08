@@ -148,6 +148,14 @@ restarts with the same layout. Render packets share its read-only Core
 StaticRenderScene view; mutable scene storage is frozen before publication.
 Snapshot read pairs expose the publication sequence of each retained slot;
 tick/session values alone are not a publication identity.
+
+Presentation prepares a compact MeadowGroundQuery from the admitted terrain transforms
+once per scene owner. Camera, character/projectile projection, signals and footsteps
+borrow that same immutable query. Development rooms publish their actual prepared
+query to simulation; a changed owner refreshes the current sample without rotating
+history at a frozen tick. Renderer particle collision uses the existing per-slot
+terrain section buffer with exact row count and matching transformed-height rules.
+The generated height bound is shared; neither path assumes a terrain at the origin.
 The exchange issues a move-only write lease with a private slot index. Publishing
 or abandoning acts on its originating exchange; an unfinished lease abandons on
 destruction. Callers cannot forge a slot or submit it to a different exchange.
@@ -800,7 +808,7 @@ HS_BUILD_RUNTIME=OFF
 HS_BUILD_CONTENT_TOOLS=OFF
 ```
 
-It builds Core, Jobs, GameDomain, GameRules, Gameplay, Presentation, and their low-level tests without AssetManifest, RenderData, ImGui, Agility SDK, PIX, D3D12 Memory Allocator, runtime fonts, DXC, DirectXTex, or FBX SDK. Shader infrastructure exists only when Runtime or content tools need it. Runtime and content options default to `ON`.
+It builds Core, Jobs, GameDomain, GameRules, Gameplay and Presentation without native runtime/content prerequisites. Enabling `HS_BUILD_TESTS` also builds the native-free RenderData codecs, AssetManifest and Audio/Generation producers needed by the CPU tests. Neither path needs ImGui, Agility SDK, PIX, D3D12 Memory Allocator, runtime fonts, DXC, DirectXTex or FBX SDK. Shader infrastructure exists only when Runtime or content tools need it. Runtime and content options default to `ON`; tests default to `OFF` outside test-enabled presets.
 
 ## Windows verification
 
@@ -817,23 +825,20 @@ Runtime VFX cases share two test executables, grouped by synthetic versus cooked
 inputs. Each case remains a separate CTest process and name. Only cooked cases
 prepare a Generation; compiling one group never compiles the other group's cases.
 
-`cmake --workflow --preset verify-core` builds the low-level libraries and tests
-with MSVC `/fp:strict`. `verify-portable` runs the core, CPU RenderData and asset
-pipeline superset once on Windows. CI runs only on Windows; Linux execution
-jobs and presets have been removed. These CPU checks do not replace D3D12 or
-GPU execution.
+`cmake --workflow --preset verify-core` builds and runs the CPU contracts once,
+including RenderData, selected Generation, character interchange, graph ranges
+and asset publication. Gameplay keeps MSVC `/fp:strict`. Python/Ninja publication
+fixtures use the real native-free Audio/Generation producers. CI runs only on
+Windows; these CPU checks do not replace D3D12 or GPU execution.
 
-`HS_BUILD_RENDER_DATA_TESTS=ON` explicitly opts into CPU RenderData, selected
-Generation, character-interchange, and the private production FrameGraph range
-compiler checks without enabling the runtime or
-FBX/DXC content tooling. This option defaults to OFF, so the ordinary low-level
-configuration retains its dependency isolation. The real asset-action scheduler
-regression additionally uses Python when available with the Ninja generator.
-
-`HS_BUILD_ASSET_PIPELINE_TESTS=ON` separately opts into the real portable Audio
-and Generation executables plus publication fixtures. Core owns shared streaming
-SHA-256; RenderData retains its public wrapper. Neither opt-in enables D3D12 or
-content SDK dependencies. Both remain OFF by default.
+`verify` shares the ordinary `Build/msvc-debug` tree. There are no separate
+validation, GPU-validation, portable-test or ASan presets. D3D12 validation is
+selected by the existing Debug `--validation`/`--gpu-validation` arguments;
+native fixtures retain the mode required by their contracts. SHA-256 and graphics
+settings cases share `foundation.core`, rather than separate executables.
+Test executables and development hosts are excluded from default ALL builds;
+verification builds only CTest's selected `test_prep/*` dependencies, or
+`test_prep/all` for the complete workflow.
 
 ## Mechanical enforcement
 
