@@ -120,7 +120,7 @@ Json ByteArray(const std::array<std::uint8_t, Size> &values)
     return result;
 }
 
-Json SkillLoadout(const std::array<SkillKind, 4> &loadout)
+Json SkillLoadout(const std::array<SkillKind, kPlayerSkillSlotCount> &loadout)
 {
     Json result = Json::array();
     for (const auto skill : loadout)

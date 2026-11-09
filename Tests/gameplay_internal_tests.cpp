@@ -389,6 +389,28 @@ void TestEmptyLevelProgressionDoesNotStall()
               world.session_phase == SessionPhase::Playing,
           "zero stat points do not enter an unanswerable allocation phase");
     Check(simulation.Shutdown().Succeeded(), "empty progression shutdown");
+
+    {
+        auto boundary_rules = SimulationRules::Defaults();
+        boundary_rules.character_initial.starting_unspent_stat_points = 253;
+        boundary_rules.progression.base_stat_points_per_level = 1;
+        boundary_rules.progression.fallback_extra_stat_points = 1;
+        boundary_rules.progression.fallback_stat_point_cards = true;
+        GameSimulation boundary_simulation;
+        Check(boundary_simulation.Initialize({130}, boundary_rules).Succeeded(),
+              "stat-point boundary initialize");
+        auto &boundary_world = GameplayTestAccess::State(boundary_simulation);
+        boundary_world.progression.cards[0] = {CardKind::BonusStatPoint, 0, 0};
+        boundary_world.progression.card_count = 1;
+        boundary_world.session_phase = SessionPhase::CardSelection;
+        Check(boundary_world.actors.player.pending_stat_points == 253,
+              "initial unspent stat points retain their configured value");
+        Check(boundary_world.SelectCard(0, false) &&
+                  boundary_world.actors.player.pending_stat_points == 255 &&
+                  boundary_world.session_phase == SessionPhase::StatAllocation,
+              "bonus card and base reward fit the validated stat-point limit");
+        Check(boundary_simulation.Shutdown().Succeeded(), "stat-point boundary shutdown");
+    }
 }
 
 void TestChargedShotTickMath()
@@ -642,7 +664,7 @@ void TestPickupWorkStopRestartAndSparseTick()
         ReferencePickupPass(reference);
         CheckPickupEquivalence(actual, reference);
         if (tick == 3)
-            Check(actual.progression.pickup_work.Visited().empty(), "stopped distant XP leaves the active work set");
+            Check(actual.progression.pickup_work.Queued().empty(), "stopped distant XP leaves the active work set");
     }
     Check(actual.actors.pickups[0].visual_motion_started == 4,
           "local attraction interruption restarts its original cosmetic motion episode");
@@ -684,7 +706,7 @@ void TestPickupWorkStopRestartAndSparseTick()
     actual.XpCardPhase();
     ReferencePickupPass(reference);
     CheckPickupEquivalence(actual, reference);
-    Check(actual.progression.pickup_work.Visited().empty() &&
+    Check(actual.progression.pickup_work.Queued().empty() &&
               !actual.progression.pickup_work.NeedsCompaction(),
           "ordinary distant stationary XP causes no per-pickup tick work or cleanup scan");
 }
@@ -1069,6 +1091,101 @@ void TestHitIndexCleanup()
     Check(records.size() == 1, "empty rebuild accepts full-width identifiers");
 }
 
+void TestCombatHitChainTargetOrder()
+{
+    using namespace hs;
+    using namespace hs::gameplay_detail;
+    auto world_storage = std::make_unique<PickupWorld>();
+    auto &world = *world_storage;
+    InitializePickupFixture(world);
+    world.StartSession();
+    world.rules.arena_obstacle_count = 0;
+    auto &relic = world.rules.relics.combat_hit_chain;
+    relic.direct_hits_per_trigger = 1;
+    relic.search_radius = 10.0f;
+    world.actors.player.position = {};
+
+    const auto add_enemy = [&](std::uint64_t id, Float2 position, std::int32_t health, bool dead = false) {
+        PreparedEnemy enemy;
+        enemy.id = {id};
+        enemy.motion.position = position;
+        enemy.life.max_health = 1000;
+        enemy.life.health = health;
+        enemy.life.dead = dead;
+        world.actors.enemies.push_back(std::move(enemy));
+    };
+    add_enemy(10, {2.0f, 0.0f}, 1000);
+    add_enemy(11, {-2.0f, 0.0f}, 1000);
+    add_enemy(12, {0.0f, 3.0f}, 1000);
+    add_enemy(13, {0.0f, -3.0f}, 1000);
+    add_enemy(14, {5.0f, 0.0f}, 1000);
+    add_enemy(15, {0.0f, 0.0f}, 0);
+    add_enemy(16, {0.0f, 1.0f}, 1000, true);
+    world.SpatialGridPhase();
+
+    DamageCommand event;
+    event.skill = SkillKind::BasicAttack;
+    event.origin = EffectOrigin::Original;
+    event.cast_id = 17;
+    const auto position_for_id = [](std::uint64_t id) {
+        switch (id)
+        {
+        case 10: return Float2{2.0f, 0.0f};
+        case 11: return Float2{-2.0f, 0.0f};
+        case 12: return Float2{0.0f, 3.0f};
+        case 13: return Float2{0.0f, -3.0f};
+        case 14: return Float2{5.0f, 0.0f};
+        default: return Float2{};
+        }
+    };
+    std::uint64_t expected_activations{};
+    std::uint64_t expected_extra_targets{};
+    const auto run_case = [&](std::uint32_t maximum_targets,
+                              std::initializer_list<std::uint64_t> expected_targets) {
+        relic.maximum_targets = maximum_targets;
+        world.combat_state.combat.Clear();
+        world.combat_state.domain_signals.clear();
+        world.actors.player.combat_hit_progress = 0;
+        world.HandleCombatHitChain(event);
+        const auto &commands = world.combat_state.combat.commands;
+        Check(commands.size() == expected_targets.size(),
+              "combat hit chain emits exactly the accepted targets");
+        Check(world.combat_state.domain_signals.size() == expected_targets.size(),
+              "combat hit chain emits one VFX per accepted target");
+        auto expected = expected_targets.begin();
+        for (std::size_t index = 0; index < commands.size(); ++index, ++expected)
+        {
+            const auto &command = commands[index];
+            Check(command.target == *expected && command.skill == SkillKind::Count &&
+                      command.origin == EffectOrigin::Derived && command.cast_id == 17 &&
+                      command.source_relic == static_cast<std::uint8_t>(RelicKind::CombatHitChain),
+                  "combat hit chain preserves selected order and derived damage identity");
+            const auto &signal = world.combat_state.domain_signals[index];
+            const auto position = position_for_id(*expected);
+            Check(signal.kind == DomainSignalKind::CombatChainHit &&
+                      signal.position.x == position.x && signal.position.y == 0.15f &&
+                      signal.position.z == position.y,
+                  "combat hit chain VFX follows accepted target order");
+        }
+        ++expected_activations;
+        expected_extra_targets += expected_targets.size();
+        const auto relic_index = static_cast<std::size_t>(RelicKind::CombatHitChain);
+        Check(world.Metrics().relic_effects[relic_index][static_cast<std::size_t>(UpgradeEffectMetric::Activations)] ==
+                  expected_activations &&
+                  world.Metrics().relic_effects[relic_index][static_cast<std::size_t>(UpgradeEffectMetric::ExtraTargetsHit)] ==
+                      expected_extra_targets,
+              "zero-target activation and cumulative extra-target metrics are preserved");
+    };
+
+    run_case(0, {});
+    run_case(1, {11});
+    run_case(4, {11, 10, 13, 12});
+    run_case(10, {11, 10, 13, 12, 14});
+    world.rules.arena_obstacle_count = 1;
+    world.rules.arena_obstacles[0] = {ArenaObstacleKind::Tree, {1.0f, 0.0f}, 0.25f};
+    run_case(4, {11, 13, 12});
+}
+
 }
 
 int main()
@@ -1104,6 +1221,7 @@ int main()
         TestCastCleanupMembership();
         TestHitIndexCleanup();
         TestBalanceHitDeduplication();
+        TestCombatHitChainTargetOrder();
         std::cout << "gameplay_internal_tests passed\n";
         return 0;
     }

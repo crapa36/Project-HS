@@ -1,5 +1,5 @@
 #include "gameplay_test_support.hpp"
-#include "../Source/Runtime/Private/process_scene.hpp"
+#include <hs/presentation/process_scene.hpp>
 #include <type_traits>
 #include <hs/presentation/meadow_surface.hpp>
 #include <hs/presentation/presentation_catalog_io.hpp>
@@ -1765,13 +1765,16 @@ void TestStaticEnvironmentSceneLease()
     model.arena_boundary.points[1] = {-16, 16};
     model.arena_boundary.points[2] = {16, 16};
     model.arena_boundary.points[3] = {16, -16};
-    hs::runtime_detail::ProcessSceneFactory cache("test-generation");
     hs::RenderSnapshotStorage snapshot(4, 4, 2, 128);
-    Check(hs::ProjectRenderSnapshot(model.View(), DefaultContent().presentation,
+    const auto model_view = model.View();
+    const auto read = hs::development::BorrowOwnedReadModel(model_view);
+    const auto first = hs::ProcessSceneView(
+        hs::BuildProcessSceneAtLaunch(read, "test-generation"));
+    Check(hs::ProjectRenderSnapshot(model_view, DefaultContent().presentation,
                                     test_ui, hs::SettingsData{}, snapshot, 0xFF,
-                                    nullptr, cache.Resolve(model.View())), "static scene projection");
-    const auto first = snapshot.View().static_scene;
-    Check(first && first->content_generation_id == "test-generation" &&
+                                    nullptr, first), "static scene projection");
+    const auto projected_first = snapshot.View().static_scene;
+    Check(projected_first && projected_first == first && first->content_generation_id == "test-generation" &&
               first->instances.size() > 1 && snapshot.View().instances.size() == 1 &&
               snapshot.View().poses.size() == 1 &&
               snapshot.View().poses[0].instance_index == 0,
@@ -1848,40 +1851,31 @@ void TestStaticEnvironmentSceneLease()
         Check(detail_variants[variant], std::format("normal play scene omits ground-detail variant {}", variant));
     auto cook_model = model;
     cook_model.seed = 0;
-    hs::runtime_detail::ProcessSceneFactory cook_cache("test-generation");
-    const auto cook_scene = cook_cache.Resolve(cook_model.View());
+    const auto cook_view = cook_model.View();
+    const auto cook_scene = hs::ProcessSceneView(
+        hs::BuildProcessSceneAtLaunch(hs::development::BorrowOwnedReadModel(cook_view), "test-generation"));
     Check(cook_scene->eligible_layout_digest == first->eligible_layout_digest &&
           cook_scene->eligible_static_members.size() == first->eligible_static_members.size(),
           "seed-zero scene cooking differs from runtime detail/HLOD placement");
     snapshot.Clear();
     Check(!snapshot.View().static_scene && first->instances.size() > 1,
           "clearing a slot releases only its own scene lease");
-    Check(cache.Resolve(model.View()) == first, "unchanged layout reuses static scene");
-    model.arena_half_extent = 17.0f;
-    const auto extent = cache.Resolve(model.View());
-    Check(extent != first, "arena extent invalidates static scene");
-    model.arena_boundary.points[0].x = -17.0f;
-    const auto boundary = cache.Resolve(model.View());
-    Check(boundary != extent, "boundary invalidates static scene");
-    model.arena_obstacle_count = 1;
-    model.arena_obstacles[0].center = {8.0f, 0.0f};
-    model.arena_obstacles[0].radius = 1.0f;
-    const auto obstacles = cache.Resolve(model.View());
-    Check(obstacles != boundary, "obstacle list invalidates static scene");
-    model.session_id = 4;
-    Check(cache.Resolve(model.View()) == obstacles,
-          "session restart preserves the process scene and its exact static identities");
-    const auto prior_instances = obstacles->instances.data();
-    const auto prior_members = obstacles->eligible_static_members.data();
-    model.seed = 20;
-    const auto reseeded = cache.Resolve(model.View());
-    Check(reseeded != obstacles && obstacles->instances.data() == prior_instances &&
-              obstacles->eligible_static_members.data() == prior_members,
-          "new launch seed replaces only the owner while old packet spans stay leased");
-    Check(!reseeded->static_keys.empty() && reseeded->static_keys.size() == reseeded->instances.size() &&
-              std::ranges::is_sorted(reseeded->static_keys, {}, &hs::RenderSceneInstanceKey::stable_id),
+    const std::span<const hs::RenderInstance> retained_instances(first->instances);
+    const std::span<const hs::StaticRenderScene::EligibleStaticMember> retained_members(first->eligible_static_members);
+    const auto next_generation = hs::ProcessSceneView(
+        hs::BuildProcessSceneAtLaunch(read, "next-generation"));
+    Check(first->content_generation_id == "test-generation" &&
+              next_generation->content_generation_id == "next-generation" &&
+              retained_instances.data() == first->instances.data() &&
+              retained_instances.size() == first->instances.size() &&
+              retained_members.data() == first->eligible_static_members.data() &&
+              retained_members.size() == first->eligible_static_members.size() &&
+              retained_instances.front().stable_id == first->instances.front().stable_id,
+          "a new content generation leaves the previous scene spans leased");
+    Check(!next_generation->static_keys.empty() && next_generation->static_keys.size() == next_generation->instances.size() &&
+              std::ranges::is_sorted(next_generation->static_keys, {}, &hs::RenderSceneInstanceKey::stable_id),
           "static keys are frozen in the process owner before publication");
-    for (const auto &instance : reseeded->instances)
+    for (const auto &instance : next_generation->instances)
         Check(instance.stable_id && instance.revisions == hs::DeriveRenderInstanceRevisions(instance),
               "static revisions must reflect actual seeded rows");
     static_assert(!std::is_move_constructible_v<hs::ProcessSceneLayout>);

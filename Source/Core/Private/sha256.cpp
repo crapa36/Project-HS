@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -79,7 +80,8 @@ Sha256Stream::~Sha256Stream()
     if (hash_) BCryptDestroyHash(static_cast<BCRYPT_HASH_HANDLE>(hash_));
 }
 Sha256Stream::Sha256Stream(const Sha256Stream &other)
-    : native_size_(other.native_size_), finished_(other.finished_)
+    : native_size_(other.native_size_), pending_(other.pending_),
+      pending_size_(other.pending_size_), finished_(other.finished_)
 {
     if (other.hash_ && !other.finished_)
     {
@@ -96,13 +98,16 @@ Sha256Stream &Sha256Stream::operator=(const Sha256Stream &other)
         Sha256Stream copy(other);
         std::swap(hash_, copy.hash_);
         std::swap(native_size_, copy.native_size_);
+        std::swap(pending_, copy.pending_);
+        std::swap(pending_size_, copy.pending_size_);
         std::swap(finished_, copy.finished_);
     }
     return *this;
 }
 Sha256Stream::Sha256Stream(Sha256Stream &&other) noexcept
     : hash_(std::exchange(other.hash_, nullptr)),
-      native_size_(other.native_size_), finished_(other.finished_)
+      native_size_(other.native_size_), pending_(other.pending_),
+      pending_size_(std::exchange(other.pending_size_, 0)), finished_(other.finished_)
 {
     other.native_size_ = 0;
     other.finished_ = false;
@@ -114,11 +119,25 @@ Sha256Stream &Sha256Stream::operator=(Sha256Stream &&other) noexcept
         if (hash_) BCryptDestroyHash(static_cast<BCRYPT_HASH_HANDLE>(hash_));
         hash_ = std::exchange(other.hash_, nullptr);
         native_size_ = other.native_size_;
+        pending_ = other.pending_;
+        pending_size_ = std::exchange(other.pending_size_, 0);
         finished_ = other.finished_;
         other.native_size_ = 0;
         other.finished_ = false;
     }
     return *this;
+}
+
+void Sha256Stream::FlushPending()
+{
+    if (!pending_size_) return;
+    if (BCryptHashData(static_cast<BCRYPT_HASH_HANDLE>(hash_),
+            reinterpret_cast<PUCHAR>(pending_.data()), static_cast<ULONG>(pending_size_), 0) < 0)
+    {
+        finished_ = true;
+        throw std::runtime_error("cannot hash SHA-256 input");
+    }
+    pending_size_ = 0;
 }
 #endif
 
@@ -131,6 +150,15 @@ void Sha256Stream::Add(std::span<const std::byte> bytes)
         throw std::length_error("SHA-256 input too large");
     if (!hash_) InitializeHash(hash_);
     native_size_ += bytes.size();
+    if (bytes.empty()) return;
+    if (bytes.size() < pending_.size())
+    {
+        if (bytes.size() > pending_.size() - pending_size_) FlushPending();
+        std::memcpy(pending_.data() + pending_size_, bytes.data(), bytes.size());
+        pending_size_ += bytes.size();
+        return;
+    }
+    FlushPending();
     while (!bytes.empty())
     {
         const auto count = static_cast<ULONG>(std::min<std::size_t>(bytes.size(), std::numeric_limits<ULONG>::max()));
@@ -168,6 +196,7 @@ std::array<std::byte, 32> Sha256Stream::Finish()
     finished_ = true;
 #ifdef _WIN32
     if (!hash_) InitializeHash(hash_);
+    FlushPending();
     std::array<std::byte, 32> digest{};
     if (BCryptFinishHash(static_cast<BCRYPT_HASH_HANDLE>(hash_), reinterpret_cast<PUCHAR>(digest.data()),
                          static_cast<ULONG>(digest.size()), 0) < 0)

@@ -1,5 +1,6 @@
 #include "simulation_world.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <limits>
 #include <set>
@@ -4507,42 +4508,50 @@ void GameSimulation::SimulationWorld::HandleCombatHitChain(const DamageCommand &
     actors.player.combat_hit_progress -= relic.direct_hits_per_trigger;
     RecordRelicEffect(RelicKind::CombatHitChain,
                       UpgradeEffectMetric::Activations);
-    std::vector<std::uint64_t> selected;
-    selected.reserve(relic.maximum_targets);
+    if (relic.maximum_targets == 0) return;
     auto &query = combat_state.chain_query;
     CollectEnemies(actors.player.position, relic.search_radius, query);
-    while (selected.size() < relic.maximum_targets)
+    auto &candidates = combat_state.chain_candidates;
+    candidates.clear();
+    candidates.reserve(query.rows.size());
+    const auto radius_squared = relic.search_radius * relic.search_radius;
+    for (std::size_t ordinal = 0; ordinal < query.rows.size(); ++ordinal)
     {
-        std::optional<EnemyRow> target{};
-        auto best_distance = relic.search_radius * relic.search_radius;
-        for (const auto row : query.rows)
-        {
-            auto candidate = actors.enemies[row];
-            if (candidate.life.dead || candidate.life.health <= 0) continue;
-            const auto already_selected =
-                std::ranges::find(selected, candidate.id.value) != selected.end();
-            const auto distance = DistanceSquared(actors.player.position,
-                                                   candidate.motion.position);
-            if (!already_selected && distance <= best_distance &&
-                SegmentClear2D(actors.player.position, candidate.motion.position, 0.0f,
-                               rules.arena_boundary, ArenaObstacles()))
-            {
-                target.emplace(candidate);
-                best_distance = distance;
-            }
-        }
-        if (!target) break;
-        selected.push_back(target->id.value);
-        QueueDamage(target->id.value,
+        const auto candidate = actors.enemies[query.rows[ordinal]];
+        if (candidate.life.dead || candidate.life.health <= 0) continue;
+        const auto distance = DistanceSquared(actors.player.position,
+                                               candidate.motion.position);
+        if (distance <= radius_squared)
+            candidates.push_back({distance, ordinal});
+    }
+    const auto farther_priority = [](const CombatState::ChainCandidate &a,
+                                     const CombatState::ChainCandidate &b) {
+        return a.distance_squared != b.distance_squared
+            ? a.distance_squared > b.distance_squared
+            : a.query_ordinal < b.query_ordinal;
+    };
+    std::make_heap(candidates.begin(), candidates.end(), farther_priority);
+    std::size_t accepted_count{};
+    while (accepted_count < relic.maximum_targets && !candidates.empty())
+    {
+        std::pop_heap(candidates.begin(), candidates.end(), farther_priority);
+        const auto candidate = candidates.back();
+        candidates.pop_back();
+        const auto target = actors.enemies[query.rows[candidate.query_ordinal]];
+        if (!SegmentClear2D(actors.player.position, target.motion.position, 0.0f,
+                            rules.arena_boundary, ArenaObstacles()))
+            continue;
+        ++accepted_count;
+        QueueDamage(target.id.value,
                    RoundFinalDamage(EffectiveAttack() * relic.damage_multiplier, rules),
                    SkillKind::Count, EffectOrigin::Derived, event.cast_id, 0,
                    false, 0.0f, 0, kNoTelemetrySource,
                    static_cast<std::uint8_t>(RelicKind::CombatHitChain));
-        EmitVfx(DomainSignalKind::CombatChainHit, target->motion.position,
+        EmitVfx(DomainSignalKind::CombatChainHit, target.motion.position,
                 {}, 0.5f, 0.15f);
     }
     RecordRelicEffect(RelicKind::CombatHitChain,
-                      UpgradeEffectMetric::ExtraTargetsHit, selected.size());
+                      UpgradeEffectMetric::ExtraTargetsHit, accepted_count);
 }
 
 void GameSimulation::SimulationWorld::HandleProjectileCadenceReward()

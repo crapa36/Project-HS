@@ -5,7 +5,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -45,14 +44,12 @@ class PickupWorkOwner
     {
         stationary_cells_.reserve(count);
         queued_ids_.reserve(count);
-        visited_ids_.reserve(count);
     }
 
     void Reset() noexcept
     {
         ClearIndices();
         queued_ids_.clear();
-        visited_ids_.clear();
         next_ = 0;
         indexed_ = true;
         has_extent_ = false;
@@ -114,7 +111,6 @@ class PickupWorkOwner
         if (!indexed_ || !has_extent_ || extent_ != arena_half_extent)
             Rebuild(pickups, arena_half_extent);
         queued_ids_.clear();
-        visited_ids_.clear();
         next_ = 0;
         Append(active_ids_);
         Append(utility_ids_);
@@ -144,11 +140,6 @@ class PickupWorkOwner
         if (next_ == queued_ids_.size()) return std::nullopt;
         return queued_ids_[next_++];
     }
-    void Visit(Id id)
-    {
-        assert(visited_ids_.empty() || visited_ids_.back() < id);
-        visited_ids_.push_back(id);
-    }
     void AfterMagnet(std::span<const PickupActor> pickups, Id cursor, float arena_half_extent)
     {
         // Magnet is the exceptional all-XP operation. Earlier IDs become active
@@ -170,14 +161,13 @@ class PickupWorkOwner
         Canonicalize();
     }
     [[nodiscard]] std::span<const Id> Queued() const noexcept { return queued_ids_; }
-    [[nodiscard]] std::span<const Id> Visited() const noexcept { return visited_ids_; }
 
   private:
     std::array<std::vector<Id>, kGridCellCount> bins_;
     struct StationaryLocation { std::size_t cell{}, offset{}; };
     std::unordered_map<Id, StationaryLocation> stationary_cells_;
     std::set<Id> active_ids_, utility_ids_;
-    std::vector<Id> queued_ids_, visited_ids_;
+    std::vector<Id> queued_ids_;
     std::size_t next_{};
     float extent_{};
     bool indexed_{true}, has_extent_{}, needs_compaction_{};
@@ -243,7 +233,6 @@ class PickupWorkOwner
     {
         std::ranges::sort(queued_ids_);
         queued_ids_.erase(std::unique(queued_ids_.begin(), queued_ids_.end()), queued_ids_.end());
-        visited_ids_.reserve(queued_ids_.size());
     }
 };
 

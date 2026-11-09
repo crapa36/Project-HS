@@ -56,7 +56,7 @@ struct PlayerView
     Tick active_animation_start{};
     Tick active_animation_until{};
     Tick retreat_until{};
-    std::array<SkillKind, 4> loadout{SkillKind::Count, SkillKind::Count,
+    std::array<SkillKind, kPlayerSkillSlotCount> loadout{SkillKind::Count, SkillKind::Count,
                                      SkillKind::Count, SkillKind::Count};
     std::array<std::uint8_t, kCombatSkillCount> upgrades{};
     std::int32_t health{};

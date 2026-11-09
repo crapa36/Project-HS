@@ -407,7 +407,6 @@ void GameSimulation::SimulationWorld::XpCardPhase()
         auto found = std::lower_bound(actors.pickups.begin(), actors.pickups.end(), *id,
             [](const PickupActor &pickup, std::uint64_t value) { return pickup.id.value < value; });
         if (found == actors.pickups.end() || found->id.value != *id || found->dead) continue;
-        work.Visit(*id);
         auto &pickup = *found;
         if (config.scenario.auto_collect_progression &&
             (pickup.kind == PickupKind::Experience ||
@@ -456,11 +455,8 @@ void GameSimulation::SimulationWorld::XpCardPhase()
             CollectPickup(pickup);
             if (magnet) work.AfterMagnet(actors.pickups, *id, rules.arena_half_extent);
         }
-        // Collection callbacks may append actors; resolve the logical ID again.
-        found = std::lower_bound(actors.pickups.begin(), actors.pickups.end(), *id,
-            [](const PickupActor &value, std::uint64_t target) { return value.id.value < target; });
-        if (found != actors.pickups.end() && found->id.value == *id)
-            work.Update(*found, attracted && rules.growth.experience_pickup_speed > 0.0f);
+        else
+            work.Update(pickup, attracted && rules.growth.experience_pickup_speed > 0.0f);
         if (session_phase != SessionPhase::Playing) break;
     }
     while (config.scenario.progression_enabled)

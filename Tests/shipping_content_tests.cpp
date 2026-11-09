@@ -2,6 +2,7 @@
 #include "../Source/Runtime/Private/vfx_typed_light_commands.hpp"
 #include "test_generation_paths.hpp"
 #include "vfx_catalog.hpp"
+#include <hs/core/cooked_format.hpp>
 #include <hs/core/process_info.hpp>
 #include <hs/core/sha256.hpp>
 #include <hs/core/shipped_content_owner.hpp>
@@ -17,6 +18,7 @@
 #include <hs/runtime/vfx_image_io.hpp>
 
 #include <Windows.h>
+#include <cstring>
 #include <dwrite_3.h>
 #include <wrl/client.h>
 
@@ -154,6 +156,44 @@ void TestCompiledVfxImage()
             "program has supported minimum engine version");
         hs::VfxImageData original, alternate;
         Check(hs::DecodeVfxImage(bytes[0],bytes[1],original).Succeeded(), "decode original VFX storage");
+        Check(!original.emitters.empty(), "compiled VFX fixture contains a legacy emitter for finite checks");
+        enum class InvalidEmitterValue { LifetimeNan, OffsetInf, EndColorNan };
+        constexpr std::array invalid_emitter_values{InvalidEmitterValue::LifetimeNan,
+            InvalidEmitterValue::OffsetInf, InvalidEmitterValue::EndColorNan};
+        for (const auto invalid_value : invalid_emitter_values)
+        {
+            auto emitter = original.emitters.front();
+            switch (invalid_value)
+            {
+            case InvalidEmitterValue::LifetimeNan:
+                emitter.lifetime_min = std::numeric_limits<float>::quiet_NaN();
+                break;
+            case InvalidEmitterValue::OffsetInf:
+                emitter.local_offset.x = std::numeric_limits<float>::infinity();
+                break;
+            case InvalidEmitterValue::EndColorNan:
+                emitter.end_color.w = std::numeric_limits<float>::quiet_NaN();
+                break;
+            }
+
+            auto corrupted_legacy = bytes[0];
+            hs::CookedParticleEffectsHeader corrupted_header;
+            std::memcpy(&corrupted_header, corrupted_legacy.data(), sizeof(corrupted_header));
+            const auto emitter_offset = sizeof(corrupted_header) +
+                static_cast<std::size_t>(corrupted_header.effect_count) * sizeof(hs::CookedVfxDefinition);
+            std::memcpy(corrupted_legacy.data() + emitter_offset, &emitter, sizeof(emitter));
+            corrupted_header.payload_hash = hs::Fnv1a64(std::span<const std::byte>(corrupted_legacy).subspan(sizeof(corrupted_header)));
+            std::memcpy(corrupted_legacy.data(), &corrupted_header, sizeof(corrupted_header));
+
+            auto *const original_emitter_data = original.emitters.data();
+            const auto original_emitter_count = original.emitters.size();
+            const auto original_payload_hash = original.payload_hash;
+            Check(!hs::DecodeVfxImage(corrupted_legacy, bytes[1], original).Succeeded() &&
+                      original.emitters.data() == original_emitter_data &&
+                      original.emitters.size() == original_emitter_count &&
+                      original.payload_hash == original_payload_hash,
+                  "non-finite cooked VFX emitter rejects without publishing partial decoded output");
+        }
         bytes[1][16] ^= std::byte{1};
         Check(hs::DecodeVfxImage(bytes[0],bytes[1],alternate).Succeeded(), "decode alternate VFX storage");
         Check(hs::CanonicalVfxImageBytes(original.View()) == hs::CanonicalVfxImageBytes(alternate.View()),
@@ -285,7 +325,7 @@ void TestPreparedShippingTables()
           "prepared simulation rules preserve the actual shipping wire table");
     Check(hs::EncodePresentationCatalog(installed.presentation) == presentation_wire,
           "prepared presentation preserves the actual shipping wire table");
-    Check(hs::render_data::EncodeRendererCatalog(installed.renderer.View()) == renderer_wire,
+    Check(hs::render_data::EncodeRendererCatalog(installed.renderer->View()) == renderer_wire,
           "prepared renderer descriptors preserve the complete shipping wire table");
 
     hs::shipping::PreparedContent transferred;
@@ -295,7 +335,7 @@ void TestPreparedShippingTables()
               "load prepared content for move and failure transaction");
         transferred = std::move(moved);
     }
-    Check(hs::render_data::EncodeRendererCatalog(transferred.renderer.View()) == renderer_wire,
+    Check(hs::render_data::EncodeRendererCatalog(transferred.renderer->View()) == renderer_wire,
           "moving prepared content keeps all renderer descriptor spans valid");
     auto invalid_info = info;
     invalid_info.tables[static_cast<std::size_t>(hs::shipping::ShippingTable::Renderer)].digest[0] ^= std::byte{1};
@@ -304,7 +344,7 @@ void TestPreparedShippingTables()
     Check(transferred.owner && transferred.simulation &&
           hs::EncodeSimulationRules(*transferred.simulation) == simulation_wire &&
           hs::EncodePresentationCatalog(transferred.presentation) == presentation_wire &&
-          hs::render_data::EncodeRendererCatalog(transferred.renderer.View()) == renderer_wire,
+          hs::render_data::EncodeRendererCatalog(transferred.renderer->View()) == renderer_wire,
           "failed admission must preserve the existing content and its spans");
     hs::PresentationCatalog reference;
     std::uint64_t hash{};

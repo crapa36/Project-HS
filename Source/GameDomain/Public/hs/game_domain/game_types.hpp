@@ -11,6 +11,7 @@ namespace hs
 {
 
 inline constexpr std::size_t kActiveSkillCount = 8;
+inline constexpr std::size_t kPlayerSkillSlotCount = 4;
 inline constexpr std::size_t kCombatSkillCount = 9;
 inline constexpr std::size_t kUpgradeCount = 8;
 inline constexpr std::size_t kRelicCount = 20;
@@ -275,7 +276,7 @@ struct SessionProbe
     std::uint8_t relic_rerolls_remaining{3};
     std::uint8_t pending_stat_points{};
     std::uint8_t active_skill_count{};
-    std::array<SkillKind, 4> skill_loadout{SkillKind::Count, SkillKind::Count,
+    std::array<SkillKind, kPlayerSkillSlotCount> skill_loadout{SkillKind::Count, SkillKind::Count,
                                            SkillKind::Count, SkillKind::Count};
     std::array<std::uint8_t, kCombatSkillCount> skill_levels{};
     std::array<std::uint8_t, kCombatSkillCount> upgrade_masks{};

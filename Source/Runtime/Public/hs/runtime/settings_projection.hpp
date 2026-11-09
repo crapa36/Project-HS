@@ -217,7 +217,9 @@ inline bool ApplySettingsEdit(SettingsDocument &document, const UiCommand &comma
     }
     if (graphics_edit && command.kind != UiCommandKind::SetGraphicsSetting)
         graphics.preset = GraphicsPreset::Custom;
-    if (!ValidateGraphicsSettings(graphics).empty()) return false;
+    const bool graphics_validated = command.kind == UiCommandKind::SetGraphicsSetting &&
+        command.graphics_setting != SettingId::Preset;
+    if (!graphics_validated && !ValidateGraphicsSettings(graphics).empty()) return false;
     document = std::move(candidate);
     return true;
 }

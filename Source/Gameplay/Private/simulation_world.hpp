@@ -111,7 +111,7 @@ struct PlayerState
     std::uint8_t level_rerolls{3};
     std::uint8_t relic_rerolls{3};
     std::array<std::uint8_t, kStatCount> stats{};
-    std::array<SkillKind, 4> loadout{SkillKind::Count, SkillKind::Count,
+    std::array<SkillKind, kPlayerSkillSlotCount> loadout{SkillKind::Count, SkillKind::Count,
                                      SkillKind::Count, SkillKind::Count};
     std::array<std::uint8_t, kCombatSkillCount> skill_levels{};
     std::array<std::uint8_t, kCombatSkillCount> upgrades{};

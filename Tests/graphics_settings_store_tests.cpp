@@ -658,6 +658,26 @@ hs::UiCommand GraphicsCommand(hs::SettingId id, std::string_view token)
 
 void TestFullGraphicsTransactions()
 {
+    {
+        auto invalid_document = hs::LegacyDefaultSettingsDocument();
+        invalid_document.graphics.dynamic_min_percent = 95.0f;
+        invalid_document.graphics.dynamic_max_percent = 70.0f;
+        const auto bloom_before = invalid_document.graphics.bloom;
+        const auto minimum_before = invalid_document.graphics.dynamic_min_percent;
+        const auto maximum_before = invalid_document.graphics.dynamic_max_percent;
+        const auto volume_before = invalid_document.master_volume;
+
+        for (const auto &command : {GraphicsCommand(hs::SettingId::Bloom, "false"),
+                 hs::UiCommand{hs::UiCommandKind::SetBloom, 0},
+                 hs::UiCommand{hs::UiCommandKind::SetMasterVolumePercent, 50}})
+            Check(!hs::ApplySettingsEdit(invalid_document, command) &&
+                      invalid_document.graphics.bloom == bloom_before &&
+                      invalid_document.graphics.dynamic_min_percent == minimum_before &&
+                      invalid_document.graphics.dynamic_max_percent == maximum_before &&
+                      invalid_document.master_volume == volume_before,
+                  "settings edits reject invalid existing graphics without mutation");
+    }
+
     auto original = hs::LegacyDefaultSettingsDocument();
     original.graphics.reconstruction_provider.value = "saved_unavailable_provider";
     original.graphics.display_output.value = "saved_monitor";

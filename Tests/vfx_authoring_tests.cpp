@@ -12,6 +12,7 @@
 #include <iostream>
 #include <iterator>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 void TestVfxImageIdentity();
 
@@ -47,11 +48,23 @@ int main()
         const auto spec = Json::parse(stream);
         hs::content::ValidateVfxSpecification(spec);
         hs::content::ValidateVfxTextures(spec, root);
+        const auto authored_counts = [](const Json &input) {
+            std::pair<std::size_t, std::size_t> counts{};
+            for (const auto &effect : input.at("effects"))
+                for (const auto &element : effect.at("visual_elements"))
+                {
+                    ++counts.first;
+                    counts.second += element.at("outputs").size();
+                }
+            return counts;
+        };
+        const auto [source_count, output_count] = authored_counts(spec);
         const auto mutate = [&](auto edit, const char *message) {
             auto invalid = spec; edit(invalid);
             Reject([&] { hs::content::ValidateVfxSpecification(invalid); }, message);
         };
         mutate([](Json &s) { s["effects"][1]["id"] = s["effects"][0]["id"]; }, "duplicate effect accepted");
+        mutate([](Json &s) { s["skill_upgrade_visual_bindings"][0]["vfx_sequence"].push_back("missing.effect"); }, "unresolved upgrade effect accepted");
         mutate([](Json &s) { s["effects"][0]["visual_elements"][0]["source"]["type"] = "unknown"; }, "unknown source accepted");
         mutate([](Json &s) { s["effects"][0]["visual_elements"][0]["outputs"][0]["profile"] = "unknown"; }, "unknown profile accepted");
         mutate([](Json &s) { s["effects"][0]["visual_elements"][0]["source"]["params"]["count"] = 4; }, "wrong scoped parameter accepted");
@@ -114,7 +127,9 @@ int main()
         };
         Check(word(0) == 0x34565348u && word(4) == 5 && word(20) == 13, "binary header mismatch");
         const auto table = [&](unsigned index) { return 32u + word(32u + index*16u + 8u); };
-        Check(word(32+8*16+4)==196 && word(32+9*16+4)==13 && word(32+11*16+4)==72, "lookup/routing table counts mismatch");
+        Check(word(32+8*16+4)==spec.at("effects").size() &&
+              word(32+9*16+4)==spec.at("libraries").at("texture_catalog").size() &&
+              word(32+11*16+4)==spec.at("skill_upgrade_visual_bindings").size(), "lookup/routing table counts mismatch");
         const auto hash = [](const std::string &name) { std::uint64_t h=14695981039346656037ull; for(unsigned char c:name){h^=c;h*=1099511628211ull;} return h; };
         for (const auto &effect:program.at("effects")) {
             const auto handle=effect.at("handle").get<std::uint32_t>();
@@ -149,6 +164,8 @@ int main()
         };
         reject_wire_edit(table(2),0xffffffffu,"out-of-range output owner accepted");
         reject_wire_edit(table(2)+80,0xffffffffu,"invalid motion opcode accepted");
+        reject_wire_edit(table(8)+8,0,"zero effect lookup handle accepted");
+        reject_wire_edit(table(8)+8,0xffffffffu,"out-of-range effect lookup handle accepted");
         const auto check_identity_edit = [&](bool upgrade, bool duplicate) {
             auto changed = binary;
             const auto put = [&](std::size_t at, std::uint32_t value) {
@@ -186,19 +203,30 @@ int main()
         }
         reject_wire_edit(table(6)+12,0,"empty curve accepted");
         auto multi_output = spec;
+        auto extra_effect = spec.at("effects").front();
+        extra_effect["id"] = "fixture.optional";
+        multi_output["effects"].push_back(std::move(extra_effect));
+        multi_output["skill_upgrade_visual_bindings"].erase(
+            multi_output["skill_upgrade_visual_bindings"].end() - 1);
+        hs::content::ValidateVfxSpecification(multi_output);
         auto &shared = multi_output["effects"][0]["visual_elements"][0]["outputs"];
         const auto duplicate_output = shared[0];
         shared.push_back(duplicate_output);
         const auto multi = hs::content::CookVfxProgram(multi_output, rows, artifacts / "multi-output.hsbin");
-        Check(multi.at("section_counts").at(1)==534 && multi.at("section_counts").at(2)==535, "multiple outputs duplicated their shared source");
+        const auto [multi_sources, multi_outputs] = authored_counts(multi_output);
+        Check(multi.at("section_counts").at(0)==multi_output.at("effects").size() &&
+              multi.at("section_counts").at(1)==multi_sources &&
+              multi.at("section_counts").at(2)==multi_outputs &&
+              multi.at("section_counts").at(11)==multi_output.at("skill_upgrade_visual_bindings").size(),
+              "variable catalog counts or shared source outputs changed during cook");
         const auto multi_bytes = Read(artifacts / "multi-output.hsbin");
         hs::VfxProgramData multi_loaded;
         const bool multi_ok = hs::LoadVfxProgram(std::as_bytes(std::span(multi_bytes)), multi_loaded, load_error);
         Check(multi_ok, load_error.c_str());
         Check(std::count_if(multi_loaded.sources.begin(), multi_loaded.sources.end(), [](const auto &source) {return source.outputs.count==2;})==1, "shared output range lost during load");
-        Check(program.at("section_counts").at(0) == 196, "program effect count mismatch");
-        Check(program.at("section_counts").at(1) == 534, "program source count mismatch");
-        Check(program.at("section_counts").at(2) == 534, "program output count mismatch");
+        Check(program.at("section_counts").at(0) == spec.at("effects").size(), "program effect count mismatch");
+        Check(program.at("section_counts").at(1) == source_count, "program source count mismatch");
+        Check(program.at("section_counts").at(2) == output_count, "program output count mismatch");
         const auto stable_motion = std::find_if(loaded.outputs.begin(), loaded.outputs.end(), [](const auto &o) { return o.motion == hs::VfxMotionKind::StableBoundaryInwardPulse; });
         Check(stable_motion != loaded.outputs.end() && stable_motion->motion_rate_hz == .8f && stable_motion->motion_amplitude == .22f && stable_motion->motion_inset_fraction == .12f, "stable boundary motion contract changed");
         const auto slow_motion = std::find_if(loaded.outputs.begin(), loaded.outputs.end(), [](const auto &o) { return o.motion == hs::VfxMotionKind::SlowRadialFlow; });

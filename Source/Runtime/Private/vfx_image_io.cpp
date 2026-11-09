@@ -3051,6 +3051,7 @@ Result DecodeVfxImage(std::span<const std::byte> legacy, std::span<const std::by
     {
         const auto &definition = loaded.definitions[index];
         if (definition.effect_id == 0 || (index && definition.effect_id <= previous) || definition.reserved != 0 ||
+            static_cast<std::uint8_t>(definition.kind) > static_cast<std::uint8_t>(VfxDefinitionKind::Line) ||
             static_cast<std::uint64_t>(definition.first_emitter) + definition.emitter_count > loaded.emitters.size())
             return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle definition table is invalid.");
         if ((definition.kind == VfxDefinitionKind::Particles) != (definition.emitter_count != 0))
@@ -3062,6 +3063,14 @@ Result DecodeVfxImage(std::span<const std::byte> legacy, std::span<const std::by
         if (definition.line_sprite >= header.sprite_count || definition.line_frame_columns == 0 ||
             definition.line_frame_rows == 0)
             return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle definition sprite is invalid.");
+        if (definition.kind == VfxDefinitionKind::Line)
+        {
+            const std::array line_values{definition.line_color.x, definition.line_color.y,
+                definition.line_color.z, definition.line_color.w, definition.line_width,
+                definition.line_lifetime, definition.line_uv_repeat, definition.line_scroll_speed};
+            if (!std::ranges::all_of(line_values, [](float value) { return std::isfinite(value); }))
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle definition line values are invalid.");
+        }
         previous = definition.effect_id;
     }
     for (const auto &emitter : loaded.emitters)
@@ -3076,8 +3085,19 @@ Result DecodeVfxImage(std::span<const std::byte> legacy, std::span<const std::by
              emitter.primitive >= VfxPrimitive::SolidTrail && emitter.primitive <= VfxPrimitive::DashWake) ||
             (emitter.renderer == VfxRenderer::Mesh && emitter.primitive >= VfxPrimitive::Arrow &&
              emitter.primitive <= VfxPrimitive::ShockShell);
+        const std::array emitter_values{emitter.local_offset.x, emitter.local_offset.y, emitter.local_offset.z,
+            emitter.shape_extent.x, emitter.shape_extent.y, emitter.shape_extent.z,
+            emitter.local_direction.x, emitter.local_direction.y, emitter.local_direction.z,
+            emitter.start_color.x, emitter.start_color.y, emitter.start_color.z, emitter.start_color.w,
+            emitter.end_color.x, emitter.end_color.y, emitter.end_color.z, emitter.end_color.w,
+            emitter.lifetime_min, emitter.lifetime_max, emitter.speed_min, emitter.speed_max,
+            emitter.cone_degrees, emitter.start_size_min, emitter.start_size_max,
+            emitter.end_size_min, emitter.end_size_max, emitter.gravity,
+            emitter.rotation_min, emitter.rotation_max, emitter.angular_velocity_min,
+            emitter.angular_velocity_max, emitter.stretch};
         if (emitter.sprite >= header.sprite_count || emitter.frame_columns == 0 ||
-            emitter.frame_rows == 0 || !valid_primitive)
+            emitter.frame_rows == 0 || !valid_primitive ||
+            !std::ranges::all_of(emitter_values, [](float value) { return std::isfinite(value); }))
             return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle emitter contract is invalid.");
     }
     previous = 0;

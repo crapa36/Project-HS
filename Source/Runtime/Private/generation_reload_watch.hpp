@@ -17,6 +17,9 @@ class GenerationReloadWatch
   public:
     using Clock = std::chrono::steady_clock;
 
+    explicit GenerationReloadWatch(std::string_view settled_pointer = {})
+        : observed_(settled_pointer), settled_(!settled_pointer.empty()) {}
+
     void Observe(std::string_view pointer, Clock::time_point now)
     {
         if (pointer != observed_)

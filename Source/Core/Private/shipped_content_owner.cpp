@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <optional>
 #include <string>
 
 #ifdef _WIN32
@@ -124,7 +125,8 @@ Result ShippedContentOwner::Read(std::uint64_t offset, std::span<std::byte> outp
         return Result::Failure(ErrorCode::InvalidArgument, "ShippedContentOwner", "read exceeds content file bounds");
     if (output.empty())
         return expected_digest && Sha256(output) != *expected_digest ? CorruptRead() : Result::Success();
-    Sha256Stream digest;
+    std::optional<Sha256Stream> digest;
+    if (expected_digest) digest.emplace();
 #ifdef _WIN32
     Event event;
     if (!event.handle) return IoFailure("CreateEventW", GetLastError());
@@ -155,7 +157,7 @@ Result ShippedContentOwner::Read(std::uint64_t offset, std::span<std::byte> outp
             return IoFailure("GetOverlappedResult", error);
         }
         if (transferred == 0) return ShortRead();
-        if (expected_digest) digest.Add(output.subspan(done, transferred));
+        if (digest) digest->Add(output.subspan(done, transferred));
         done += transferred;
 #else
         if (position > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()))
@@ -167,10 +169,10 @@ Result ShippedContentOwner::Read(std::uint64_t offset, std::span<std::byte> outp
             return IoFailure("pread", static_cast<unsigned long>(errno));
         }
         if (transferred == 0) return ShortRead();
-        if (expected_digest) digest.Add(output.subspan(done, static_cast<std::size_t>(transferred)));
+        if (digest) digest->Add(output.subspan(done, static_cast<std::size_t>(transferred)));
         done += static_cast<std::size_t>(transferred);
 #endif
     }
-    return expected_digest && digest.Finish() != *expected_digest ? CorruptRead() : Result::Success();
+    return digest && digest->Finish() != *expected_digest ? CorruptRead() : Result::Success();
 }
 } // namespace hs

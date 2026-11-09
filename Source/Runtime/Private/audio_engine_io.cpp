@@ -279,8 +279,6 @@ static Result PrepareResolved(const std::function<Result(std::string_view, std::
                 !checked_u32(item.at("minimum_retrigger_ms"), 0, cue.retrigger_ms))
                 return Result::Failure(ErrorCode::InvalidArgument, "audio", "audio cue count or retrigger is invalid");
             const auto &files = item.at("files");
-            if (!files.is_array() || files.empty())
-                return Result::Failure(ErrorCode::InvalidArgument, "audio", "audio cue has no files");
             for (const auto &file : files)
             {
                 const auto name = file.get<std::string>();

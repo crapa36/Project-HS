@@ -28,7 +28,7 @@ struct PreparedContent
     AudioImageData audio;
     std::shared_ptr<audio_detail::PreparedAudio> prepared_audio;
     VfxImageData vfx;
-    render_data::RendererCatalogData renderer;
+    std::shared_ptr<const render_data::RendererCatalogData> renderer;
 };
 // Admit all immutable tables once; every borrowed row keeps this owner alive.
 [[nodiscard]] Result LoadPreparedContent(const std::filesystem::path &directory,

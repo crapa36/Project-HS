@@ -76,24 +76,6 @@ class UniqueHandle
                            std::format("{} failed with Win32 error {}.", operation, error));
 }
 
-[[nodiscard]] std::filesystem::path DefaultRoot()
-{
-    const auto size = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);
-    if (size == 0)
-    {
-        return {};
-    }
-
-    std::wstring value(size, L'\0');
-    const auto length = GetEnvironmentVariableW(L"LOCALAPPDATA", value.data(), size);
-    if (length == 0 || length >= size)
-    {
-        return {};
-    }
-    value.resize(length);
-    return std::filesystem::path(std::move(value)) / L"ProjectHS";
-}
-
 [[nodiscard]] std::filesystem::path BackupPath(const std::filesystem::path &path)
 {
     auto backup = path;
@@ -1047,8 +1029,26 @@ template <typename Data>
 
 } // namespace
 
+std::filesystem::path SaveStore::DefaultRoot()
+{
+    const auto size = GetEnvironmentVariableW(L"LOCALAPPDATA", nullptr, 0);
+    if (size == 0)
+    {
+        return {};
+    }
+
+    std::wstring value(size, L'\0');
+    const auto length = GetEnvironmentVariableW(L"LOCALAPPDATA", value.data(), size);
+    if (length == 0 || length >= size)
+    {
+        return {};
+    }
+    value.resize(length);
+    return std::filesystem::path(std::move(value)) / L"ProjectHS";
+}
+
 SaveStore::SaveStore(std::optional<std::filesystem::path> root_override)
-    : root_(root_override ? std::move(*root_override) : DefaultRoot())
+    : root_(root_override ? std::move(*root_override) : SaveStore::DefaultRoot())
 {
 }
 

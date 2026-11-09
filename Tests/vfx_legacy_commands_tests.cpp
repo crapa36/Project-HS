@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -92,6 +93,55 @@ void TestLegacyMeshReplacement()
                   catalog.AppendPreparedEvent(prepared, emitter_indices, fallback, lines).Succeeded() &&
                   fallback.empty(),
               "prepared particle replacement emitted rows after typed replacement succeeded");
+
+        enum class InvalidInput { PositionNan, DirectionXNan, DirectionZInf, TargetZInf, DirectionOverflow };
+        constexpr std::array invalid_inputs{InvalidInput::PositionNan, InvalidInput::DirectionXNan,
+            InvalidInput::DirectionZInf, InvalidInput::TargetZInf, InvalidInput::DirectionOverflow};
+        for (const auto invalid_input : invalid_inputs)
+        {
+            auto invalid_event = event;
+            auto parameters = hs::DecodeVfxParameters(invalid_event.parameters);
+            switch (invalid_input)
+            {
+            case InvalidInput::PositionNan:
+                invalid_event.position.x = std::numeric_limits<float>::quiet_NaN();
+                break;
+            case InvalidInput::DirectionXNan:
+                parameters.direction.x = std::numeric_limits<float>::quiet_NaN();
+                break;
+            case InvalidInput::DirectionZInf:
+                parameters.direction.z = std::numeric_limits<float>::infinity();
+                break;
+            case InvalidInput::TargetZInf:
+                parameters.flags |= static_cast<std::uint32_t>(hs::VfxEventFlag::HasTarget);
+                parameters.target.z = std::numeric_limits<float>::infinity();
+                break;
+            case InvalidInput::DirectionOverflow:
+                parameters.direction.x = parameters.direction.z = std::numeric_limits<float>::max();
+                break;
+            }
+            invalid_event.parameters = hs::EncodeVfxParameters(parameters);
+            hs::VfxPreparedLegacyEvent rejected;
+            rejected.event = &event;
+            rejected.definition = prepared.definition;
+            std::vector<std::uint32_t> rejected_indices{99};
+            Check(!catalog.PrepareEvent(invalid_event, 1.0f, rejected, rejected_indices, false, true) &&
+                      !rejected.event && !rejected.definition &&
+                      rejected_indices.size() == 1 && rejected_indices.front() == 99,
+                  "non-finite legacy VFX input rejects and preserves prepared output and index prefix");
+        }
+
+        auto unused_direction_y = event;
+        auto unused_parameters = hs::DecodeVfxParameters(unused_direction_y.parameters);
+        unused_parameters.direction.y = std::numeric_limits<float>::quiet_NaN();
+        unused_direction_y.parameters = hs::EncodeVfxParameters(unused_parameters);
+        hs::VfxPreparedLegacyEvent unused_direction_plan;
+        std::vector<std::uint32_t> unused_direction_indices{99};
+        Check(catalog.PrepareEvent(unused_direction_y, 1.0f, unused_direction_plan,
+                  unused_direction_indices, false, true).Succeeded() &&
+                  unused_direction_plan.event == &unused_direction_y &&
+                  unused_direction_indices.size() > 1 && unused_direction_indices.front() == 99,
+              "unused legacy VFX direction component remains outside finite-input validation");
     }
 }
 

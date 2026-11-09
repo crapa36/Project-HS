@@ -6,6 +6,7 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <span>
 #include <type_traits>
 #include <vector>
@@ -17,6 +18,11 @@ bool SimulationRulesHaveSafeProgression(const SimulationRules &rules) noexcept
     const auto &p = rules.progression;
     const auto &u = rules.upgrades;
     return p.card_candidate_count >= 1 && p.card_candidate_count <= 3 &&
+        p.active_slot_count <= kPlayerSkillSlotCount &&
+        static_cast<unsigned>(rules.character_initial.starting_unspent_stat_points) +
+            static_cast<unsigned>(p.base_stat_points_per_level) +
+            (p.fallback_stat_point_cards ? static_cast<unsigned>(p.fallback_extra_stat_points) : 0u) <=
+                std::numeric_limits<std::uint8_t>::max() &&
         rules.relic_drop.maximum_choices_per_box <= 3 &&
         std::isfinite(p.required_xp_base) && p.required_xp_base >= 1.0f &&
         std::isfinite(p.required_xp_linear) && p.required_xp_linear >= 0.0f &&
@@ -572,7 +578,7 @@ SimulationRules SimulationRules::Defaults() noexcept
     data.progression.required_xp_quadratic = data.growth.required_xp_quadratic;
     data.progression.card_candidate_count = 3;
     data.progression.card_choose_count = 1;
-    data.progression.active_slot_count = 4;
+    data.progression.active_slot_count = static_cast<std::uint8_t>(kPlayerSkillSlotCount);
     data.progression.upgrades_selected_per_skill = 4;
     data.progression.base_stat_points_per_level = 1;
     data.progression.fallback_extra_stat_points = 1;

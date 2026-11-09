@@ -1,7 +1,9 @@
 #include <hs/game_rules/simulation_rules.hpp>
 #include <hs/game_rules/simulation_rules_io.hpp>
 
+#include <array>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
 #include <iostream>
 #include <type_traits>
@@ -86,6 +88,35 @@ int main()
     invalid = first;
     invalid.upgrades.charged_shot.boss_or_fifth_pierce_split.projectile_count = 9;
     if (!rejected(hs::EncodeSimulationRules(invalid))) return 1;
+
+    struct ProgressionBoundaryCase
+    {
+        std::uint8_t slots, starting_points, base_points, extra_points;
+        bool fallback, accepted;
+    };
+    constexpr std::array progression_cases{
+        ProgressionBoundaryCase{0, 0, 1, 1, true, true},
+        ProgressionBoundaryCase{5, 0, 1, 1, true, false},
+        ProgressionBoundaryCase{255, 0, 1, 1, true, false},
+        ProgressionBoundaryCase{4, 253, 1, 1, true, true},
+        ProgressionBoundaryCase{4, 254, 1, 1, true, false},
+        ProgressionBoundaryCase{4, 0, 255, 255, false, true},
+    };
+    for (const auto &test : progression_cases)
+    {
+        auto candidate = first;
+        candidate.progression.active_slot_count = test.slots;
+        candidate.character_initial.starting_unspent_stat_points = test.starting_points;
+        candidate.progression.base_stat_points_per_level = test.base_points;
+        candidate.progression.fallback_extra_stat_points = test.extra_points;
+        candidate.progression.fallback_stat_point_cards = test.fallback;
+        const auto safe = hs::SimulationRulesHaveSafeProgression(candidate);
+        const auto image = hs::EncodeSimulationRules(candidate);
+        hs::SimulationRules boundary_decoded{};
+        const auto decodes = hs::DecodeSimulationRules(image, boundary_decoded).Succeeded();
+        if (safe != test.accepted || decodes != test.accepted) return 1;
+        if (!test.accepted && !rejected(image)) return 1;
+    }
 
     second.arena_boundary.points.back().x += 1.0f;
     second.arena_obstacles.back().radius += 1.0f;

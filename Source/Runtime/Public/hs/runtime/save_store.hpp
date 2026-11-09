@@ -47,6 +47,8 @@ struct SettingsDocument
 class SaveStore
 {
   public:
+    [[nodiscard]] static std::filesystem::path DefaultRoot();
+
     explicit SaveStore(
         std::optional<std::filesystem::path> root_override = std::nullopt);
 

@@ -12,6 +12,7 @@
 #endif
 #include <hs/presentation/projector.hpp>
 #include <hs/presentation/meadow_surface.hpp>
+#include <hs/presentation/process_scene.hpp>
 
 #include "runtime_channels.hpp"
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -21,7 +22,6 @@
 #include "native_input_frame.hpp"
 #include "ui_command_admission.hpp"
 #include "runtime_diagnostics.hpp"
-#include "process_scene.hpp"
 #include "scene_generation_binding.hpp"
 #include "translucency_diagnostics_log.hpp"
 #include "audio_session.hpp"
@@ -301,6 +301,15 @@ std::uint64_t ReadDiagnosticQpc() noexcept
     LARGE_INTEGER value{};
     QueryPerformanceCounter(&value);
     return static_cast<std::uint64_t>(value.QuadPart);
+}
+
+bool ReadRenderThreadCpuTicks(std::uint64_t &ticks) noexcept
+{
+    FILETIME created{}, exited{}, kernel{}, user{};
+    if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user)) return false;
+    ticks = (static_cast<std::uint64_t>(kernel.dwHighDateTime) << 32 | kernel.dwLowDateTime) +
+        (static_cast<std::uint64_t>(user.dwHighDateTime) << 32 | user.dwLowDateTime);
+    return true;
 }
 
 constexpr std::array<std::string_view, 8> kMainTaskNames{
@@ -908,6 +917,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #endif
         D3D12Renderer renderer;
         RendererConfig renderer_config = ProjectRendererConfig(initial_renderer_settings, startup_graphics);
+        const auto user_data_root = SaveStore::DefaultRoot();
+        if (!user_data_root.empty())
+            renderer_config.pipeline_cache_directory = user_data_root / L"Cache" / L"Pipeline";
         std::vector<std::byte> startup_font;
         const auto font_result = [&]() -> Result {
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -988,15 +1000,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         renderer_config.content_generation_id = deployment_id;
         renderer_config.content_generation_lease = content_owner;
         renderer_config.packed_content = shipped_content;
-        renderer_config.packed_bulks = prepared_content.renderer.bulks;
-        renderer_config.packed_textures = prepared_content.renderer.textures;
-        renderer_config.packed_geometry = prepared_content.renderer.geometry;
-        renderer_config.packed_materials = prepared_content.renderer.materials;
-        renderer_config.packed_characters = prepared_content.renderer.characters;
-        renderer_config.packed_animations = prepared_content.renderer.animations;
-        renderer_config.packed_vfx_mesh_atlas = &prepared_content.renderer.atlas;
-        renderer_config.packed_source_revisions = prepared_content.renderer.source_revisions;
-        renderer_config.packed_revision_bulks = prepared_content.renderer.revision_bulks;
+        renderer_config.UseRendererCatalog(prepared_content.renderer);
 #endif
 
         runtime_detail::DiagnosticSample renderer_startup{};
@@ -1165,7 +1169,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 ? VfxQuality::Medium : VfxQuality::High;
         bool renderer_settings_suspended{};
 #if defined(HS_DEVELOPMENT_TOOLS)
-        runtime_detail::GenerationReloadWatch generation_reload_watch;
+        runtime_detail::GenerationReloadWatch generation_reload_watch(render_generation->PointerSnapshot());
         // The future joins on teardown; the worker owns only file inputs and its read lease.
         std::future<runtime_detail::PreparedContentGeneration> generation_preparation;
         std::shared_ptr<const SelectedGeneration> generation_awaiting_frame;
@@ -3178,6 +3182,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #endif
                 const auto frame_start = std::chrono::steady_clock::now();
                 const auto render_start_qpc = performance_lines ? read_performance_qpc() : 0;
+#ifdef HS_DEVELOPMENT_TOOLS
+                std::uint64_t render_cpu_begin{};
+                const bool render_cpu_available = performance_lines && ReadRenderThreadCpuTicks(render_cpu_begin);
+#endif
                 auto package_snapshots = snapshots;
                 auto camera = InterpolateRenderCamera(snapshots, sample_alpha);
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -3312,6 +3320,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 if (performance_lines)
                 {
                     const auto render_end_qpc = read_performance_qpc();
+                    std::uint64_t render_cpu_end{};
+                    const bool render_thread_cpu_valid = render_cpu_available &&
+                        ReadRenderThreadCpuTicks(render_cpu_end) && render_cpu_end >= render_cpu_begin;
+                    const double render_thread_cpu_us = render_thread_cpu_valid
+                        ? static_cast<double>(render_cpu_end - render_cpu_begin) * 0.1 : 0.0;
                     const auto qpc_microseconds = performance_frequency
                         ? 1'000'000.0 / static_cast<double>(performance_frequency) : 0.0;
                     const auto &cpu = frame.cpu_timings;
@@ -3608,7 +3621,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 cache_stats.serialize_ns, cache_stats.cache_write_ns, cache_stats.mutex_wait_ns, cache_stats.mutex_wait_max_ns, cache_stats.capture_timings));
         }
         const auto validation_errors = renderer.ValidationErrorCount();
-        if (validation_errors != 0)
+        const auto validation_status = renderer.ValidationStatus();
+        if (!validation_status.MessageCollectionValid())
+        {
+            record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                "D3D12 validation message collection was incomplete."));
+        }
+        else if (validation_errors != 0)
         {
             record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                         std::format("{} validation errors.", validation_errors)));
@@ -3678,6 +3697,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     "Diagnostic output incomplete: GPU frame coverage, metadata, write, flush or close failed."));
             WriteText(config.artifact_directory / "render.json",
                       std::format("{{\"enhanced_barriers\":{},\"validation_errors\":{},"
+                                  "\"validation_message_collection_attempted\":{},"
+                                  "\"validation_message_collection_hresult\":{},"
                                   "\"last_tick\":{},\"typed_vfx_events_received\":{},"
                                   "\"typed_vfx_persistent_peak\":{},"
                                   "\"typed_vfx_ground_peak\":{},"
@@ -3727,7 +3748,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                   "\"baked_static_shadow_coarse_command_total\":{},"
                                   "\"baked_static_shadow_command_capacity\":{},"
                                   "\"typed_vfx_unsupported_inputs\":{}}}\n",
-                                  enhanced ? "true" : "false", validation_errors, last_tick,
+                                  enhanced ? "true" : "false", validation_errors,
+                                  validation_status.message_collection_attempted ? "true" : "false",
+                                  validation_status.message_collection_hresult, last_tick,
                                   typed_vfx_events_received, typed_vfx_persistent_peak,
                                   typed_vfx_ground_peak, typed_vfx_ground_submitted_total,
                                   typed_vfx_flash_peak, typed_vfx_flash_submitted_total,
@@ -3986,7 +4009,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         auto previous_phase = config.smoke ? SessionPhase::Playing : SessionPhase::MainMenu;
         EnemyAnimationState enemy_animations;
         PlayerFootstepTimeline footstep_timeline;
-        runtime_detail::ProcessSceneFactory environment_cache(deployment_id);
         std::shared_ptr<const StaticRenderScene> launch_environment;
         std::shared_ptr<const MeadowGroundQuery> launch_ground = std::make_shared<MeadowGroundQuery>();
         const auto configure_dynamic_camera = [&] {
@@ -4051,9 +4073,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 room_scene->content_generation_id = deployment_id;
                 launch_environment = std::move(room_scene);
             }
-            else launch_environment = environment_cache.Resolve(model);
+            else launch_environment = ProcessSceneView(BuildProcessSceneAtLaunch(model, deployment_id));
 #else
-            launch_environment = environment_cache.Resolve(model);
+            launch_environment = ProcessSceneView(BuildProcessSceneAtLaunch(model, deployment_id));
 #endif
             auto ground = std::make_shared<MeadowGroundQuery>();
             if (auto prepared = ground->Prepare(launch_environment->instances); !prepared)

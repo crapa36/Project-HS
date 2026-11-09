@@ -152,3 +152,5 @@ HS_FRAME_PERFORMANCE_FIELD(vfx_workspace_sampled_logical_capacity_bytes, (worksp
 HS_FRAME_PERFORMANCE_FIELD(vfx_activation_raw_rows, (vfx_activation_raw_rows))
 HS_FRAME_PERFORMANCE_FIELD(vfx_activation_typed_rows, (vfx_activation_typed_rows))
 HS_FRAME_PERFORMANCE_FIELD(vfx_activation_birth_rows, (vfx_activation_birth_rows))
+HS_FRAME_PERFORMANCE_FIELD(render_thread_cpu_us, (render_thread_cpu_us))
+HS_FRAME_PERFORMANCE_FIELD(render_thread_cpu_valid, (static_cast<unsigned>(render_thread_cpu_valid)))

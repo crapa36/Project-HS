@@ -121,7 +121,13 @@ Result VfxCatalog::PrepareEvent(const PresentationEvent &event, float decorative
     const bool decorative = image_.decorative_definitions[static_cast<std::size_t>(definition - image_.definitions.data())] != 0;
     const auto parameters = DecodeVfxParameters(event.parameters);
     const auto direction_length = std::hypot(parameters.direction.x, parameters.direction.z);
-    if (!std::isfinite(parameters.scale) || parameters.scale <= 0.0f || direction_length <= 0.0001f)
+    const auto finite = [](Float3 value) noexcept {
+        return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+    };
+    const bool has_target = (parameters.flags & static_cast<std::uint32_t>(VfxEventFlag::HasTarget)) != 0;
+    if (!finite(event.position) || (has_target && !finite(parameters.target)) ||
+        !std::isfinite(parameters.scale) || parameters.scale <= 0.0f ||
+        !std::isfinite(direction_length) || direction_length <= 0.0001f)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX event parameters are invalid.");
     const Float3 forward{parameters.direction.x / direction_length, 0.0f, parameters.direction.z / direction_length};
     const Float3 right{forward.z, 0.0f, -forward.x};

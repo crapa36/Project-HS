@@ -63,6 +63,8 @@ struct CombatState
     // Reused as scratch by the const NearestEnemy read overload.
     mutable EnemyQuery nearest_query;
     EnemyQuery area_query, chain_query, collision_query;
+    struct ChainCandidate { float distance_squared; std::size_t query_ordinal; };
+    std::vector<ChainCandidate> chain_candidates;
     // Transient compact working set for the ordered separation pass; never authoritative.
     std::vector<Float2> separation_positions;
     struct CollisionHit { std::size_t enemy; float time; };

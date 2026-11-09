@@ -12,6 +12,13 @@ int main()
         if (!condition) std::fputs("Generation reload retry contract failed.\n", stderr);
         return condition;
     };
+    Watch seeded("active");
+    seeded.Observe("active", now);
+    if (!check(!seeded.TryBegin(now) && !seeded.TryBegin(now + 1h))) return 1;
+    seeded.Observe("next", now);
+    if (!check(seeded.TryBegin(now) && seeded.IsCurrent("next"))) return 1;
+    seeded.Complete(true, true, now);
+
     const auto begin = [&](std::string_view pointer, Watch::Clock::time_point time) {
         watch.Observe(pointer, time);
         return watch.TryBegin(time);

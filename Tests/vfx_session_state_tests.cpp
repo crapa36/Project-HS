@@ -1570,43 +1570,25 @@ void CheckOwnerBindingStorageReuse()
     Check(refresh_count == 3, "shared owner binding refreshed more than once in a frame");
 }
 
-void CheckFusedOwnerRefreshExpiryMatchesLegacy()
+void CheckOwnerRefreshExpiry()
 {
     using Store = hs::runtime_detail::ActiveEffectStore;
-    struct Counts { std::size_t refresh{}, expiry{}; } legacy_counts, fused_counts;
-    Store legacy, fused;
-    const auto seed = [](Store &store)
-    {
-        const auto add = [&](hs::Sequence sequence, std::uint64_t owner, hs::Tick end,
-                             std::initializer_list<Store::Profile> profiles) {
-            hs::VfxEventInput input{};
-            input.sequence = sequence;
-            input.geometry_owner_id = owner;
-            input.geometry_end_tick = end;
-            for (const auto profile : profiles) store.Append(profile, input);
-        };
-        add(201, 101, 0, {Store::Profile::Ground, Store::Profile::Light});
-        add(202, 102, 20, {Store::Profile::Ground, Store::Profile::Light}); // owner refresh drops
-        add(203, 103, 20, {Store::Profile::Ground, Store::Profile::Light, Store::Profile::Ribbon}); // bound expiry
-        add(204, 0, 1, {Store::Profile::Ground, Store::Profile::Light}); // canonical expiry
+    struct Counts { std::size_t refresh{}, expiry{}; } counts;
+    Store store;
+    const auto add = [&](hs::Sequence sequence, std::uint64_t owner, hs::Tick end,
+                         std::initializer_list<Store::Profile> profiles) {
+        hs::VfxEventInput input{};
+        input.sequence = sequence;
+        input.geometry_owner_id = owner;
+        input.geometry_end_tick = end;
+        for (const auto profile : profiles) store.Append(profile, input);
     };
-    seed(legacy);
-    seed(fused);
+    add(201, 101, 0, {Store::Profile::Ground, Store::Profile::Light});
+    add(202, 102, 20, {Store::Profile::Ground, Store::Profile::Light}); // owner refresh drops
+    add(203, 103, 20, {Store::Profile::Ground, Store::Profile::Light, Store::Profile::Ribbon}); // bound expiry
+    add(204, 0, 1, {Store::Profile::Ground, Store::Profile::Light}); // canonical expiry
 
-    const auto compare = [&](const char *message)
-    {
-        for (const auto profile : {Store::Profile::Ground, Store::Profile::Light, Store::Profile::Ribbon})
-        {
-            const auto a = legacy.ProfileEvents(profile);
-            const auto b = fused.ProfileEvents(profile);
-            Check(a.size() == b.size(), message);
-            for (std::size_t i = 0; i < a.size(); ++i)
-                Check(a[i].sequence == b[i].sequence && a[i].event_tick == b[i].event_tick &&
-                    a[i].geometry_end_tick == b[i].geometry_end_tick, message);
-        }
-    };
-    const auto run_frame = [&](Store &store, bool fused_path, Counts &counts,
-                               unsigned frame, hs::Tick current_tick)
+    const auto run_frame = [&](unsigned frame, hs::Tick current_tick)
     {
         const auto refresh = [&](hs::VfxEventInput &bound) {
             ++counts.refresh;
@@ -1620,45 +1602,43 @@ void CheckFusedOwnerRefreshExpiryMatchesLegacy()
         };
         store.BeginFrameBindings();
         for (const auto profile : {Store::Profile::Ground, Store::Profile::Light})
-        {
-            if (fused_path) store.RefreshProfile(profile, refresh, expired);
-            else
-            {
-                store.RefreshProfile(profile, refresh);
-                store.EraseIf(profile, expired);
-            }
-        }
+            store.RefreshProfile(profile, refresh, expired);
     };
 
-    run_frame(legacy, false, legacy_counts, 1, 3);
-    run_frame(fused, true, fused_counts, 1, 3);
-    compare("fused refresh/expiry changed first-frame rows or bound values");
-    Check(legacy_counts.refresh == 3 && fused_counts.refresh == 3 &&
-        legacy_counts.expiry == 6 && fused_counts.expiry == 6,
-        "shared owner refresh or expiry callback ran a different number of times");
+    run_frame(1, 3);
+    Check(counts.refresh == 3 && counts.expiry == 6,
+        "shared owner refresh or expiry callback ran an unexpected number of times");
+    const auto ground = store.ProfileEvents(Store::Profile::Ground);
+    const auto light = store.ProfileEvents(Store::Profile::Light);
+    const auto ribbon = store.ProfileEvents(Store::Profile::Ribbon);
+    Check(ground.size() == 1 && ground[0].sequence == 201 && ground[0].geometry_end_tick == 10,
+        "first owner refresh must retain the expected Ground row and bound end tick");
+    Check(light.size() == 1 && light[0].sequence == 201 && light[0].geometry_end_tick == 10,
+        "first owner refresh must retain the expected Light row and bound end tick");
+    Check(ribbon.size() == 1 && ribbon[0].sequence == 203,
+        "first owner refresh must retain the Ribbon-only row");
 
     const auto rebind = [](hs::VfxEventInput &input) { ++input.event_tick; return true; };
-    std::vector<hs::runtime_detail::RetainedVfxEntitySurfaceCapture> legacy_captures, fused_captures;
-    legacy.RebindRows(rebind, legacy_captures);
-    fused.RebindRows(rebind, fused_captures);
-    legacy.Compact();
-    fused.Compact();
-    compare("rebind/compact changed fused-vs-legacy survivors or order");
-    Check(legacy.Size() == 2 && fused.Size() == 2,
-        "rebind/compact must preserve the shared live row and Ribbon-only row");
+    std::vector<hs::runtime_detail::RetainedVfxEntitySurfaceCapture> captures;
+    store.RebindRows(rebind, captures);
+    store.Compact();
+    Check(store.Size() == 2, "rebind/compact must preserve the shared live row and Ribbon-only row");
+    Check(store.ProfileEvents(Store::Profile::Ground).size() == 1 &&
+          store.ProfileEvents(Store::Profile::Ground)[0].sequence == 201 &&
+          store.ProfileEvents(Store::Profile::Light).size() == 1 &&
+          store.ProfileEvents(Store::Profile::Light)[0].sequence == 201 &&
+          store.ProfileEvents(Store::Profile::Ribbon).size() == 1 &&
+          store.ProfileEvents(Store::Profile::Ribbon)[0].sequence == 203,
+        "rebind/compact must preserve expected profile rows");
 
-    run_frame(legacy, false, legacy_counts, 2, 3);
-    run_frame(fused, true, fused_counts, 2, 3);
-    compare("frame reset changed fused-vs-legacy expiry results");
-    Check(legacy_counts.refresh == 4 && fused_counts.refresh == 4 &&
-        legacy_counts.expiry == 8 && fused_counts.expiry == 8,
+    run_frame(2, 3);
+    Check(counts.refresh == 4 && counts.expiry == 8,
         "frame reset duplicated or skipped a shared owner refresh/expiry");
-    legacy.Compact();
-    fused.Compact();
-    compare("post-frame compact changed fused-vs-legacy survivors or order");
-    Check(legacy.Size() == 1 && fused.Size() == 1 &&
-        legacy.ProfileEvents(Store::Profile::Ribbon)[0].sequence == 203 &&
-        fused.ProfileEvents(Store::Profile::Ribbon)[0].sequence == 203,
+    store.Compact();
+    Check(store.Size() == 1 && store.ProfileEvents(Store::Profile::Ground).empty() &&
+          store.ProfileEvents(Store::Profile::Light).empty() &&
+          store.ProfileEvents(Store::Profile::Ribbon).size() == 1 &&
+          store.ProfileEvents(Store::Profile::Ribbon)[0].sequence == 203,
         "compaction must retain only the expected Ribbon-owned row");
 }
 
@@ -2960,7 +2940,7 @@ int main()
         CheckSurfaceFrameCaptureAdmission();
         CheckPreparedGroundOwnerReplacement();
         CheckOwnerBindingStorageReuse();
-        CheckFusedOwnerRefreshExpiryMatchesLegacy();
+        CheckOwnerRefreshExpiry();
         CheckTrackedVfxCapacityAccounting();
         CheckOptionalFlashBudget();
         CheckPersistentBurstCommit();
