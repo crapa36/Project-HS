@@ -46,6 +46,7 @@ namespace hs
 {
 class ShippedContentOwner;
 class RendererDevelopmentCatalog;
+namespace render_data { class RendererCatalogData; }
 namespace render_data { struct StaticShadowArchiveDescription; struct TerrainSurfaceSection; }
 struct RenderPackage;
 struct ViewId;
@@ -368,6 +369,8 @@ struct RendererConfig
     GeometryFrontend geometry_frontend{GeometryFrontend::Automatic};
     SurfaceFrontend surface_frontend{SurfaceFrontend::CompactDeferred};
     std::filesystem::path artifact_directory;
+    // Pipeline cache lifetime is separate from diagnostics.
+    std::filesystem::path pipeline_cache_directory;
     std::string content_generation_id;
     std::shared_ptr<const void> content_generation_lease;
     std::string scene_hlod_product_id{"render/hlod/arena.shl1"};
@@ -375,6 +378,8 @@ struct RendererConfig
     std::unordered_map<std::string, std::string> product_digests;
     std::shared_ptr<const ShippedContentOwner> packed_content;
     std::shared_ptr<const RendererDevelopmentCatalog> development_catalog;
+    std::shared_ptr<const render_data::RendererCatalogData> prepared_renderer_catalog;
+    void UseRendererCatalog(std::shared_ptr<const render_data::RendererCatalogData>) noexcept;
     std::span<const render_data::RendererBulkDescriptor> packed_bulks;
     std::span<const render_data::TextureDescriptor> packed_textures;
     std::span<const render_data::GeometryDescriptor> packed_geometry;
@@ -411,6 +416,14 @@ struct RendererValidationStatus
     bool device_creation_attempted{}, device_creation_succeeded{};
     std::int32_t device_creation_hresult{};
     bool device_created_after_requested_enable_calls{};
+    bool message_collection_attempted{};
+    // Sticky failure: a later empty read cannot repair a gap in validation evidence.
+    std::int32_t message_collection_hresult{};
+    [[nodiscard]] bool MessageCollectionValid() const noexcept
+    {
+        return (!debug_layer_requested && !gpu_validation_requested) ||
+            (message_collection_attempted && message_collection_hresult >= 0);
+    }
 };
 
 struct RenderViewFrameResult
@@ -756,6 +769,7 @@ class D3D12Renderer
     [[nodiscard]] Result RequestGraphicsSettings(const GraphicsSettingsRequest &);
     [[nodiscard]] SettingsApplyResult GetGraphicsSettingsStatus() const;
     [[nodiscard]] GraphicsCapabilitiesView GetGraphicsCapabilities() const;
+#if defined(HS_DEVELOPMENT_TOOLS)
     // Render-thread transaction. The caller validates payload digests and keeps
     // both Generation reader leases alive until this operation returns.
     // Reflected parameter defaults may change with an identical layout; such
@@ -776,6 +790,7 @@ class D3D12Renderer
         const RendererVfxSpriteBindings *sprite_bindings = nullptr,
         bool *resident_replaced = nullptr,
         bool allow_resident_replacement = true);
+#endif
     [[nodiscard]] std::uint64_t MaterialParameterRevision() const noexcept;
     [[nodiscard]] std::uint64_t PipelineRevision() const noexcept;
     void HandleWindowMessage(const NativeWindowMessage &message) noexcept;

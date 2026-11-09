@@ -33,7 +33,7 @@ struct AdaptiveShadingInputs
     AmbientOcclusionGuide depth,normal,base,material,metadata,motion;
     ViewExtent render_active;
     DirectX::XMFLOAT4 depth_parameters{};
-    std::span<const AdaptiveShadingMaterialPolicy> material_policy;
+    std::span<const AdaptiveShadingMaterialPolicy> material_policy; // Admitted by BuildAdaptiveMaterialPolicies.
     std::uint32_t frame_slot{};
     bool force_full_rate{}; // Camera cut/session discontinuity; no previous-history inference.
     CompletionSet completed;

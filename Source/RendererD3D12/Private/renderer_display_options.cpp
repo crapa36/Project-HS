@@ -75,7 +75,7 @@ Result D3D12Renderer::Impl::ApplyDisplayOptions(const RendererOptions &options)
     const auto preparation_failure = [&](const Result &failure) -> Result {
         if (FAILED(device->GetDeviceRemovedReason()))
         {
-            CountValidationErrors();
+            (void)CountValidationErrors();
             initialized = false;
         }
         return failure;
@@ -141,7 +141,7 @@ Result D3D12Renderer::Impl::ApplyDisplayOptions(const RendererOptions &options)
         return Result::Success();
     };
     const auto unusable = [&](const Result &failure, std::string_view recovery) -> Result {
-        CountValidationErrors();
+        (void)CountValidationErrors();
         initialized = false;
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                std::format("{}; {}; renderer is unusable.", failure.Message(), recovery));

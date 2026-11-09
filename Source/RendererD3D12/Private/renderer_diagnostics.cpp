@@ -483,7 +483,7 @@ Result D3D12Renderer::Impl::CheckDevice(HRESULT result, std::string_view operati
     {
         return Result::Success();
     }
-    CountValidationErrors();
+    (void)CountValidationErrors();
     const auto reason = device ? device->GetDeviceRemovedReason() : result;
     if (FAILED(reason) ||
         result == DXGI_ERROR_DEVICE_REMOVED || result == DXGI_ERROR_DEVICE_RESET)
@@ -494,41 +494,50 @@ Result D3D12Renderer::Impl::CheckDevice(HRESULT result, std::string_view operati
 }
 
 
-void D3D12Renderer::Impl::CountValidationErrors()
+Result D3D12Renderer::Impl::CountValidationErrors()
 {
 #if defined(HS_DEVELOPMENT_TOOLS)
-    if ((!config.validation && !config.gpu_validation) || !device)
-    {
-        return;
-    }
-    ComPtr<ID3D12InfoQueue> info_queue;
-    if (FAILED(device.As(&info_queue)))
-    {
-        return;
-    }
-    const auto count = info_queue->GetNumStoredMessages();
-#if defined(HS_DEVELOPMENT_TOOLS)
-    std::ofstream log(config.artifact_directory / "d3d12_validation.log", std::ios::app);
-#endif
+    if (!config.validation && !config.gpu_validation) return Result::Success();
+    validation_status.message_collection_attempted = true;
+    const auto failed = [&](std::string_view operation, HRESULT result) {
+        validation_status.message_collection_hresult = result;
+        return HResultFailure(operation, result);
+    };
+    if (FAILED(validation_status.message_collection_hresult))
+        return HResultFailure("D3D12 validation collection is incomplete",
+                              validation_status.message_collection_hresult);
+    auto *info_queue = validation_info_queue.Get();
+    if (!info_queue) return failed("D3D12 validation message queue unavailable", E_NOINTERFACE);
+    if (info_queue->GetNumMessagesDiscardedByMessageCountLimit() != 0)
+        return failed("D3D12 validation messages exceeded the queue limit", E_FAIL);
+    const auto count = info_queue->GetNumStoredMessagesAllowedByRetrievalFilter();
+    if (count == 0) return Result::Success();
+    std::vector<std::byte> storage;
+    std::ofstream log;
     for (std::uint64_t index = 0; index < count; ++index)
     {
         SIZE_T size{};
-        info_queue->GetMessage(index, nullptr, &size);
-        std::vector<std::byte> storage(size);
+        if (const auto result = info_queue->GetMessage(index, nullptr, &size); FAILED(result))
+            return failed("Read D3D12 validation message size", result);
+        if (size < sizeof(D3D12_MESSAGE))
+            return failed("D3D12 validation message is incomplete", E_FAIL);
+        storage.resize(size);
         auto *message = reinterpret_cast<D3D12_MESSAGE *>(storage.data());
-        if (SUCCEEDED(info_queue->GetMessage(index, message, &size)) &&
-            (message->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
-             message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION))
+        if (const auto result = info_queue->GetMessage(index, message, &size); FAILED(result))
+            return failed("Read D3D12 validation message", result);
+        if (message->Severity == D3D12_MESSAGE_SEVERITY_ERROR ||
+            message->Severity == D3D12_MESSAGE_SEVERITY_CORRUPTION)
         {
             ++validation_errors;
-#if defined(HS_DEVELOPMENT_TOOLS)
+            if (!log.is_open())
+                log.open(config.artifact_directory / "d3d12_validation.log", std::ios::app);
             log << "id=" << message->ID << " severity=" << message->Severity << ' '
                 << message->pDescription << '\n';
-#endif
         }
     }
     info_queue->ClearStoredMessages();
 #endif
+    return Result::Success();
 }
 
 void D3D12Renderer::Impl::WriteDred(HRESULT reason) const

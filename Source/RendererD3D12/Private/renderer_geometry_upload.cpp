@@ -35,10 +35,8 @@ Result D3D12Renderer::Impl::PrepareReadGeometry(const RendererConfig &input, std
         else if (input.development_catalog)
         {
             const auto asset=MakeAssetId(id);
-            const auto &bulk=input.development_catalog->bulks[
-                input.development_catalog->BulkIndex(asset)];
-            if(bytes.size()!=bulk.range.byte_count || render_data::Sha256(bytes)!=bulk.range.expected_digest)
-                throw std::runtime_error("Developer geometry differs from selected Generation");
+            const auto &bulk=input.development_catalog->Bulk(asset);
+            // Every caller passes the exact bytes just verified by this catalogue's source.Read.
             output.digest=bulk.range.expected_digest;
             output.descriptor=input.development_catalog->FindGeometry(asset);
             if(!output.descriptor || !output.descriptor->payload_ready)

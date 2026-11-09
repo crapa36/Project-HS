@@ -82,7 +82,6 @@ class PreparedVfxHeroVolumes
     friend Result PrepareVfxHeroVolumes(VfxVolumeInputs, std::uint32_t, PreparedVfxHeroVolumes &);
 };
 [[nodiscard]] Result PrepareVfxHeroVolumes(VfxVolumeInputs, std::uint32_t gradient_rows, PreparedVfxHeroVolumes &);
-[[nodiscard]] Result ValidateVfxHeroVolumes(VfxVolumeInputs, std::uint32_t gradient_rows);
 struct VolumetricCamera
 {
     // Camera-relative row-major row-vector transforms; translation is expressed

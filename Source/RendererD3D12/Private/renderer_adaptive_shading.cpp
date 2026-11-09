@@ -230,8 +230,6 @@ Result AdaptiveShadingSystem::RegisterFrame(RenderGraphBuilder &graph,const Adap
         !Guide(graph,in.metadata,in.render_active,DXGI_FORMAT_R32_UINT)||!Guide(graph,in.motion,in.render_active,DXGI_FORMAT_R16G16_FLOAT)||
         !std::isfinite(in.depth_parameters.x)||!std::isfinite(in.depth_parameters.y)||!std::isfinite(in.depth_parameters.z)||!std::isfinite(in.depth_parameters.w))
         return Failure(ErrorCode::InvalidArgument,"Adaptive actual depth/normal/material/motion guides are invalid.");
-    UINT previous{};for(const auto &policy:in.material_policy)
-    {if(!policy.material_id||policy.material_id<=previous||policy.eligible>1)return Failure(ErrorCode::InvalidArgument,"Adaptive material policy must contain sorted unique actual IDs.");previous=policy.material_id;}
     auto &frame=s->frames[in.frame_slot];std::memset(frame.mapped,0,std::size_t(frame.upload.resource->GetDesc().Width));
     const AdaptiveShadingConstants constants{{in.render_active.width,in.render_active.height,kAdaptiveComputeTileSize,s->hardware.vrs_tile_size},
         in.depth_parameters,{UINT(in.material_policy.size()),s->profile.raster_enabled?1u:0u,s->profile.compute_enabled?1u:0u,in.force_full_rate?1u:0u}};

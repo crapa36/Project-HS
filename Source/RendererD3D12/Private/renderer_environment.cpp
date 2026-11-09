@@ -5,10 +5,12 @@
 #include <hs/core/sha256.hpp>
 #include <hs/render_data/texture_package.hpp>
 
+#include <algorithm>
 #include <stdexcept>
 #include <bit>
 #include <cmath>
 #include <cstring>
+#include <span>
 
 namespace hs
 {
@@ -62,6 +64,9 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Material parameter upload is still in flight.");
     material_parameter_candidate.Reset();
+    material_parameter_candidate_counts.fill(0);
+    material_parameter_candidate_bases.fill(0);
+    for (auto &layout : material_parameter_candidate_layouts) layout.clear();
     material_parameter_upload.Reset();
     std::vector<render_data::MaterialParameterSlot> slots;
     try
@@ -88,6 +93,8 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
                     throw std::runtime_error("Compiled material parameter reload changes the resident layout: " + material_id);
                 material_parameter_candidate_layouts[ordinal] = layout;
                 material_parameter_candidate_bases[ordinal] = base;
+                material_parameter_candidate_counts[ordinal] =
+                    static_cast<std::uint32_t>(material.defaults.size());
                 slots.insert(slots.end(), material.defaults.begin(), material.defaults.end());
                 continue;
             }
@@ -113,6 +120,8 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                     "Material parameter layout disagrees with its shader/material package: " + id);
             material_parameter_candidate_bases[ordinal] = static_cast<std::uint32_t>(slots.size());
+            material_parameter_candidate_counts[ordinal] =
+                static_cast<std::uint32_t>(definitions.size());
             if (require_compatible_layout &&
                 (material_parameter_candidate_layouts[ordinal] != material_parameter_layouts[ordinal] ||
                  material_parameter_candidate_bases[ordinal] != material_parameter_bases[ordinal]))
@@ -188,6 +197,48 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
 
 void D3D12Renderer::Impl::CommitMaterialParameters() noexcept
 {
+    for (std::size_t ordinal = 0; ordinal < kResidentMaterialCount; ++ordinal)
+    {
+        bool changed = true;
+        if (material_parameters.resource &&
+            material_parameter_counts[ordinal] == material_parameter_candidate_counts[ordinal] &&
+            material_parameter_bases[ordinal] == material_parameter_candidate_bases[ordinal] &&
+            material_parameter_layouts[ordinal] == material_parameter_candidate_layouts[ordinal])
+        {
+            const auto old_slots = std::span<const render_data::MaterialParameterSlot>(
+                material_parameter_slots).subspan(material_parameter_bases[ordinal],
+                    material_parameter_counts[ordinal]);
+            const auto next_slots = std::span<const render_data::MaterialParameterSlot>(
+                material_parameter_candidate_slots).subspan(material_parameter_candidate_bases[ordinal],
+                    material_parameter_candidate_counts[ordinal]);
+            changed = !std::ranges::equal(old_slots, next_slots);
+        }
+        if (changed)
+            material_parameter_revisions[ordinal] = material_parameter_revision + 1u;
+    }
+    Sha256Stream generation_hash;
+    generation_hash.Add(std::as_bytes(std::span(material_parameter_candidate_bases).first(
+        kAuthoredMaterialNames.size())));
+    generation_hash.Add(std::as_bytes(std::span(material_parameter_candidate_counts).first(
+        kAuthoredMaterialNames.size())));
+    for (std::size_t ordinal = 0; ordinal < kAuthoredMaterialNames.size(); ++ordinal)
+    {
+        const auto &layout = material_parameter_candidate_layouts[ordinal];
+        const auto layout_size = static_cast<std::uint64_t>(layout.size());
+        generation_hash.Add(std::as_bytes(std::span(&layout_size, 1)));
+        generation_hash.Add(std::as_bytes(std::span(layout.data(), layout.size())));
+    }
+    const auto authored_end = material_parameter_candidate_bases[kAuthoredMaterialNames.size() - 1] +
+        material_parameter_candidate_counts[kAuthoredMaterialNames.size() - 1];
+    generation_hash.Add(std::as_bytes(std::span(material_parameter_candidate_slots).first(authored_end)));
+    const auto generation_parameters = generation_hash.Finish();
+    if (!generation_material_parameters_valid)
+    {
+        generation_material_parameters = generation_parameters;
+        generation_material_parameters_valid = true;
+    }
+    material_parameters_match_generation = generation_parameters == generation_material_parameters;
+
     const auto begin = material_parameter_candidate_bases[kTerrainMaterialOrdinal];
     const auto end = material_parameter_candidate_bases[kTerrainMaterialOrdinal + 1];
     Sha256Stream hash;
@@ -207,6 +258,7 @@ void D3D12Renderer::Impl::CommitMaterialParameters() noexcept
     material_parameter_slot_count = material_parameter_candidate_slot_count;
     ++material_parameter_revision;
     material_parameter_bases = material_parameter_candidate_bases;
+    material_parameter_counts = material_parameter_candidate_counts;
     material_parameter_layouts = std::move(material_parameter_candidate_layouts);
     material_parameter_slots = std::move(material_parameter_candidate_slots);
     CommitDecalMaterialParameters();

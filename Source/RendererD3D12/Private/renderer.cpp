@@ -141,6 +141,16 @@ D3D12Renderer::~D3D12Renderer()
     if (!Shutdown()) (void)impl_.release();
 }
 
+void RendererConfig::UseRendererCatalog(std::shared_ptr<const render_data::RendererCatalogData> catalogue) noexcept
+{
+    prepared_renderer_catalog = std::move(catalogue);
+    const auto view = prepared_renderer_catalog ? prepared_renderer_catalog->View() : render_data::RendererCatalogView{};
+    packed_bulks = view.bulks; packed_textures = view.textures; packed_geometry = view.geometry;
+    packed_materials = view.materials; packed_characters = view.characters; packed_animations = view.animations;
+    packed_vfx_mesh_atlas = view.atlas; packed_source_revisions = view.source_revisions;
+    packed_revision_bulks = view.revision_bulks;
+}
+
 Result D3D12Renderer::Initialize(const RendererConfig &config)
 {
     if (impl_->initialized)
@@ -156,15 +166,10 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     main_view.role = RenderViewRole::Main;
     if (config.packed_content)
     {
-        if (auto valid = ValidatePackedRendererAssets(*config.packed_content, config.packed_bulks); !valid) return valid;
-        if (auto valid = ValidatePackedTextureCatalog(config); !valid) return valid;
-        if (auto valid = ValidatePackedGeometryCatalog(config); !valid) return valid;
-        if (auto valid = ValidatePackedMaterialCatalog(config); !valid) return valid;
-        if (auto valid = ValidatePackedCharacterCatalog(config); !valid) return valid;
+        if (auto valid = ValidatePackedCatalog(config); !valid) return valid;
         if (auto valid = ValidatePackedVfxMeshCatalog(config); !valid) return valid;
-        if (auto valid = ValidatePackedRevisionCatalog(config); !valid) return valid;
     }
-    else if (!config.packed_bulks.empty() || !config.packed_textures.empty() || !config.packed_geometry.empty() ||
+    else if (config.prepared_renderer_catalog || !config.packed_bulks.empty() || !config.packed_textures.empty() || !config.packed_geometry.empty() ||
         !config.packed_materials.empty() || !config.packed_characters.empty() || !config.packed_animations.empty() ||
         config.packed_vfx_mesh_atlas || !config.packed_source_revisions.empty() || !config.packed_revision_bulks.empty())
         return Result::Failure(ErrorCode::InvalidArgument, "RendererPack", "Catalog requires its opened pack owner.");
@@ -192,10 +197,7 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
         {
             return Result::Failure(ErrorCode::InvalidArgument, "RendererDevelopmentCatalog", error.what());
         }
-        if (auto valid = ValidatePackedTextureCatalog(native_config); !valid) return valid;
-        if (auto valid = ValidatePackedGeometryCatalog(native_config); !valid) return valid;
-        if (auto valid = ValidatePackedMaterialCatalog(native_config); !valid) return valid;
-        if (auto valid = ValidatePackedCharacterCatalog(native_config); !valid) return valid;
+        if (auto valid = ValidatePackedCatalog(native_config); !valid) return valid;
     }
     if (config.requested_graphics)
     {
@@ -225,6 +227,8 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     main_view.lod_session_epoch = 0;
     impl_->frame_submission_faulted = false;
     impl_->material_parameter_revision = 0;
+    impl_->material_parameter_counts.fill(0);
+    impl_->material_parameter_revisions.fill(0);
     if (auto result = MeasureStartupStep(RendererStartupStep::Device, [&] { return impl_->CreateDevice(native_config, main_view); }); !result)
     {
         return result;
@@ -272,8 +276,8 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     MeasureStartupStep(RendererStartupStep::EnvironmentBrdfDescriptors, [&] { return impl_->WriteEnvironmentBrdfLutDescriptors(); });
     if (auto result = MeasureStartupStep(RendererStartupStep::MaterialParameters, [&] { return impl_->PrepareMaterialParameters(impl_->config, false); }); !result)
         return result;
+    impl_->generation_material_parameters_valid = false;
     MeasureStartupStep(RendererStartupStep::MaterialParameters, [&] { return impl_->CommitMaterialParameters(); });
-    impl_->baked_generation_material_revision = impl_->material_parameter_revision;
     impl_->baked_generation_pipeline_revision = impl_->pipeline_revision;
     if (auto result = MeasureStartupStep(RendererStartupStep::EnvironmentMeshes, [&] { return impl_->CreateEnvironmentMeshes(); }); !result)
     {
@@ -484,7 +488,7 @@ Result D3D12Renderer::InitializeWorldTransportBake(const RendererConfig &configu
     if (native_config.packed_content)
         return Result::Failure(ErrorCode::InvalidArgument, "RendererPack",
                                "One-shot static shadow baking requires a loose SelectedGeneration.");
-    if (!native_config.packed_bulks.empty() || !native_config.packed_textures.empty() ||
+    if (native_config.prepared_renderer_catalog || !native_config.packed_bulks.empty() || !native_config.packed_textures.empty() ||
         !native_config.packed_geometry.empty() || !native_config.packed_materials.empty() ||
         !native_config.packed_characters.empty() || !native_config.packed_animations.empty() ||
         native_config.packed_vfx_mesh_atlas || !native_config.packed_source_revisions.empty() ||
@@ -500,9 +504,7 @@ Result D3D12Renderer::InitializeWorldTransportBake(const RendererConfig &configu
     {
         return Result::Failure(ErrorCode::InvalidArgument, "RendererDevelopmentCatalog", error.what());
     }
-    if (auto valid = ValidatePackedTextureCatalog(native_config); !valid) return valid;
-    if (auto valid = ValidatePackedGeometryCatalog(native_config); !valid) return valid;
-    if (auto valid = ValidatePackedMaterialCatalog(native_config); !valid) return valid;
+    if (auto valid = ValidatePackedCatalog(native_config); !valid) return valid;
 
     EssentialBootstrapScope essential_bootstrap_scope{impl_->essential_bootstrap_active};
 
@@ -544,8 +546,8 @@ Result D3D12Renderer::InitializeWorldTransportBake(const RendererConfig &configu
     if (auto root = impl_->CreateRootSignature(); !root) return root;
     if (auto geometry = impl_->CreateStaticShadowBakeGeometry(); !geometry) return geometry;
     if (auto parameters = impl_->PrepareMaterialParameters(impl_->config, false, material_scope); !parameters) return parameters;
+    impl_->generation_material_parameters_valid = false;
     impl_->CommitMaterialParameters();
-    impl_->baked_generation_material_revision = impl_->material_parameter_revision;
     std::array<std::uint32_t, kEnvironmentMaterialNames.size()> shadow_pages{};
     constexpr auto lod_count = static_cast<std::uint32_t>(render_data::kEnvironmentGeometryLodCount);
     for (std::size_t ordinal = 0; ordinal < shadow_pages.size(); ++ordinal)
@@ -578,9 +580,9 @@ Result D3D12Renderer::BakeStaticShadowPages(const RendererConfig &configuration,
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", message);
         }
         if (!primary) return primary;
-        if (owner.ValidationErrorCount())
+        if (!owner.ValidationStatus().MessageCollectionValid() || owner.ValidationErrorCount())
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "Static shadow producer reported native validation errors.");
+                                   "Static shadow producer validation failed or message collection was incomplete.");
         return Result::Success();
     };
     if (auto initialized = owner.InitializeWorldTransportBake(configuration, WorldTransportBakeKind::StaticShadow); !initialized)
@@ -636,7 +638,7 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
         if (FAILED(device_reason))
         {
             (void)impl_->CheckDevice(device_reason, "Prepare resized render targets");
-            impl_->CountValidationErrors();
+            (void)impl_->CountValidationErrors();
             impl_->initialized = false;
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    std::format("{}; device is unusable.", result.Message()));
@@ -647,7 +649,7 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
 
     if (auto result = impl_->WaitForGpu(); !result)
     {
-        impl_->CountValidationErrors();
+        (void)impl_->CountValidationErrors();
         impl_->initialized = false;
         return result;
     }
@@ -701,7 +703,7 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
             resize_result == DXGI_ERROR_DEVICE_RESET ||
             resize_result == DXGI_ERROR_DEVICE_HUNG || FAILED(device_reason))
         {
-            impl_->CountValidationErrors();
+            (void)impl_->CountValidationErrors();
             impl_->initialized = false;
             return failure;
         }
@@ -710,7 +712,7 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
         if (FAILED(desc_result) || description.Width != owned_view.width ||
             description.Height != owned_view.height)
         {
-            impl_->CountValidationErrors();
+            (void)impl_->CountValidationErrors();
             impl_->initialized = false;
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    std::format("{}; original swap-chain size could not be "
@@ -721,7 +723,7 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
         if (auto recovery = acquire_back_buffers("Recover original swap-chain buffers");
             !recovery)
         {
-            impl_->CountValidationErrors();
+            (void)impl_->CountValidationErrors();
             impl_->initialized = false;
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    std::format("{}; original swap-chain buffers could not "
@@ -734,7 +736,7 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
 
     if (auto result = acquire_back_buffers("Get resized swap-chain buffer"); !result)
     {
-        impl_->CountValidationErrors();
+        (void)impl_->CountValidationErrors();
         impl_->initialized = false;
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                std::format("{}; renderer is unusable.", result.Message()));
@@ -1383,9 +1385,11 @@ Result D3D12Renderer::Shutdown()
     }
     Result result = Result::Success();
     if (auto drained = impl_->asset_io.DrainSubmitted(impl_->streaming, impl_->residency); !drained) return drained;
+#if defined(HS_DEVELOPMENT_TOOLS)
     for (auto &candidate : impl_->unresolved_resident_candidates)
         if (auto drained = candidate->asset_io.DrainSubmitted(candidate->streaming, candidate->residency); !drained)
             return drained;
+#endif
     const bool has_view_provider = std::ranges::any_of(impl_->owned_views, [](const auto &entry) {
         return static_cast<bool>(entry.second->reconstruction_provider);
     });
@@ -1409,6 +1413,7 @@ Result D3D12Renderer::Shutdown()
     impl_->material_parameter_slots.clear();
     impl_->material_parameter_candidate_slots.clear();
     impl_->resident_utility_submissions.clear();
+#if defined(HS_DEVELOPMENT_TOOLS)
     for (auto &candidate : impl_->unresolved_resident_candidates)
     {
         for (auto &[id, view] : candidate->owned_views)
@@ -1426,6 +1431,7 @@ Result D3D12Renderer::Shutdown()
         candidate->unresolved_view_candidates.clear();
     }
     impl_->unresolved_resident_candidates.clear();
+#endif
     impl_->graph.Reset();
     {
         // IO and all GPU queues are complete. Destroy backing/maps/readback
@@ -1513,9 +1519,7 @@ Result D3D12Renderer::Shutdown()
     impl_->graph_queue_executor.Clear();
     impl_->ResetEnvironmentStreaming();
     if (impl_->device)
-    {
-        impl_->CountValidationErrors();
-    }
+        (void)impl_->CountValidationErrors();
 #if defined(HS_DEVELOPMENT_TOOLS)
     if (impl_->imgui_initialized)
     {
@@ -1669,6 +1673,8 @@ Result D3D12Renderer::Shutdown()
     impl_->terrain_planes_archive_digest.clear();
     impl_->terrain_static_pages_current = false;
     impl_->terrain_generation_parameters_valid = false;
+    impl_->generation_material_parameters_valid = false;
+    impl_->material_parameters_match_generation = true;
     impl_->terrain_parameters_match = true;
     impl_->terrain_parameters_changed = false;
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -1730,6 +1736,9 @@ Result D3D12Renderer::Shutdown()
     impl_->command_list.Reset();
     impl_->fence.Reset();
     impl_->queue.Reset();
+#if defined(HS_DEVELOPMENT_TOOLS)
+    impl_->validation_info_queue.Reset();
+#endif
     impl_->device.Reset();
     impl_->adapter.Reset();
     impl_->factory.Reset();

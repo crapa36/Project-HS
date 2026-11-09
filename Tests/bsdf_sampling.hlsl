@@ -250,6 +250,28 @@ float HsProbePreparedLayeredRegressionError(uint case_index)
             error = HsProbeMaxError(error, base_raw_specular - base_prepared_specular);
         }
     }
+    if (case_index == 0u)
+    {
+        HsSurfaceClosure tiny_fresnel = (HsSurfaceClosure)0;
+        tiny_fresnel.base_color = 1.0;
+        tiny_fresnel.normal = float3(0.0, 0.0, 1.0);
+        tiny_fresnel.roughness = 1.0;
+        tiny_fresnel.metallic = 0.0;
+        tiny_fresnel.coat_weight = 0.0;
+        tiny_fresnel.sheen_weight = 0.0;
+        tiny_fresnel.transmission_weight = 0.0;
+        tiny_fresnel.anisotropy = 0.0;
+        tiny_fresnel.solid_transmission_weight = 1.0;
+        tiny_fresnel.ior = 1.0001;
+        float3 tiny_diffuse, tiny_specular;
+        HsBsdfEvaluateComponentsOptical(tiny_fresnel, float3(0.0, 0.0, 1.0),
+            float3(0.0, 0.0, 1.0), -1.0, tiny_diffuse, tiny_specular);
+        float3 expected_tiny_specular = HsBsdfF0(tiny_fresnel) / (4.0 * HsBsdfPi);
+        error = max(error, all(tiny_specular > 0.0)
+            ? HsProbeMax3(abs(tiny_specular - expected_tiny_specular)) /
+                HsProbeMax3(expected_tiny_specular)
+            : 1.0);
+    }
     return error;
 }
 
@@ -259,7 +281,7 @@ float HsProbeLobeCoordinate(uint index)
 }
 
 static const uint HsProbeLegacyCaseCount = 7u;
-static const uint HsProbeCoatedCaseCount = 72u;
+static const uint HsProbeCoatedCaseCount = 136u;
 static const uint HsProbeFresnelCaseCount = 14u;
 static const uint HsProbeTotalCaseCount = HsProbeLegacyCaseCount + HsProbeCoatedCaseCount + HsProbeFresnelCaseCount + 1u;
 static const uint HsProbeCoatedReferenceSamples = 65536u;
@@ -321,7 +343,8 @@ HsProbeCoatedCase HsProbeMakeCoatedCase(uint index)
     const uint grazing_case = index - 32u;
     const uint grazing_index = grazing_case / 8u;
     const uint grazing_roughness_index = (grazing_case / 2u) % 4u;
-    const float grazing_no_v[5] = {0.001, 0.002, 0.004, 0.008, 0.012};
+    const float grazing_no_v[13] = {0.001, 0.002, 0.004, 0.008, 0.012,
+        1e-8, 1e-6, 4e-6, 1.6e-5, 6.4e-5, 0.00025, 0.0005, 1.17549435e-38};
     value.no_v = grazing_no_v[grazing_index];
     value.surface.roughness = HsProbeRoughnessCenter(roughness_targets[grazing_roughness_index]);
     value.surface.coat_roughness = HsProbeRoughnessCenter(roughness_targets[(grazing_roughness_index + 1u) % 4u]);
@@ -447,16 +470,15 @@ float HsProbeCoatedEligibilityError()
 {
     HsSurfaceClosure surface = HsMaterialMakeSurfaceClosure(float3(.5,.3,.2),float3(0,0,1),.5,0,1,1);
     surface.coat_weight=.4;
-    float error = HsBsdfCanUseCoatedIbl(surface,1.0/1024.0) ? 0.0 : 1.0;
-    error = max(error,HsBsdfCanUseCoatedIbl(surface,1.0/1024.0-1e-5) ? 1.0 : 0.0);
-    surface.coat_weight=0.0; error=max(error,HsBsdfCanUseCoatedIbl(surface,.5)?1.0:0.0);
-    surface.coat_weight=.4; surface.anisotropy=.01; error=max(error,HsBsdfCanUseCoatedIbl(surface,.5)?1.0:0.0);
+    float error = HsBsdfCanUseCoatedIbl(surface) ? 0.0 : 1.0;
+    surface.coat_weight=0.0; error=max(error,HsBsdfCanUseCoatedIbl(surface)?1.0:0.0);
+    surface.coat_weight=.4; surface.anisotropy=.01; error=max(error,HsBsdfCanUseCoatedIbl(surface)?1.0:0.0);
     surface.anisotropy=0; surface.sheen_weight=.5; surface.sheen_color=.5;
-    error=max(error,HsBsdfCanUseCoatedIbl(surface,.5)?1.0:0.0);
+    error=max(error,HsBsdfCanUseCoatedIbl(surface)?1.0:0.0);
     surface.sheen_weight=0; surface.sheen_color=0; surface.transmission_weight=.1;
-    error=max(error,HsBsdfCanUseCoatedIbl(surface,.5)?1.0:0.0);
+    error=max(error,HsBsdfCanUseCoatedIbl(surface)?1.0:0.0);
     surface.transmission_weight=0; surface.unlit=true;
-    error=max(error,HsBsdfCanUseCoatedIbl(surface,.5)?1.0:0.0);
+    error=max(error,HsBsdfCanUseCoatedIbl(surface)?1.0:0.0);
     return error;
 }
 

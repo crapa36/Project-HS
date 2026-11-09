@@ -294,6 +294,14 @@ Result D3D12Renderer::Impl::BuildAdaptiveMaterialPolicies(std::vector<AdaptiveSh
             // advanced closure must never be inferred eligible from its ID.
             policies.push_back({render_data::kCharacterMaterialIdBase + static_cast<std::uint32_t>(hero), 0u});
         std::ranges::sort(policies, {}, &AdaptiveShadingMaterialPolicy::material_id);
+        std::uint32_t previous{};
+        for (const auto &policy : policies)
+        {
+            if (!policy.material_id || policy.material_id <= previous || policy.eligible > 1)
+                return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                    "Adaptive material policy must contain sorted unique actual IDs.");
+            previous = policy.material_id;
+        }
         return Result::Success();
     }
     catch (const std::exception &error)

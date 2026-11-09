@@ -67,7 +67,7 @@ bool LoadVfxProgram(std::span<const std::byte> bytes, VfxProgramData& output, st
         if (!directory.Read(kind) || !directory.Read(table[i].count) || !directory.Read(table[i].offset) || !directory.Read(table[i].bytes))
             return Fail(error, "VFX section directory is truncated");
         if (kind != i + 1 || table[i].offset < kDirectoryBytes || table[i].offset > payload.size() ||
-            table[i].bytes > payload.size() - table[i].offset || table[i].offset + table[i].bytes > payload.size())
+            table[i].bytes > payload.size() - table[i].offset)
             return Fail(error, "VFX section directory is invalid");
         if ((i == 10 && table[i].count != table[i].bytes) || (kStrides[i] != 0 && (table[i].bytes % kStrides[i] != 0 || table[i].bytes / kStrides[i] != table[i].count)))
             return Fail(error, "VFX section stride mismatch");
@@ -107,7 +107,12 @@ bool LoadVfxProgram(std::span<const std::byte> bytes, VfxProgramData& output, st
     for (const auto& t:parsed.texture_bindings) if(t.min_quality>2 || !Finite(t.strength) || !Finite(t.fps) || !RangeOk(t.slices,parsed.slice_indices.size())) return Fail(error,"VFX texture binding is invalid");
     for (const auto& c:parsed.curves) if(!RangeOk(c.keys,parsed.curve_keys.size())) return Fail(error,"VFX curve range is invalid");
     for (const auto& k:parsed.curve_keys) if(!Finite(k.time)||!Finite(k.value)) return Fail(error,"VFX curve key is invalid");
-    for (std::size_t i=0;i<parsed.effect_lookup.size();++i) if(!parsed.effect_lookup[i].effect_id || !parsed.effect_lookup[i].handle || parsed.effect_lookup[i].handle>parsed.effects.size()) return Fail(error,"VFX effect lookup is invalid");
+    if(parsed.effect_lookup.size()!=parsed.effects.size()) return Fail(error,"VFX effect lookup is incomplete");
+    std::set<std::uint64_t> effectIds;
+    for(std::size_t i=0;i<parsed.effect_lookup.size();++i) {
+        const auto &e=parsed.effect_lookup[i];
+        if(e.handle!=i+1 || !e.effect_id || !effectIds.insert(e.effect_id).second) return Fail(error,"VFX effect identity is duplicate or invalid");
+    }
     for (const auto& r:parsed.texture_resources) if(!RangeOk(r.asset_path_bytes,parsed.strings.size())) return Fail(error,"VFX texture resource string range is invalid");
     for (std::size_t i=0;i<parsed.texture_resources.size();++i) {
         const auto &r=parsed.texture_resources[i];
@@ -125,12 +130,6 @@ bool LoadVfxProgram(std::span<const std::byte> bytes, VfxProgramData& output, st
     for (const auto& e:parsed.effects) for (std::uint32_t i=e.sources.first;i<e.sources.first+e.sources.count;++i) if (parsed.sources[i].effect != e.handle) return Fail(error,"VFX source effect back-reference is invalid");
     for (const auto& s:parsed.sources) for (std::uint32_t i=s.outputs.first;i<s.outputs.first+s.outputs.count;++i) if (parsed.outputs[i].source != (&s-&parsed.sources[0])) return Fail(error,"VFX output source back-reference is invalid");
     for (const auto& t:parsed.texture_bindings) if (t.catalog_slot >= parsed.texture_resources.size()) return Fail(error,"VFX texture catalog slot is invalid");
-    if(parsed.effect_lookup.size()!=parsed.effects.size()) return Fail(error,"VFX effect lookup is incomplete");
-    std::set<std::uint64_t> effectIds;
-    for(std::size_t i=0;i<parsed.effect_lookup.size();++i) {
-        const auto &e=parsed.effect_lookup[i];
-        if(e.handle!=i+1 || !e.effect_id || !effectIds.insert(e.effect_id).second) return Fail(error,"VFX effect identity is duplicate or invalid");
-    }
     for(const auto &p:parsed.parameters) {
         if(!p.key || (p.type==VfxParameterType::Float&&!Finite(std::bit_cast<float>(p.bits))) ||
            (p.type==VfxParameterType::Bool&&p.bits>1) || (p.type==VfxParameterType::CurveRow&&p.bits>=parsed.curves.size())) return Fail(error,"VFX typed parameter is invalid");

@@ -466,6 +466,7 @@ Result D3D12Renderer::Impl::CreateClusterViewResources(ClusterViewRuntime &targe
 }
 
 Result D3D12Renderer::Impl::PrepareClusterFrame(OwnedView &owner, std::uint32_t frame_slot,
+    const renderer_detail::FrameConstants &frame_constants,
     const std::array<ClusterCutInput, kClusterRuntimeCatalogs> &inputs)
 {
     if (!cluster_runtime || frame_slot >= kClusterRuntimeFrames)
@@ -478,9 +479,8 @@ Result D3D12Renderer::Impl::PrepareClusterFrame(OwnedView &owner, std::uint32_t 
         return ClusterFailure("Cluster frame resources are still used by an earlier submission.");
     if (frame.geometry_draw_records_cpu.empty())
         return ClusterFailure("Authored geometry prefix must be prepared before cluster cuts.");
-    if (!frame.mapped || !owner.targets.hzb_layout.count || owner.targets.hzb_layout.elements > UINT32_MAX)
-        return ClusterFailure("Cluster occlusion requires prepared frame constants and HZB layout.");
-    const auto &frame_constants = *reinterpret_cast<const FrameConstants *>(frame.mapped);
+    if (!owner.targets.hzb_layout.count || owner.targets.hzb_layout.elements > UINT32_MAX)
+        return ClusterFailure("Cluster occlusion requires a prepared HZB layout.");
     const ClusterFrameRuntime *previous_frame = owner.last_history_frame_slot < kClusterRuntimeFrames &&
         owner.last_history_frame_slot != frame_slot ? &runtime.frames[owner.last_history_frame_slot] : nullptr;
     const auto history_generation = owner.history_generation;

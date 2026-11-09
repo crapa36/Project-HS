@@ -117,7 +117,7 @@ struct Fixture
     void CheckValidation()
     {
         ComPtr<ID3D12InfoQueue> info;
-        if (FAILED(device.As(&info))) return;
+        Hr(device.As(&info), "validation message queue");
         for (UINT64 index = 0;
              index < info->GetNumStoredMessagesAllowedByRetrievalFilter(); ++index)
         {
@@ -1144,6 +1144,31 @@ void RunFinalExports(Fixture &fixture, hs::BarrierMode barriers)
             "untouched imports preserve prior completion and ownership");
     }
     graph.Reset();
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        handles[index] = graph.ImportTexture({textures[index].Get(), prior[index], hs::QueueHint::Direct},
+            hs::Access::ShaderRead, "completed foreign import");
+        auto pass = graph.AddPass(static_cast<std::uint32_t>(index + 1), "read completed import", hs::QueueHint::Direct);
+        pass.Read(graph.Version(handles[index]), hs::Access::ShaderRead);
+        pass.SetExecute([](hs::RenderPassContext &) {});
+    }
+    Check(graph.Prepare(pool).Succeeded(), "prepare completed foreign imports");
+    Check(fixture.executor.Execute(graph, 0, barriers, completion, &options).Succeeded(),
+        "execute completed foreign imports");
+    Check(fixture.executor.LastExecutionStats().direct_batches ==
+            (barriers == hs::BarrierMode::Enhanced ? 1u : count),
+        "satisfied foreign completions do not split Enhanced submissions; Legacy preserves decay");
+    Check(fixture.executor.Wait(completion).Succeeded(), "wait completed foreign import readers");
+    for (std::size_t index = 0; index < count; ++index)
+        Check(graph.ResourceCompletion(handles[index]).direct > prior[index].direct &&
+            graph.ResourceCompletion(handles[index]).direct <= completion.direct &&
+            (barriers != hs::BarrierMode::Enhanced ||
+                graph.ResourceCompletion(handles[index]).direct == completion.direct) &&
+            graph.ResourceCompletion(handles[index]).compute >= prior[index].compute,
+            "merged readers preserve imported and newly accepted completion");
+    fixture.CheckValidation();
+
+    graph.Reset();
     const auto leased = graph.ImportTexture({textures[0].Get(), prior[0], hs::QueueHint::Direct,
         {{}, 0, NativeOwner(textures[0].Get())}}, hs::Access::ShaderRead, "unused external lease");
     Check(graph.Prepare(pool).Succeeded(), "prepare untouched external lease");
@@ -1525,21 +1550,37 @@ void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
 
     auto work = std::make_shared<ExternalWork>(fixture.device.Get());
     Hr(work->gate->Signal(1), "release invalid declaration provider gate");
-    for (const int invalid : {0, 1, 2, 3, 4, 5})
+    for (const int invalid : {0, 1, 2, 3, 4, 5, 6})
     {
         hs::TransientResourcePool pool;
         Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "invalid external pool");
         hs::RenderGraphBuilder graph;
         const auto output = graph.CreateBuffer(buffer_desc, "invalid external output");
+        bool invoked{};
+        hs::BufferHandle undeclared{};
+        if (invalid == 5)
+        {
+            undeclared = graph.CreateBuffer(buffer_desc, "prior external output");
+            auto prior = graph.AddPass(150, "prior external boundary", hs::QueueHint::Copy);
+            (void)prior.Write(graph.Version(undeclared), hs::Access::CopyDest);
+            const hs::ExternalResourceAccess boundary{undeclared, hs::Access::Common, hs::Access::Common};
+            prior.SetExternalExecute({NativeOwner(work->queue.Get()), hs::QueueHint::Copy, work}, {&boundary, 1},
+                [&](auto &, auto &) { invoked = true; return hs::Result::Success(); });
+        }
         auto pass = graph.AddPass(160, "invalid external boundary", hs::QueueHint::Copy);
         if (invalid == 3) (void)pass.Write(graph.Version(output), hs::Access::CopyDest, hs::BufferRange{0, size});
         else (void)pass.Write(graph.Version(output), hs::Access::CopyDest);
+        if (invalid == 2)
+        {
+            const auto second = graph.CreateBuffer(buffer_desc, "missing external boundary");
+            (void)pass.Write(graph.Version(second), hs::Access::CopyDest);
+        }
         std::vector<hs::ExternalResourceAccess> boundaries;
         if (invalid != 0) boundaries.push_back({output, invalid == 1 ? hs::Access::CopyDest : hs::Access::Common,
                                               hs::Access::Common});
         if (invalid == 2) boundaries.push_back(boundaries.front());
-        if (invalid == 5) boundaries.front().resource = graph.CreateBuffer(buffer_desc, "undeclared external boundary");
-        bool invoked{};
+        if (invalid == 5) boundaries.front().resource = undeclared;
+        if (invalid == 6) boundaries.front().resource.value = UINT32_MAX;
         pass.SetExternalExecute({NativeOwner(work->queue.Get()),
             invalid == 4 ? hs::QueueHint::Direct : hs::QueueHint::Copy, work}, boundaries,
             [&](auto &, auto &) { invoked = true; return hs::Result::Success(); });
@@ -3680,6 +3721,17 @@ int main(int argc, char **argv)
     {
         const bool hardware =
             argc == 2 && std::string_view(argv[1]) == "--hardware";
+        hs::RendererValidationStatus collection;
+        Check(collection.MessageCollectionValid(), "validation OFF does not require message collection");
+        collection.debug_layer_requested = true;
+        Check(!collection.MessageCollectionValid(), "zero errors without collection is not validation evidence");
+        collection.message_collection_attempted = true;
+        Check(collection.MessageCollectionValid(), "successful empty collection is valid");
+        collection.message_collection_hresult = E_FAIL;
+        Check(!collection.MessageCollectionValid(), "a collection failure must invalidate zero errors");
+        collection.debug_layer_requested = false;
+        collection.gpu_validation_requested = true;
+        Check(!collection.MessageCollectionValid(), "GPU validation also requires successful collection");
         TestLocalShadowDynamicChanges();
         Fixture fixture(hardware);
         RunBakedProbePreparation(fixture);

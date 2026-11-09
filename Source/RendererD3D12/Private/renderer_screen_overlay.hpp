@@ -22,7 +22,7 @@ class ScreenOverlayCandidate
 };
 struct ScreenOverlayInputs
 {
-    VfxScreenInputs commands;
+    VfxScreenInputs commands; // Scalar payloads are admitted once by PrepareFramePayload.
     ResourceVersion gradient;
     ID3D12Resource *gradient_resource{};
     ViewExtent render_active, output_active;

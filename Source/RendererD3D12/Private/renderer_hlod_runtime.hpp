@@ -52,11 +52,10 @@ struct HlodViewRuntime
 };
 struct HlodRuntime
 {
-    render_data::SceneHlod scene;
+    std::shared_ptr<const render_data::AdmittedSceneHlod> scene;
     HlodScenePreparation prepared_scene;
     std::string logical_id, content_generation;
     std::vector<RendererAssetSource> page_sources;
-    std::vector<std::string> page_digests;
     std::vector<std::uint32_t> proxy_material_ordinals;
     // IO admission is a nonoverlapping forest frontier. Draw selection remains
     // GPU owned; these distinct page sets only reserve the shared stream pool.

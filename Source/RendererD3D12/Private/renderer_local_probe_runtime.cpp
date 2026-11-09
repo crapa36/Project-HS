@@ -2302,7 +2302,7 @@ Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
             input.max_cube_views = maximum_cube_views_per_graph;
             input.config = &renderer.config; input.pipeline_cache = &renderer.pipeline_cache;
             input.scene = scene; input.lights = std::span(&sun, 1); input.static_instance_generation = generation;
-            input.material_parameter_revision = renderer.material_parameter_revision - renderer.baked_generation_material_revision;
+            input.material_parameter_revision = renderer.MaterialOverrideRevision();
             input.pipeline_revision = renderer.pipeline_revision;
             input.foliage_density = foliage; input.frame_constants = &constants; input.page_revisions = revisions;
             input.texture_facts = texture_facts; input.texture_facts_valid = true; input.pages = pages;
@@ -2424,7 +2424,8 @@ Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
     const auto cleanup = owner.Shutdown();
     if (!cleanup) return Failure(std::string(result.Message()) + "; cleanup failed: " + std::string(cleanup.Message()));
     if (!result) return result;
-    if (owner.ValidationErrorCount()) return Failure("Scene-probe producer reported native validation errors.");
+    if (!owner.ValidationStatus().MessageCollectionValid() || owner.ValidationErrorCount())
+        return Failure("Scene-probe producer validation failed or message collection was incomplete.");
     package_bytes = std::move(candidate);
     return Result::Success();
 }

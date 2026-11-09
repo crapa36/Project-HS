@@ -53,6 +53,43 @@ enum ShadowReceiverDomain : std::uint32_t
     ShadowReceiverCamera = 1u, ShadowReceiverWorld = 2u,
 };
 struct ShadowSurfaceReceiver { Float4 minimum{},maximum{}; };
+[[nodiscard]] inline std::optional<ShadowSurfaceReceiver> TransformShadowSurfaceBounds(
+    const std::array<double,3> &lo,const std::array<double,3> &hi,Float3 scale,Float3 center,double yaw,double wind)
+{
+    const double x0=lo[0]*scale.x,x1=hi[0]*scale.x;
+    const double y0=lo[1]*scale.y,y1=hi[1]*scale.y;
+    const double z0=lo[2]*scale.z,z1=hi[2]*scale.z;
+    const double xlo=std::min(x0,x1),xhi=std::max(x0,x1);
+    const double ylo=std::min(y0,y1),yhi=std::max(y0,y1);
+    const double zlo=std::min(z0,z1),zhi=std::max(z0,z1);
+    const double c=std::cos(yaw),s=std::sin(yaw);
+    // Select support endpoints without changing the original sum order or padding.
+    const std::array<double,3> low{
+        double(center.x)+c*(c<0?xhi:xlo)+s*(s<0?zhi:zlo),
+        double(center.y)+ylo,
+        double(center.z)-s*(s>0?xhi:xlo)+c*(c<0?zhi:zlo)};
+    const std::array<double,3> high{
+        double(center.x)+c*(c<0?xlo:xhi)+s*(s<0?zlo:zhi),
+        double(center.y)+yhi,
+        double(center.z)-s*(s>0?xlo:xhi)+c*(c<0?zlo:zhi)};
+    const std::array<double,3> magnitude{
+        std::abs(double(center.x))+std::max(std::abs(xlo),std::abs(xhi))+std::max(std::abs(zlo),std::abs(zhi)),
+        std::abs(double(center.y))+std::max(std::abs(ylo),std::abs(yhi)),
+        std::abs(double(center.z))+std::max(std::abs(xlo),std::abs(xhi))+std::max(std::abs(zlo),std::abs(zhi))};
+    std::array<float,3> minimum{},maximum{};
+    constexpr double float_max=std::numeric_limits<float>::max();
+    for(std::size_t axis=0;axis<3;++axis)
+    {
+        const double pad=wind+magnitude[axis]*0x1p-18+1.e-5;
+        const double expanded_low=low[axis]-pad,expanded_high=high[axis]+pad;
+        if(!std::isfinite(expanded_low)||!std::isfinite(expanded_high)||
+           expanded_low<=-float_max||expanded_high>=float_max)return {};
+        minimum[axis]=std::nextafter(float(expanded_low),-std::numeric_limits<float>::max());
+        maximum[axis]=std::nextafter(float(expanded_high),std::numeric_limits<float>::max());
+    }
+    return ShadowSurfaceReceiver{{minimum[0],minimum[1],minimum[2],0.0f},
+                                 {maximum[0],maximum[1],maximum[2],1.0f}};
+}
 struct ShadowSurfaceReceiverRange
 {
     std::span<const ShadowSurfaceReceiver> stable,dynamic,stable_aggregate;

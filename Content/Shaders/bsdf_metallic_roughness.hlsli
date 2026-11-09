@@ -121,22 +121,24 @@ HsBsdfGgxView HsBsdfPrepareGgxView(HsSurfaceClosure surface, float3 normal, floa
     return result;
 }
 
-float3 HsBsdfBaseEvaluateOpticalComponentsView(HsSurfaceClosure surface, float3 normal, float3 view,
-    float3 light, float base_fresnel_override, HsBsdfGgxView prepared, float3 f0, out float3 diffuse)
+void HsBsdfBaseEvaluateOpticalComponentsView(HsSurfaceClosure surface, float3 normal, float3 view,
+    float3 light, float base_fresnel_override, HsBsdfGgxView prepared, float3 f0,
+    out float3 diffuse, out float3 specular)
 {
     diffuse = 0.0;
+    specular = 0.0;
     float raw_no_v = prepared.no_v;
     float raw_no_l = dot(normal, light);
     if (raw_no_v <= 0.0 || raw_no_l <= 0.0)
     {
-        return float3(0.0, 0.0, 0.0);
+        return;
     }
 
     float3 half_vector_sum = view + light;
     float half_vector_length_squared = dot(half_vector_sum, half_vector_sum);
     if (half_vector_length_squared <= 0.0)
     {
-        return float3(0.0, 0.0, 0.0);
+        return;
     }
 
     float3 half_vector = half_vector_sum * rsqrt(half_vector_length_squared);
@@ -164,7 +166,15 @@ float3 HsBsdfBaseEvaluateOpticalComponentsView(HsSurfaceClosure surface, float3 
         (1.0 - HsBsdfSchlickFresnel(f0, no_v)) *
         (1.0 - HsBsdfSchlickFresnel(f0, no_l));
     diffuse = diffuse_transmission * ((1.0 - metallic) * surface.base_color) * HsBsdfInvPi;
-    float3 specular = distribution * fresnel / (view_smith_denominator * light_smith_denominator);
+    specular = distribution * fresnel / (view_smith_denominator * light_smith_denominator);
+}
+
+float3 HsBsdfBaseEvaluateOpticalComponentsView(HsSurfaceClosure surface, float3 normal, float3 view,
+    float3 light, float base_fresnel_override, HsBsdfGgxView prepared, float3 f0, out float3 diffuse)
+{
+    float3 specular;
+    HsBsdfBaseEvaluateOpticalComponentsView(surface, normal, view, light, base_fresnel_override,
+        prepared, f0, diffuse, specular);
     return diffuse + specular;
 }
 

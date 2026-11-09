@@ -305,9 +305,9 @@ Result D3D12Renderer::BakeTerrainSurfacePages(const RendererConfig &configuratio
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", message);
         }
         if (!primary) return primary;
-        if (owner.ValidationErrorCount())
+        if (!owner.ValidationStatus().MessageCollectionValid() || owner.ValidationErrorCount())
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                "Terrain page producer reported native validation errors.");
+                "Terrain page producer validation failed or message collection was incomplete.");
         return Result::Success();
     };
     try

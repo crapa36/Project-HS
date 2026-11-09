@@ -320,6 +320,18 @@ AdmittedSceneHlod::AdmittedSceneHlod(std::span<const std::byte> bytes)
         page_proxies_[scene_.proxies[index].page_index].push_back(Count(index));
 }
 
+std::uint64_t AdmittedSceneHlod::RetainedBytes() const noexcept
+{
+    std::uint64_t bytes = sizeof(*this);
+    const auto table = [&](const auto &values) { bytes += values.capacity() * sizeof(values.front()); };
+    table(scene_.dependencies); table(scene_.members); table(scene_.groups); table(scene_.proxies);
+    table(scene_.pages); table(scene_.roots); table(scene_.children); table(page_proxies_);
+    for (const auto &value : scene_.dependencies) bytes += value.size();
+    for (const auto &page : scene_.pages) bytes += page.logical_id.size();
+    for (const auto &indices : page_proxies_) table(indices);
+    return bytes;
+}
+
 void AdmittedSceneHlod::ValidatePage(std::uint32_t page_index,
     const PreparedGeometryPage &page) const
 {

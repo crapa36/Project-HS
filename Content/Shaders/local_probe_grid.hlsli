@@ -52,16 +52,18 @@ void HsLocalProbeGridIrradianceComponents(HsProbeGridCell c,float basis[9],bool 
     const uint mask=(packed[(index%16u)/4u]>>(8u*(index%4u)))&255u;
     front=0; back=0;
     if(!mask) return; // No reachable samples means no diffuse sky through walls.
+    const uint first_row=9u*(c.cell.x+c.dims.x*(c.cell.y+c.dims.y*c.cell.z));
+    const uint row_y=9u*c.dims.x;
+    const uint row_z=9u*c.dims.x*c.dims.y;
     float total=0;
-    [loop] for(uint corner=0;corner<8;++corner)
+    [unroll] for(uint corner=0;corner<8;++corner)
     {
         if(!(mask&(1u<<corner))) continue;
         const uint3 bit=(corner>>uint3(0,1,2))&1u;
         const float3 w=lerp(1-c.fraction,c.fraction,float3(bit));
         const float weight=w.x*w.y*w.z;
         if(weight==0) continue;
-        const uint3 node=c.cell+bit;
-        const uint row=9u*(node.x+c.dims.x*(node.y+c.dims.y*node.z));
+        const uint row=first_row+9u*bit.x+row_y*bit.y+row_z*bit.z;
         float3 front_value=0,back_value=0;
         [unroll] for(uint k=0;k<9;++k)
         {

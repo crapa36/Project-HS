@@ -22,51 +22,6 @@ Result Failure(std::string message)
 {
     return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", std::move(message));
 }
-std::string Digest(std::span<const std::byte> bytes)
-{
-    constexpr char hex[] = "0123456789abcdef";
-    const auto digest = rd::Sha256(bytes);
-    std::string result = "sha256:";
-    for (const auto value : digest)
-    {
-        const auto byte = std::to_integer<unsigned>(value);
-        result.push_back(hex[byte >> 4]);
-        result.push_back(hex[byte & 15]);
-    }
-    return result;
-}
-std::string ExpectedDigest(const RendererConfig &config, const std::string &id)
-{
-    const auto digest = RendererProductDigest(config, id);
-    Require(digest.size() == 71 && digest.starts_with("sha256:"), "selected content omits product digest");
-    for (std::size_t index = 7; index < digest.size(); ++index)
-        Require((digest[index] >= '0' && digest[index] <= '9') ||
-                (digest[index] >= 'a' && digest[index] <= 'f'), "invalid content product digest");
-    return digest;
-}
-std::vector<std::uint32_t> Depths(const rd::GeometryHierarchy &hierarchy, std::uint32_t &maximum)
-{
-    // Decode already proves rooted acyclic coverage. Compute the exact traversal
-    // budget; an ancestor walk never silently stops at a fixed stack/depth limit.
-    std::vector<std::uint32_t> result(hierarchy.groups.size());
-    std::vector<std::pair<std::uint32_t, std::uint32_t>> pending;
-    for (const auto root : hierarchy.root_groups) pending.emplace_back(root, 1);
-    maximum = 0;
-    while (!pending.empty())
-    {
-        const auto [id, depth] = pending.back();
-        pending.pop_back();
-        Require(id < result.size() && result[id] == 0 && depth > 0 && depth <= hierarchy.groups.size(),
-                "invalid hierarchy depth or coverage");
-        result[id] = depth;
-        maximum = std::max(maximum, depth);
-        const auto &group = hierarchy.groups[id];
-        for (std::uint32_t child = 0; child < group.child_count; ++child)
-            pending.emplace_back(hierarchy.child_groups[group.first_child + child], depth + 1);
-    }
-    Require(std::ranges::all_of(result, [](auto depth) { return depth != 0; }), "unreachable cluster group");
-    return result;
-}
 void RebasedRange(std::uint32_t base, std::size_t count)
 {
     Require(count <= std::numeric_limits<std::uint32_t>::max() - base, "GPU cluster table range overflow");
@@ -74,11 +29,11 @@ void RebasedRange(std::uint32_t base, std::size_t count)
 } // namespace
 
 Result EnvironmentClusterCatalog::Load(const RendererConfig &config,
-    const rd::PackageView &main_package, std::string_view main_product_id, const ClusterCatalogRead &read)
+    const rd::PackageView &main_package, std::string_view main_product_id)
 {
     try
     {
-        Require(!config.content_generation_id.empty() && static_cast<bool>(read), "cluster catalog requires a selected Generation and reader");
+        Require(!config.content_generation_id.empty(), "cluster catalog requires a selected Generation");
         const auto reference = std::ranges::find(main_package.chunks, rd::ChunkType::GeometryHierarchyReference, &rd::ChunkView::type);
         Require(reference != main_package.chunks.end() &&
                 reference->required && reference->version == 1 && reference->count == 1 &&
@@ -98,10 +53,9 @@ Result EnvironmentClusterCatalog::Load(const RendererConfig &config,
         Require(std::ranges::find(main_package.dependencies, source_id) != main_package.dependencies.end(), "cluster catalog omits original mesh dependency");
         RendererAssetSource hierarchy_path;
         if (auto resolved = ResolveRendererAsset(config, logical_id, hierarchy_path); !resolved) return resolved;
-        const auto expected_digest = ExpectedDigest(config, logical_id);
+        if (auto bound = hierarchy_path.BindExpectedDigest(RendererProductDigest(config, logical_id)); !bound) return bound;
         std::vector<std::byte> bytes;
-        if (auto loaded = read(hierarchy_path, bytes); !loaded) return loaded;
-        Require(hierarchy_path.IsPacked() || Digest(bytes) == expected_digest, "hierarchy bytes differ from selected Generation digest");
+        if (auto loaded = hierarchy_path.Read(bytes); !loaded) return loaded;
         EnvironmentClusterCatalog prepared;
         prepared.hierarchy_.emplace(bytes);
         Require(prepared.Hierarchy().geometry_flags == metadata.flags &&
@@ -124,7 +78,7 @@ Result EnvironmentClusterCatalog::Load(const RendererConfig &config,
             ClusterCatalogPage directory;
             directory.logical_id = page.logical_id;
             if (auto resolved = ResolveRendererAsset(config, page.logical_id, directory.source); !resolved) return resolved;
-            directory.digest = ExpectedDigest(config, page.logical_id); // No page payload I/O during catalog load.
+            if (auto bound = directory.source.BindExpectedDigest(RendererProductDigest(config, page.logical_id)); !bound) return bound;
             directory.pinned = (page.flags & rd::kGeometryHierarchyPagePinned) != 0;
             const auto local_index = static_cast<std::uint32_t>(index);
             Require(prepared.page_indices_.emplace(page.logical_id, local_index).second, "duplicate cluster page ID");
@@ -149,7 +103,6 @@ Result EnvironmentClusterCatalog::DecodePage(std::uint32_t page_index, std::span
     {
         Require(!generation_.empty() && hierarchy_ && page_index < pages_.size(), "cluster page has no catalog/generation");
         const auto &page = pages_[page_index];
-        Require(Digest(bytes) == page.digest, "cluster page bytes differ from selected Generation digest");
         auto prepared = rd::PrepareGeometryPagePayload(bytes, MakeAssetId(page.logical_id), Hierarchy().geometry_flags);
         Require(prepared.package.dependencies == std::vector<std::string>{source_id_}, "cluster page source dependency mismatch");
         hierarchy_->ValidatePage(page_index, prepared);
@@ -172,7 +125,6 @@ Result EnvironmentClusterCatalog::PrepareGpu(std::uint32_t catalog_ordinal, std:
         RebasedRange(group_base, hierarchy.groups.size()); RebasedRange(child_base, hierarchy.child_groups.size());
         RebasedRange(cluster_base, hierarchy.clusters.size()); RebasedRange(page_base, hierarchy.pages.size());
         ClusterGpuTables prepared;
-        const auto depths = Depths(hierarchy, prepared.max_ancestor_steps);
         prepared.groups.reserve(hierarchy.groups.size());
         prepared.clusters.resize(hierarchy.clusters.size());
         prepared.pages.resize(hierarchy.pages.size());
@@ -198,7 +150,7 @@ Result EnvironmentClusterCatalog::PrepareGpu(std::uint32_t catalog_ordinal, std:
             prepared.representation_pages.erase(last, prepared.representation_pages.end());
             record.representation_pages[1] = static_cast<std::uint32_t>(prepared.representation_pages.size()) -
                 record.representation_pages[0];
-            record.catalog_index = catalog_ordinal; record.generation = generation_tag; record.ancestor_steps = depths[id];
+            record.catalog_index = catalog_ordinal; record.generation = generation_tag;
             prepared.groups.push_back(record);
             for (std::uint32_t offset = 0; offset < group.cluster_count; ++offset)
             {
@@ -210,22 +162,26 @@ Result EnvironmentClusterCatalog::PrepareGpu(std::uint32_t catalog_ordinal, std:
             }
         }
         for (const auto child : hierarchy.child_groups) prepared.children.push_back(group_base + child);
-        // Thread each subtree to its successor, so GPU cuts need no fixed-depth stack.
-        std::vector<std::pair<std::uint32_t, std::uint32_t>> pending;
+        // The admitted tree supplies depth while its GPU successor links are built.
+        struct Link { std::uint32_t id, next, depth; };
+        std::vector<Link> pending;
         for (std::size_t root = 0; root < hierarchy.root_groups.size(); ++root)
-            pending.emplace_back(hierarchy.root_groups[root], root + 1 < hierarchy.root_groups.size()
-                ? hierarchy.root_groups[root + 1] : UINT32_MAX);
+            pending.push_back({hierarchy.root_groups[root], root + 1 < hierarchy.root_groups.size()
+                ? hierarchy.root_groups[root + 1] : UINT32_MAX, 1});
         while (!pending.empty())
         {
-            const auto [id, next] = pending.back();
+            const auto [id, next, depth] = pending.back();
             pending.pop_back();
             auto &group = prepared.groups[id];
+            group.ancestor_steps = depth;
+            prepared.max_ancestor_steps = std::max(prepared.max_ancestor_steps, depth);
             group.next_subtree = next == UINT32_MAX ? UINT32_MAX : group_base + next;
             for (std::uint32_t child = 0; child < group.child_count; ++child)
-                pending.emplace_back(hierarchy.child_groups[group.first_child - child_base + child],
+                pending.push_back({hierarchy.child_groups[group.first_child - child_base + child],
                     child + 1 < group.child_count
-                        ? hierarchy.child_groups[group.first_child - child_base + child + 1] : next);
+                        ? hierarchy.child_groups[group.first_child - child_base + child + 1] : next, depth + 1});
         }
+        // These links are newly rebased GPU data, unlike the admitted source tree.
         std::size_t visited{};
         for (auto id = group_base + hierarchy.root_groups.front(); id != UINT32_MAX;)
         {

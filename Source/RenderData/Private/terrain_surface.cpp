@@ -84,24 +84,20 @@ std::vector<TerrainSurfaceTile> BuildTerrainSurfaceTiles(std::span<const Terrain
     return tiles;
 }
 
-namespace
-{
-std::vector<std::byte> BuildTerrainSurface(AssetId asset_id,
+std::vector<std::byte> BuildTerrainSurfacePackage(AssetId asset_id,
     std::span<const std::string> section_products, std::span<const TerrainSurfaceSection> sections,
-    TextureDescription description, const std::array<std::byte, 32> &source_identity, std::uint32_t wire_version)
+    TextureDescription description, const std::array<std::byte, 32> &source_identity)
 {
     ValidateShape(description, sections.size());
-    Require(wire_version == 3 || sections.size() <= kTerrainSurfaceMaxPageSections,
-        "split section count exceeds dependency limit");
-    Require(section_products.size() == sections.size() * (wire_version == 2 ? 3 : 1),
+    Require(section_products.size() == sections.size() * 3,
         "section product count mismatch");
     std::vector<std::string> dependencies(section_products.begin(), section_products.end());
     std::ranges::sort(dependencies);
     Require(std::adjacent_find(dependencies.begin(), dependencies.end()) == dependencies.end(),
         "duplicate section product");
     std::vector<std::byte> encoded(kHeader + sections.size() * kStride + section_products.size() * 4);
-    Put(encoded, 0, kMagic); Put(encoded, 4, wire_version); Put(encoded, 8, static_cast<std::uint32_t>(sections.size()));
-    Put(encoded, 12, wire_version == 2 ? kTerrainSurfaceLeafLayoutVersion : kTerrainSurfaceLayoutVersion);
+    Put(encoded, 0, kMagic); Put(encoded, 4, 4); Put(encoded, 8, static_cast<std::uint32_t>(sections.size()));
+    Put(encoded, 12, kTerrainSurfaceLayoutVersion);
     Put(encoded, 16, description.width); Put(encoded, 20, description.height);
     Put(encoded, 24, description.array_size); Put(encoded, 28, description.mip_count);
     Put(encoded, 32, description.format);
@@ -122,23 +118,8 @@ std::vector<std::byte> BuildTerrainSurface(AssetId asset_id,
         Put(encoded, indices + i * 4, static_cast<std::uint32_t>(it - dependencies.begin()));
     }
     const std::array chunks{ChunkSource{static_cast<std::uint32_t>(ChunkType::TerrainSurfaceSections),
-        static_cast<std::uint16_t>(wire_version), true, encoded, encoded.size(), 1}};
+        4, true, encoded, encoded.size(), 1}};
     return BuildPackage(asset_id, dependencies, chunks);
-}
-}
-
-std::vector<std::byte> BuildTerrainSurfacePackage(AssetId asset_id,
-    std::span<const std::string> section_products, std::span<const TerrainSurfaceSection> sections,
-    TextureDescription description, const std::array<std::byte, 32> &source_identity)
-{
-    return BuildTerrainSurface(asset_id, section_products, sections, description, source_identity, 2);
-}
-
-std::vector<std::byte> BuildTerrainSurfaceIndex(AssetId asset_id,
-    std::span<const std::string> leaf_products, std::span<const TerrainSurfaceSection> tiles,
-    TextureDescription description, const std::array<std::byte, 32> &source_identity)
-{
-    return BuildTerrainSurface(asset_id, leaf_products, tiles, description, source_identity, 3);
 }
 
 TerrainSurfacePackageView ReadTerrainSurfacePackage(std::span<const std::byte> package_bytes,
@@ -152,17 +133,16 @@ TerrainSurfacePackageView ReadTerrainSurfacePackage(std::span<const std::byte> p
         "invalid section header");
     const auto wire_version = Get(bytes, 4);
     const auto stored_layout = Get(bytes, 12);
-    Require((wire_version == 1 && package.chunks[0].version == 1 && stored_layout <= 3) ||
-        (wire_version == 2 && package.chunks[0].version == 2 && stored_layout == 4) ||
-        (wire_version == 3 && package.chunks[0].version == 3 && stored_layout == 5),
+    Require(wire_version == 4 && package.chunks[0].version == 4 &&
+        stored_layout == kTerrainSurfaceLayoutVersion,
         "unsupported terrain surface version or layout");
     const auto count = Get(bytes, 8);
-    const auto product_count = std::size_t(count) * (wire_version == 2 ? 3 : 1);
-    Require(count > 0 && count <= (wire_version == 2 ? kTerrainSurfaceMaxPageSections : kMaxSections) &&
+    const auto product_count = std::size_t(count) * 3;
+    Require(count > 0 && count <= kMaxSections &&
         bytes.size() == kHeader + std::size_t(count) * kStride + product_count * 4 &&
         package.dependencies.size() == product_count, "invalid section count");
     TerrainSurfacePackageView result;
-    result.layout_version = stored_layout == 0 ? 1 : stored_layout;
+    result.layout_version = stored_layout;
     result.description = {Get(bytes, 16), Get(bytes, 20), Get(bytes, 24), Get(bytes, 28), Get(bytes, 32)};
     std::copy_n(bytes.begin() + 36, result.source_identity.size(), result.source_identity.begin());
     ValidateShape(result.description, count);

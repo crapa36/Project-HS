@@ -21,6 +21,7 @@ Result ResidentFailure(std::string message)
     return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", std::move(message));
 }
 
+#if defined(HS_DEVELOPMENT_TOOLS)
 Result ReadResidentPackageDirectory(const std::filesystem::path &path, std::uint64_t product_bytes,
     AssetId asset, render_data::PackageDirectory &directory)
 {
@@ -52,24 +53,11 @@ Result ResolveResidentClosure(const RendererConfig &config,
         // Do not reopen and decode the complete shipping dependency graph as a preflight.
         if (config.packed_content)
         {
-            if (auto result = ValidatePackedRendererAssets(*config.packed_content, config.packed_bulks); !result) return result;
-            if (auto result = ValidatePackedTextureCatalog(config); !result) return result;
-            if (auto result = ValidatePackedGeometryCatalog(config); !result) return result;
-            if (auto result = ValidatePackedMaterialCatalog(config); !result) return result;
-            if (auto result = ValidatePackedCharacterCatalog(config); !result) return result;
-            if (auto result = ValidatePackedVfxMeshCatalog(config); !result) return result;
-            return ValidatePackedRevisionCatalog(config);
+            if (auto result = ValidatePackedCatalog(config); !result) return result;
+            return ValidatePackedVfxMeshCatalog(config);
         }
         if (config.development_catalog)
-        {
-            if (auto result = ValidatePackedTextureCatalog(config); !result) return result;
-            if (auto result = ValidatePackedGeometryCatalog(config); !result) return result;
-            if (auto result = ValidatePackedMaterialCatalog(config); !result) return result;
-            if (auto result = ValidatePackedCharacterCatalog(config); !result) return result;
-            // Loose products are staged at their actual reader, and shadow archives
-            // may be larger than a single bounded range request.
-            return Result::Success();
-        }
+            return ValidatePackedCatalog(config);
         if (config.content_generation_id.empty() || !config.content_generation_lease || config.product_paths.empty() ||
             config.product_paths.size() != config.product_digests.size())
             return ResidentFailure("Resident preparation requires complete leased Generation product maps.");
@@ -199,6 +187,7 @@ Result ResolveResidentClosure(const RendererConfig &config,
         return ResidentFailure("Invalid resident Generation closure: " + std::string(error.what()));
     }
 }
+#endif
 
 bool SubmissionFinished(const ResidentUtilitySubmission &submission) noexcept
 {
@@ -211,6 +200,7 @@ bool SubmissionFinished(const ResidentUtilitySubmission &submission) noexcept
 }
 } // namespace
 
+#if defined(HS_DEVELOPMENT_TOOLS)
 Result D3D12Renderer::Impl::InitializeResidentAssetContext(const RendererConfig &candidate_config,
                                                         std::unique_ptr<Impl> &candidate)
 {
@@ -396,10 +386,7 @@ Result D3D12Renderer::Impl::PrepareResidentAssetData(Impl &candidate)
         if (candidate.hlod_runtime)
         {
             const auto &hlod = *candidate.hlod_runtime;
-            vector(hlod.scene.dependencies); vector(hlod.scene.members); vector(hlod.scene.groups);
-            vector(hlod.scene.proxies); vector(hlod.scene.pages); vector(hlod.scene.roots); vector(hlod.scene.children);
-            for (const auto &dependency : hlod.scene.dependencies) text(dependency);
-            for (const auto &page : hlod.scene.pages) text(page.logical_id);
+            add(hlod.scene->RetainedBytes());
         }
         vector(candidate.material_parameter_slots);
         vector(candidate.material_parameter_candidate_slots);
@@ -556,6 +543,11 @@ void D3D12Renderer::Impl::SwapResidentAssetData(Impl &candidate) noexcept
     HS_SWAP_RESIDENT(material_parameter_slots);
     HS_SWAP_RESIDENT(material_parameter_candidate_slots);
     HS_SWAP_RESIDENT(material_parameter_bases);
+    HS_SWAP_RESIDENT(material_parameter_counts);
+    HS_SWAP_RESIDENT(material_parameter_revisions);
+    HS_SWAP_RESIDENT(generation_material_parameters);
+    HS_SWAP_RESIDENT(generation_material_parameters_valid);
+    HS_SWAP_RESIDENT(material_parameters_match_generation);
     HS_SWAP_RESIDENT(material_parameter_layouts);
     HS_SWAP_RESIDENT(mesh_material_bindings_gpu);
     HS_SWAP_RESIDENT(character_binding_ranges);
@@ -600,6 +592,7 @@ void D3D12Renderer::Impl::PublishResidentAssetDescriptors(const Impl &candidate)
         published.stride = srv_stride;
     }
 }
+#endif
 
 Result D3D12Renderer::Impl::SubmitResidentUtilityUpload(ID3D12GraphicsCommandList *list,
     ID3D12CommandAllocator *command_allocator, std::vector<AllocationResource> &uploads)
@@ -666,10 +659,12 @@ void D3D12Renderer::Impl::CollectResidentUtilityUploads() noexcept
 {
     std::erase_if(resident_utility_submissions, [&](const auto &submission) {
         if (!SubmissionFinished(submission)) return false;
+#if defined(HS_DEVELOPMENT_TOOLS)
         if (resident_preparation_accounting.enabled)
             for (const auto &upload : submission.uploads)
                 if (upload.allocation)
                     resident_preparation_accounting.live_native_bytes -= upload.allocation->GetSize();
+#endif
         return true;
     });
 }
@@ -680,6 +675,7 @@ bool D3D12Renderer::Impl::HasUnresolvedResidentUtilityUploads() const noexcept
         [](const auto &submission) { return !SubmissionFinished(submission); });
 }
 
+#if defined(HS_DEVELOPMENT_TOOLS)
 Result D3D12Renderer::Impl::AdmitResidentAllocation(const D3D12_RESOURCE_DESC &description,
     const D3D12MA::ALLOCATION_DESC &allocation)
 {
@@ -718,4 +714,5 @@ void D3D12Renderer::Impl::RecordResidentAllocation(const AllocationResource &res
     else if (type == D3D12_HEAP_TYPE_UPLOAD) accounting.upload_bytes += size;
     else if (type == D3D12_HEAP_TYPE_READBACK) accounting.readback_bytes += size;
 }
+#endif
 } // namespace hs

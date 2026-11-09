@@ -5,7 +5,7 @@
 #include <iostream>
 #include <optional>
 #include <stdexcept>
-#include <unordered_set>
+#include <unordered_map>
 #include <vector>
 
 namespace
@@ -133,42 +133,6 @@ void TestFailedPreparationAndEpochWrap()
     Commit(history, wrapped);
 }
 
-void TestRetainedIndependentKeyOracle()
-{
-    using namespace hs::renderer_detail;
-    std::unordered_map<int, std::uint64_t> oracle, other_view;
-    bool prepared{}, other_prepared{};
-    const auto prepare = [&](std::uint64_t epoch, std::initializer_list<int> keys, bool finish) {
-        BeginShadowCasterKeyOracle(oracle, epoch, prepared);
-        std::unordered_set<int> fresh;
-        for (const auto key : keys)
-            Check(MarkShadowCasterKeyOracle(oracle, key, epoch) == fresh.insert(key).second,
-                "retained oracle must match independent fresh first-key membership");
-        if (finish)
-        {
-            PruneShadowCasterKeyOracle(oracle, epoch, fresh.size(), prepared);
-            Check(oracle.size() == fresh.size(), "oracle must release stale keys after preparation");
-        }
-    };
-    prepare(1, {1, 2, 1}, true);
-    prepare(2, {2, 3, 2}, false); // A rejected preparation leaves partial marks.
-    prepare(3, {3, 4, 3}, true);
-    Check(!oracle.contains(1) && !oracle.contains(2), "failed-attempt stale keys must not accumulate");
-    const auto *retained = &oracle.at(3);
-    prepare(4, {3, 4, 3}, true);
-    Check(&oracle.at(3) == retained, "steady oracle membership must reuse its allocated nodes");
-    BeginShadowCasterKeyOracle(other_view, 1, other_prepared);
-    Check(MarkShadowCasterKeyOracle(other_view, 3, 1) && oracle.at(3) == 4,
-        "oracle epochs must remain isolated between views");
-    prepare(std::numeric_limits<std::uint64_t>::max(), {3, 3}, true);
-    oracle.at(3) = 1; // Simulate an ancient first-epoch mark before wrap.
-    prepare(1, {3, 3}, true);
-    Check(oracle.size() == 1 && oracle.at(3) == 1,
-        "wrapped oracle must clear ancient epoch stamps before first-key checks");
-    prepare(2, {}, true);
-    Check(oracle.empty(), "empty or reset scene must release retained oracle keys");
-}
-
 void TestFrameLocalGroups()
 {
     struct CountedKey
@@ -190,6 +154,12 @@ void TestFrameLocalGroups()
         return hs::renderer_detail::ResolveShadowCasterGroup(indices[selector], groups, key,
             [&] { groups.push_back({{key, &comparisons}, frontend}); });
     };
+    const auto terrain_selector = hs::renderer_detail::ShadowCasterGroupSelector(UINT32_MAX, 3, true);
+    const auto default_selector = hs::renderer_detail::ShadowCasterGroupSelector(UINT32_MAX, 3, false);
+    Check(hs::renderer_detail::ShadowCasterGroupSelector(0, 3, true) == 0 &&
+        hs::renderer_detail::ShadowCasterGroupSelector(2, 3, false) == 2 &&
+        terrain_selector != default_selector,
+        "native buckets, terrain and default casters must keep distinct selectors on prepare and rebind");
     Check(resolve(0, 11, 7) == 0 && resolve(1, 22, 8) == 1,
         "first visits must append bindings in original encounter order");
     Check(resolve(2, 11, 99) == 0 && groups[0].frontend == 7 && groups.size() == 2,
@@ -200,7 +170,7 @@ void TestFrameLocalGroups()
             "cached selectors must retain their original group indices");
     Check(comparisons == warm_comparisons,
         "repeat selectors must not repeat the binding-key linear search");
-    Check(resolve(3, 33, 9) == 2 && resolve(4, 44, 10) == 3 && resolve(0, 11, 7) == 0,
+    Check(resolve(terrain_selector, 33, 9) == 2 && resolve(default_selector, 44, 10) == 3 && resolve(0, 11, 7) == 0,
         "vector growth must not invalidate cached indices");
 
     // An attempt owns all indices; a new frame must resolve its new bindings.
@@ -283,7 +253,6 @@ int main()
         TestFailedPreparationAndEpochWrap();
         TestIndependentViews();
         TestFrameLocalGroups();
-        TestRetainedIndependentKeyOracle();
         TestDenseSubmittedHistory();
         std::cout << "caster storage: reuse, duplicates, replacement, removal, retry, wrap, views and dense submitted history passed\n";
         return 0;

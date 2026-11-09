@@ -628,13 +628,6 @@ Result D3D12Renderer::Impl::PrepareFramePayload(const RenderPackage &frame_input
                 return ViewFailure("Dynamic render identity collides with the immutable process scene.");
     }
     std::string ribbon_error;
-    if (config.ribbon_history_points < kRibbonHistorySamples)
-        return ViewFailure("Ribbon point budget must provide at least one 64-sample slot");
-    const auto &camera = input.views.front();
-    const Float3 camera_scene_position{static_cast<float>(camera.camera.position.x-camera.scene_origin.x),
-        static_cast<float>(camera.camera.position.y-camera.scene_origin.y), static_cast<float>(camera.camera.position.z-camera.scene_origin.z)};
-    if (!std::isfinite(camera_scene_position.x) || !std::isfinite(camera_scene_position.y) || !std::isfinite(camera_scene_position.z))
-        return ViewFailure("Ribbon interpolation and previous eye must be finite");
     if (!ribbon_state.ValidateFrameSources(input.vfx.ribbons.sources, ribbon_error,
             input.vfx.ribbons.outputs))
         return ViewFailure(ribbon_error);

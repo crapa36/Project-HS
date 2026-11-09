@@ -67,11 +67,12 @@ inline void FilterRenderInstancesForOwnedVfx(std::vector<RenderInstance> &instan
     if(source_ordinals) source_ordinals->resize(survivors);
 }
 
-// Only draw references are reordered. Canonical indices also identify anonymous
-// instances and foliage, so retain their original values and order within buckets.
+// Draw indices address sources; original ordinals preserve anonymous identity
+// when VFX replacement has compacted that span.
 [[nodiscard]] inline auto BuildRenderInstanceOrder(
     std::span<const RenderInstance> sources, float foliage_density,
-    std::vector<std::uint32_t> &source_indices)
+    std::vector<std::uint32_t> &source_indices,
+    std::span<const std::uint32_t> original_ordinals = {})
 {
     const auto bucket_for = [](const RenderInstance &source) -> std::size_t {
         if (source.mesh == RenderMesh::Archer) return kInstanceArcherBucket;
@@ -96,7 +97,8 @@ inline void FilterRenderInstancesForOwnedVfx(std::vector<RenderInstance> &instan
     };
     std::array<std::pair<std::size_t, std::size_t>, kInstanceBucketCount> ranges{};
     for (std::size_t index = 0; index < sources.size(); ++index)
-        if (RetainDecorativeFoliage(sources[index], index, foliage_density))
+        if (RetainDecorativeFoliage(sources[index],
+                original_ordinals.empty() ? index : original_ordinals[index], foliage_density))
             ++ranges[bucket_for(sources[index])].second;
     std::array<std::size_t, kInstanceBucketCount> cursors{};
     std::size_t count{};
@@ -107,7 +109,8 @@ inline void FilterRenderInstancesForOwnedVfx(std::vector<RenderInstance> &instan
     }
     source_indices.resize(count);
     for (std::size_t index = 0; index < sources.size(); ++index)
-        if (RetainDecorativeFoliage(sources[index], index, foliage_density))
+        if (RetainDecorativeFoliage(sources[index],
+                original_ordinals.empty() ? index : original_ordinals[index], foliage_density))
             source_indices[cursors[bucket_for(sources[index])]++] =
                 static_cast<std::uint32_t>(index);
     return ranges;
@@ -130,7 +133,8 @@ struct MonsterLodInstanceOrder
 [[nodiscard]] inline std::optional<MonsterLodInstanceOrder> BuildRenderInstanceOrderWithMonsterLods(
     std::span<const RenderInstance> sources, std::span<const std::uint16_t> selected_lods,
     float foliage_density, std::vector<std::uint32_t> &source_indices,
-    std::vector<std::uint32_t> &scratch)
+    std::vector<std::uint32_t> &scratch,
+    std::span<const std::uint32_t> original_ordinals = {})
 {
     if (selected_lods.size() != sources.size()) return std::nullopt;
     for (std::size_t index = 0; index < sources.size(); ++index)
@@ -140,7 +144,7 @@ struct MonsterLodInstanceOrder
             return std::nullopt;
 
     MonsterLodInstanceOrder result;
-    result.ranges = BuildRenderInstanceOrder(sources, foliage_density, source_indices);
+    result.ranges = BuildRenderInstanceOrder(sources, foliage_density, source_indices, original_ordinals);
     for (std::size_t family = 0; family < kMonsterFamilyCount; ++family)
     {
         const auto [begin, count] = result.ranges[kInstanceMonsterBucketBegin + family];

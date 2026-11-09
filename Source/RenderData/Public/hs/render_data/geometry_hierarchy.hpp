@@ -83,12 +83,6 @@ void ValidateGeometryHierarchy(const GeometryHierarchy &hierarchy);
 void ValidateGeometryHierarchyPages(const GeometryHierarchy &hierarchy,
     std::span<const GeometryData> pages,
     std::span<const ExpandedVertex> source = {});
-// Individual runtime page validation proves directory/topology/material/bounds
-// agreement. Exact original leaf occurrence payloads require the source-aware
-// all-page validation above.
-void ValidateGeometryHierarchyPage(const GeometryHierarchy &hierarchy,
-    std::uint32_t page_index, const GeometryData &page);
-
 // Required main-package reference v1: uint16 dependency index, uint16 zero.
 [[nodiscard]] std::vector<std::byte> EncodeGeometryHierarchyReference(
     std::uint16_t dependency_index, std::span<const std::string> dependencies,

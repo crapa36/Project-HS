@@ -1555,6 +1555,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     auto &slot = impl_->frames[frame_slot];
     if (auto result = Wait(slot.completion); !result) return result;
     slot.completion = {};
+    const auto previously_completed = Completed();
 
     using BarrierOperation = Impl::BarrierOperation;
     using PlannedBarrier = Impl::PlannedBarrier;
@@ -1893,8 +1894,12 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         const auto &batch = batches[index];
         if (batch.pass != UINT32_MAX)
             pass_positions[batch.pass] = position;
+        // Completed or already queued waits add no new submission boundary.
         for (const auto queue : {QueueHint::Direct, QueueHint::Compute, QueueHint::Copy})
-            if (queue != batch.queue && batch.imported.Required(queue)) waits_before[index] = true;
+            if (queue != batch.queue && batch.imported.Required(queue) > std::max(
+                    previously_completed.Required(queue),
+                    impl_->queues[QueueIndex(batch.queue)].joined.Required(queue)))
+                waits_before[index] = true;
         for (const auto producer : batch.dependencies)
             if (batches[producer].queue != batch.queue)
             {
@@ -3231,6 +3236,12 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
                 return fail("RenderGraph ordering consumer does not exist.");
             predecessor_ids[consumer->second].push_back(producer_id);
         }
+        struct ExternalUseIndex
+        {
+            std::size_t use{std::numeric_limits<std::size_t>::max()};
+            bool seen{};
+        };
+        std::vector<ExternalUseIndex> external_uses;
         for (std::size_t pass_index = 0; pass_index < impl_->passes.size(); ++pass_index)
         {
             const auto &pass = impl_->passes[pass_index];
@@ -3239,6 +3250,16 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
                 const auto &external = *pass.external;
                 if (external.accesses.size() != pass.Uses().size())
                     return fail("RenderGraph external operation requires one boundary for every whole-resource use.");
+                if (external_uses.empty()) external_uses.resize(impl_->resources.size());
+                for (std::size_t index = 0; index < pass.Uses().size(); ++index)
+                {
+                    const auto handle = pass.Uses()[index].predecessor.resource;
+                    if (impl_->Find(handle))
+                    {
+                        auto &entry = external_uses[handle.value - 1];
+                        if (entry.use == std::numeric_limits<std::size_t>::max()) entry.use = index;
+                    }
+                }
                 for (std::size_t index = 0; index < external.accesses.size(); ++index)
                 {
                     const auto &boundary = external.accesses[index];
@@ -3260,19 +3281,18 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
                         (common_boundary &&
                          (boundary.incoming != Access::Common || boundary.outgoing != Access::Common)))
                         return fail("RenderGraph external resource boundary is unsupported or incompatible.");
-                    for (std::size_t previous = 0; previous < index; ++previous)
-                        if (external.accesses[previous].resource.value == boundary.resource.value)
-                            return fail("RenderGraph external resource boundary is duplicated.");
-                    const auto use = std::find_if(pass.Uses().begin(), pass.Uses().end(), [&](const auto &item) {
-                        return item.predecessor.resource.value == boundary.resource.value &&
-                               item.predecessor.resource.kind == boundary.resource.kind;
-                    });
-                    if (use == pass.Uses().end() || !std::holds_alternative<std::monostate>(use->range))
+                    auto &entry = external_uses[boundary.resource.value - 1];
+                    if (entry.seen) return fail("RenderGraph external resource boundary is duplicated.");
+                    entry.seen = true;
+                    if (entry.use == std::numeric_limits<std::size_t>::max() ||
+                        !std::holds_alternative<std::monostate>(pass.Uses()[entry.use].range))
                         return fail("RenderGraph external boundaries require declared whole-resource uses.");
-                    if (!use->writes && (boundary.incoming == Access::RenderTarget ||
+                    if (!pass.Uses()[entry.use].writes && (boundary.incoming == Access::RenderTarget ||
                         boundary.incoming == Access::UnorderedWrite || boundary.incoming == Access::CopyDest))
                         return fail("RenderGraph external writable entry requires a declared resource write.");
                 }
+                for (const auto &boundary : external.accesses)
+                    external_uses[boundary.resource.value - 1] = {};
             }
             for (const auto &use : pass.Uses())
             {

@@ -1,4 +1,5 @@
 #include "renderer_impl.hpp"
+#include "visibility_encoding.hpp"
 
 #include <hs/renderer/capture_request.hpp>
 
@@ -31,11 +32,11 @@ namespace
 {
 template <class RendererImpl>
 Result SubmitCaptureCopy(RendererImpl &impl, ID3D12CommandAllocator *allocator,
-                         const AllocationResource &readback)
+                         const AllocationResource &readback,
+                         std::vector<AllocationResource> retained = {})
 {
     const auto closed = impl.command_list->Close();
     if (FAILED(closed)) return HResultFailure("Close capture copy list", closed);
-    std::vector<AllocationResource> retained;
     retained.push_back(RendererImpl::RetainViewAllocation(readback));
     return impl.SubmitResidentUtilityUpload(impl.command_list.Get(), allocator, retained);
 }
@@ -729,6 +730,47 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
     const auto contract_failure = [](std::string message) {
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", std::move(message));
     };
+    const auto *captured_frame = impl_->SubmittedFrame(owner);
+    std::vector<Impl::GpuTerrainSection> terrain_sections;
+    std::shared_ptr<Impl::StaticGpuScene> static_scene;
+    const auto dynamic_scene = captured_frame ? owner.previous_instances : nullptr;
+    bool terrain_submission_available{}, dynamic_terrain_sources_current{};
+    if (captured_frame)
+    {
+        const auto &constants = *reinterpret_cast<const FrameConstants *>(captured_frame->mapped);
+        const auto count = std::bit_cast<std::uint32_t>(constants.particle_terrain.w);
+        const auto bytes = static_cast<std::uint64_t>(count) * sizeof(Impl::GpuTerrainSection);
+        const auto &table = impl_->terrain_frame_sections[owner.last_submitted_frame_slot];
+        const auto &bank = impl_->terrain_descriptor_banks[owner.last_submitted_frame_slot];
+        terrain_submission_available = bank.descriptors_initialized && bank.section_count == count &&
+            bank.section_resource.Get() == (count ? table.resource.Get() : nullptr);
+        if (terrain_submission_available && bytes)
+        {
+            if (!bank.section_resource || bytes > bank.section_resource->GetDesc().Width)
+                return contract_failure("Submitted terrain sections exceed their bound upload table.");
+            terrain_sections.resize(count);
+            void *data{};
+            const D3D12_RANGE read{0, static_cast<SIZE_T>(bytes)};
+            if (auto hr = bank.section_resource->Map(0, &read, &data); FAILED(hr))
+                return HResultFailure("Map submitted terrain sections", hr);
+            std::memcpy(terrain_sections.data(), data, static_cast<std::size_t>(bytes));
+            const D3D12_RANGE no_write{};
+            bank.section_resource->Unmap(0, &no_write);
+        }
+        const auto uses_refs = [&](const std::shared_ptr<Impl::StaticGpuScene> &scene) {
+            return scene && scene->source == owner.scene_lease && captured_frame->static_input_refs &&
+                !captured_frame->static_input_refs->empty() && scene->instance_generation ==
+                    captured_frame->static_input_refs->front().instance_generation;
+        };
+        if (uses_refs(impl_->static_gpu_scene)) static_scene = impl_->static_gpu_scene;
+        else
+            for (const auto &retired : impl_->retired_static_gpu_scenes)
+                if (uses_refs(retired)) { static_scene = retired; break; }
+        // Scratch supplies only source classification; values below come from GPU readback.
+        dynamic_terrain_sources_current = dynamic_scene &&
+            dynamic_scene->package_id == impl_->render_package_id &&
+            captured_frame->dynamic_input_ref_count == impl_->prepared_scene_package.ordered_instances.size();
+    }
     const auto decal_surfaces = owner.decal_surface.DiagnosticResources();
     if (owner.decal_surface_active &&
         (!decal_surfaces[0] || !decal_surfaces[1] || !decal_surfaces[2]))
@@ -812,6 +854,11 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
     const auto light_resources = owner.light_list.DiagnosticResources();
     for (std::size_t index = 0; index < light_resources.resources.size(); ++index)
         append_diagnostic(light_names[index], light_resources.resources[index]);
+    if (terrain_submission_available)
+    {
+        append_diagnostic("terrain_static_scene", static_scene ? &static_scene->instances : nullptr);
+        append_diagnostic("terrain_dynamic_scene", dynamic_scene ? &dynamic_scene->scene : nullptr);
+    }
     for (auto &surface : surfaces)
     {
         if (!surface.resource->resource || surface.resource->graph_access != surface.final_access)
@@ -888,6 +935,10 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         !result)
         return result;
 
+    std::vector<AllocationResource> retained_sources;
+    retained_sources.reserve(surfaces.size() + 1);
+    for (const auto &surface : surfaces)
+        retained_sources.push_back(Impl::RetainViewAllocation(*surface.resource));
     auto &frame = impl_->frames[0];
     auto result = frame.allocator->Reset();
     if (FAILED(result))
@@ -925,7 +976,7 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
                                  D3D12_RESOURCE_STATE_COPY_SOURCE, surface.final_state,
                                  D3D12_BARRIER_LAYOUT_COPY_SOURCE, surface.final_layout);
     }
-    if (auto wait = SubmitCaptureCopy(*impl_, frame.allocator.Get(), readback); !wait)
+    if (auto wait = SubmitCaptureCopy(*impl_, frame.allocator.Get(), readback, std::move(retained_sources)); !wait)
         return wait;
 
     void *mapped_data{};
@@ -1124,7 +1175,96 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
     }
     metadata_output << "],\n";
     constexpr std::array auxiliary_names{"subsurface_diffuse", "environment_specular"};
-    const auto *captured_frame = impl_->SubmittedFrame(owner);
+    metadata_output.precision(std::numeric_limits<float>::max_digits10);
+    if (captured_frame && terrain_submission_available)
+    {
+        const auto find_scene_surface = [&](std::string_view name) -> const SurfaceCapture * {
+            const auto found = std::ranges::find_if(surfaces, [&](const auto &surface) { return surface.name == name; });
+            return found == surfaces.end() ? nullptr : &*found;
+        };
+        const auto *static_surface = find_scene_surface("terrain_static_scene");
+        const auto *dynamic_surface = find_scene_surface("terrain_dynamic_scene");
+        const bool static_available = captured_frame->static_input_ref_count == 0 || static_surface;
+        const bool dynamic_available = captured_frame->dynamic_input_ref_count == 0 ||
+            (dynamic_surface && dynamic_terrain_sources_current);
+        if ((captured_frame->static_input_ref_count &&
+             (!captured_frame->static_input_refs ||
+              captured_frame->static_input_ref_count > captured_frame->static_input_refs->size())) ||
+            captured_frame->dynamic_input_ref_offset > captured_frame->upload_size ||
+            captured_frame->dynamic_input_ref_count >
+                (captured_frame->upload_size - captured_frame->dynamic_input_ref_offset) / sizeof(GpuStaticDrawRef))
+            return unmap_failure("Submitted terrain draw references exceed their retained input ranges.");
+        metadata_output << std::format("  \"terrain_submission\": {{\"frame_slot\":{},\"section_stride\":{},"
+            "\"static_scene_available\":{},\"dynamic_scene_available\":{},\"sections\":[",
+            owner.last_submitted_frame_slot, sizeof(Impl::GpuTerrainSection), static_available, dynamic_available);
+        for (std::size_t index = 0; index < terrain_sections.size(); ++index)
+        {
+            const auto &row = terrain_sections[index];
+            metadata_output << std::format("{}{{\"center\":[{},{}],\"span\":[{},{}],\"rotation\":[{},{}],"
+                "\"mesh\":{},\"seed\":{},\"page_slice\":{},\"page_edge\":{},\"tile_count\":[{},{}],"
+                "\"height_transform\":[{},{}]}}", index ? "," : "", row.center.x, row.center.y,
+                row.span.x, row.span.y, row.rotation.x, row.rotation.y, row.mesh, row.seed, row.pageSlice,
+                row.pageEdge, row.tileCount[0], row.tileCount[1], row.heightTransform.x, row.heightTransform.y);
+        }
+        metadata_output << "]";
+        const auto write_instances = [&](const char *name, const SurfaceCapture *surface,
+                                         bool immutable, bool available) {
+            metadata_output << ",\"" << name << "\":[";
+            if (!available || !surface) { metadata_output << "]"; return true; }
+            const auto bytes = static_cast<std::uint64_t>(surface->row_size);
+            const auto *scene_bytes = mapped + surface->footprint.Offset;
+            const auto load = [&](std::uint64_t offset, auto &value) {
+                if (offset > bytes || sizeof(value) > bytes - offset) return false;
+                std::memcpy(&value, scene_bytes + offset, sizeof(value));
+                return true;
+            };
+            GpuSceneTableHeader header{};
+            if (!load(0, header) || header.magic != kGpuSceneTableMagic || header.version != kGpuSceneTableVersion ||
+                header.slot_count > header.capacity || header.instance_stride != sizeof(GpuSceneInstanceEntry) ||
+                header.transform_stride != sizeof(GpuSceneTransformEntry) || header.mesh_stride != sizeof(GpuSceneMeshEntry))
+                return false;
+            const auto count = immutable ? captured_frame->static_input_ref_count : captured_frame->dynamic_input_ref_count;
+            bool first = true;
+            for (std::size_t ordinal = 0; ordinal < count; ++ordinal)
+            {
+                GpuStaticDrawRef reference{};
+                if (immutable) reference = (*captured_frame->static_input_refs)[ordinal];
+                else std::memcpy(&reference, captured_frame->mapped + captured_frame->dynamic_input_ref_offset +
+                    ordinal * sizeof(reference), sizeof(reference));
+                const RenderInstance *source = immutable
+                    ? (reference.instance_index < static_scene->source->instances.size()
+                        ? &static_scene->source->instances[reference.instance_index] : nullptr)
+                    : &impl_->prepared_scene_package.ordered_instances[ordinal];
+                if (!source || (source->mesh != RenderMesh::Ground && source->mesh != RenderMesh::DirtPatch &&
+                    render_data::EnvironmentGeometryOrdinal(source->mesh, source->environment_variant) != render_data::kMeadowGeometryBegin))
+                    continue;
+                GpuSceneInstanceEntry instance{};
+                GpuSceneTransformEntry transform{};
+                GpuSceneMeshEntry mesh{};
+                if (reference.instance_index >= header.slot_count ||
+                    !load(header.instance_offset + static_cast<std::uint64_t>(reference.instance_index) * header.instance_stride, instance) ||
+                    instance.generation != reference.instance_generation || instance.transform_index >= header.capacity ||
+                    instance.mesh_index >= header.capacity ||
+                    !load(header.transform_offset + static_cast<std::uint64_t>(instance.transform_index) * header.transform_stride, transform) ||
+                    !load(header.mesh_offset + static_cast<std::uint64_t>(instance.mesh_index) * header.mesh_stride, mesh))
+                    return false;
+                metadata_output << std::format("{}{{\"slot\":{},\"generation\":{},\"mesh\":{},\"section_index\":{},"
+                    "\"position\":[{},{},{}],\"yaw\":{},\"scale\":[{},{},{}]}}", first ? "" : ",",
+                    reference.instance_index, instance.generation, mesh.mesh & ~kEnvironmentMeshFlag,
+                    std::bit_cast<std::uint32_t>(transform.scale_parameter.w),
+                    transform.position_yaw.x, transform.position_yaw.y, transform.position_yaw.z, transform.position_yaw.w,
+                    transform.scale_parameter.x, transform.scale_parameter.y, transform.scale_parameter.z);
+                first = false;
+            }
+            metadata_output << "]";
+            return true;
+        };
+        if (!write_instances("static_instances", static_surface, true, static_available) ||
+            !write_instances("dynamic_instances", dynamic_surface, false, dynamic_available))
+            return unmap_failure("Submitted terrain GPU scene indices or ranges do not match their native input contract.");
+        metadata_output << "},\n";
+    }
+    else metadata_output << "  \"terrain_submission\": null,\n";
     metadata_output << std::format("  \"grass\": {{\"pixels\": {}, \"historical_pixels\": {}, \"moving_pixels\": {}, \"max_motion_pixels\": {}}},\n",
         grass_pixels, historical_grass_pixels, moving_grass_pixels, grass_motion_max_pixels);
     if (captured_frame)

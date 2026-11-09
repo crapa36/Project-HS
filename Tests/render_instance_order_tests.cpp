@@ -86,7 +86,7 @@ void TestOwnedVfxReplacementEquivalence()
         VfxGroundShape::ConeBorder,VfxGroundShape::RingGapsBorder,
         VfxGroundShape::RingGapsPreviewBorder,VfxGroundShape::CirclePreviewBorder};
     constexpr std::array meshes{RenderMesh::Area,RenderMesh::PlayerProjectile,
-        RenderMesh::EnemyProjectile,RenderMesh::Archer};
+        RenderMesh::EnemyProjectile,RenderMesh::Archer,RenderMesh::Grass};
     std::vector<std::pair<std::uint64_t,std::uint8_t>> scratch;
     for(unsigned trial=0;trial<64;++trial)
     {
@@ -98,6 +98,10 @@ void TestOwnedVfxReplacementEquivalence()
             instance.stable_id=random()%32;instance.vfx_owner_id=random()%32;
             instance.position.x=static_cast<float>(index);
         }
+        sources[0].mesh = RenderMesh::PlayerProjectile;
+        sources[0].stable_id = 101;
+        sources[1].mesh = RenderMesh::Grass;
+        sources[1].stable_id = sources[1].vfx_owner_id = 0;
         std::vector<VfxGroundSpawnInput> ground(trial%17);
         for(auto &spawn:ground)
         {
@@ -107,6 +111,7 @@ void TestOwnedVfxReplacementEquivalence()
         }
         std::vector<VfxOwnedMeshInput> heads(trial%13);
         for(auto &head:heads)head.owner_id=random()%32;
+        heads.emplace_back().owner_id = 101;
         auto expected=sources;
         std::erase_if(expected,[&](const RenderInstance &instance) {
             return instance.mesh==RenderMesh::Area&&instance.stable_id!=0&&
@@ -141,6 +146,21 @@ void TestOwnedVfxReplacementEquivalence()
                 "indexed VFX filtering changed owner matching or stable survivor order");
             Check(original[ordinals[index]].position.x==sources[index].position.x,
                 "VFX filtering changed the original source ordinal");
+        }
+        for (const auto density : {0.0f, 0.5f, 1.0f})
+        {
+            auto expected_order = LegacyOrder(original, density).first;
+            std::erase_if(expected_order, [&](auto index) {
+                return !std::ranges::binary_search(ordinals, index);
+            });
+            std::vector<std::uint32_t> order, lod_scratch;
+            const std::vector<std::uint16_t> lods(sources.size());
+            Check(BuildRenderInstanceOrderWithMonsterLods(
+                      sources, lods, density, order, lod_scratch, ordinals).has_value(),
+                  "filtered source LOD ordering failed");
+            for (auto &index : order) index = ordinals[index];
+            Check(order == expected_order,
+                  "VFX replacement changed surviving foliage identity or draw order");
         }
     }
 }

@@ -22,6 +22,9 @@
 #include <string>
 #include <thread>
 #include <utility>
+#if defined(_DEBUG)
+#include <crtdbg.h>
+#endif
 
 namespace
 {
@@ -29,6 +32,40 @@ void Check(bool condition, const char *message)
 {
     if (!condition) throw std::runtime_error(message);
 }
+
+#if defined(_DEBUG)
+struct RejectOneAllocation
+{
+    static inline thread_local bool armed{};
+    static inline thread_local bool rejected{};
+    static inline std::atomic<_CRT_ALLOC_HOOK> previous{};
+
+    static int __cdecl Hook(int type, void *data, size_t bytes, int block, long request,
+                            const unsigned char *file, int line)
+    {
+        if (type == _HOOK_ALLOC && block == _NORMAL_BLOCK && armed)
+        {
+            armed = false;
+            rejected = true;
+            return FALSE;
+        }
+        const auto prior = previous.load(std::memory_order_acquire);
+        return prior ? prior(type, data, bytes, block, request, file, line) : TRUE;
+    }
+
+    RejectOneAllocation() noexcept
+    {
+        previous.store(_CrtGetAllocHook(), std::memory_order_release);
+        rejected = false;
+        armed = true;
+        _CrtSetAllocHook(Hook);
+    }
+    ~RejectOneAllocation() { _CrtSetAllocHook(previous.load(std::memory_order_acquire)); armed = false; }
+    RejectOneAllocation(const RejectOneAllocation &) = delete;
+    RejectOneAllocation &operator=(const RejectOneAllocation &) = delete;
+    [[nodiscard]] bool Rejected() const noexcept { return rejected; }
+};
+#endif
 
 void CheckFeedbackSamplingDomains()
 {
@@ -357,27 +394,35 @@ void CheckAsyncAssetPreparation()
     Check(!poll(corrupt_request, corrupt_output) && !corrupt_output.ready &&
         !residency.Contains(corrupt_storage), "range IO accepted a mismatched subresource digest");
 
-    auto started = std::make_shared<std::promise<void>>();
-    auto release = std::make_shared<std::promise<void>>();
-    const auto release_gate = release->get_future().share();
-    const auto canceled_done = std::make_shared<std::atomic_bool>();
-    const auto [cancelled, cancelled_storage] = enqueue("prepared-cancelled", [started, release_gate, canceled_done](std::span<const std::byte>) {
-        started->set_value();
-        release_gate.wait();
-        canceled_done->store(true, std::memory_order_release);
-    });
-    if (started->get_future().wait_for(std::chrono::seconds(5)) != std::future_status::ready)
+    for (const bool fail_after_cancel : {false, true})
     {
+        auto started = std::make_shared<std::promise<void>>();
+        auto release = std::make_shared<std::promise<void>>();
+        const auto release_gate = release->get_future().share();
+        const auto canceled_done = std::make_shared<std::atomic_bool>();
+        const auto [cancelled, cancelled_storage] = enqueue(
+            fail_after_cancel ? "prepared-cancelled-failure" : "prepared-cancelled",
+            [started, release_gate, canceled_done, fail_after_cancel](std::span<const std::byte>) {
+                started->set_value();
+                release_gate.wait();
+                canceled_done->store(true, std::memory_order_release);
+                if (fail_after_cancel) throw std::runtime_error("failure after cancellation");
+            });
+        if (started->get_future().wait_for(std::chrono::seconds(5)) != std::future_status::ready)
+        {
+            release->set_value();
+            throw std::runtime_error("cancellable preparation did not start");
+        }
+        io.Cancel(cancelled, streaming);
         release->set_value();
-        throw std::runtime_error("cancellable preparation did not start");
+        hs::AssetReadCompletion cancelled_output;
+        const auto cancelled_result = poll(cancelled, cancelled_output);
+        Check(bool(cancelled_result) == !fail_after_cancel &&
+            (fail_after_cancel ? !cancelled_output.ready : cancelled_output.ready && cancelled_output.cancelled) &&
+            cancelled_output.bytes.empty() && canceled_done->load(std::memory_order_acquire) &&
+            !residency.Contains(cancelled_storage) && !io.HasPendingReads(),
+            "cancelled preparation hid a failure, published bytes or leaked its owner");
     }
-    io.Cancel(cancelled, streaming);
-    release->set_value();
-    hs::AssetReadCompletion cancelled_output;
-    Check(static_cast<bool>(poll(cancelled, cancelled_output)) && cancelled_output.ready &&
-        cancelled_output.cancelled && cancelled_output.bytes.empty() &&
-        canceled_done->load(std::memory_order_acquire) && !residency.Contains(cancelled_storage),
-        "cancelled preparation published bytes or leaked its reservation");
 
     const auto [failed, failed_storage] = enqueue("prepared-failure", [](std::span<const std::byte>) {
         throw std::runtime_error("intentional preparation failure");
@@ -477,20 +522,30 @@ void CheckAsyncAssetPreparation()
 
 void CheckPackAssetReads(bool native)
 {
+    const auto validate_revisions = [](const hs::RendererConfig &config) {
+        hs::render_data::RendererCatalogView view{};
+        view.bulks = config.packed_bulks;
+        view.source_revisions = config.packed_source_revisions;
+        view.revision_bulks = config.packed_revision_bulks;
+        return hs::render_data::ValidateRendererCatalog(view,std::nullopt);
+    };
     const auto path = std::filesystem::temp_directory_path() /
         ("hs_stream_pack_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".bin");
     auto old_path = path;
     old_path += ".old";
+    auto loose_path = path;
+    loose_path += ".loose";
     struct RemoveFiles
     {
-        std::filesystem::path path, old_path;
+        std::filesystem::path path, old_path, loose_path;
         ~RemoveFiles()
         {
             std::error_code ignored;
             std::filesystem::remove(path, ignored);
             std::filesystem::remove(old_path, ignored);
+            std::filesystem::remove(loose_path, ignored);
         }
-    } cleanup{path, old_path};
+    } cleanup{path, old_path, loose_path};
     const std::array<std::byte, 4> payload{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
     std::array<std::byte, 68> pack_bytes{};
     std::fill_n(pack_bytes.begin(), 64, std::byte{0x7a});
@@ -507,6 +562,25 @@ void CheckPackAssetReads(bool native)
     Check(bool(hs::ShippedContentOwner::Open(path, *owner)) &&
         bool(hs::ShippedContentOwner::Open(path, *unbound_owner)), "could not open pack fixture");
     const auto identity = owner->Identity();
+    {
+        const std::array bulks{hs::render_data::RendererBulkDescriptor{hs::MakeAssetId("render/catalog-fixture.rpkg"),
+            {64,payload.size(),hs::render_data::RenderBulkFormat::Package,hs::Sha256(payload)}}};
+        hs::render_data::RendererCatalogView view{}; view.bulks = bulks;
+        std::shared_ptr<const hs::render_data::RendererCatalogData> prepared;
+        Check(bool(hs::render_data::DecodeRendererCatalog(hs::render_data::EncodeRendererCatalog(view),owner->Size(),prepared)),
+            "valid immutable catalogue did not admit");
+        hs::RendererConfig binding; binding.packed_content = owner; binding.UseRendererCatalog(prepared);
+        Check(bool(hs::ValidatePackedCatalog(binding)), "admitted catalogue owner binding rejected");
+        const hs::render_data::GeometryDescriptor unused_geometry{};
+        binding.packed_geometry = std::span{&unused_geometry,std::size_t{0}};
+        Check(bool(hs::ValidatePackedCatalog(binding)), "empty metadata span acquired an irrelevant pointer constraint");
+        binding.packed_bulks = bulks;
+        Check(!hs::ValidatePackedCatalog(binding), "unrelated raw span accepted as the immutable catalogue owner");
+        binding.UseRendererCatalog(prepared);
+        Check(bool(hs::ValidatePackedCatalog(binding)), "restored immutable owner binding rejected");
+        binding.packed_content.reset();
+        Check(!hs::ValidatePackedCatalog(binding), "prepared catalogue without actual backing accepted");
+    }
     auto source = hs::RendererAssetSource::Packed(owner,
         {64, payload.size(), {}, hs::Sha256(payload)});
     auto unbound = hs::RendererAssetSource::Packed(unbound_owner, source.Packed().range);
@@ -599,7 +673,11 @@ void CheckPackAssetReads(bool native)
         config.packed_source_revisions = revisions; config.packed_revision_bulks = bulk_revisions;
         config.product_paths[std::string(source_id)] = path;
         config.product_digests[std::string(source_id)] = "wrong loose digest";
-        Check(bool(hs::ValidatePackedRevisionCatalog(config)), "valid revision catalog rejected");
+        Check(bool(validate_revisions(config)), "valid revision catalog rejected");
+        const auto second_revision = bulk_revisions[1];
+        bulk_revisions[1] = bulk_revisions[0];
+        Check(!validate_revisions(config), "duplicate revision reference accepted within a valid table count");
+        bulk_revisions[1] = second_revision;
         Check(hs::RendererIsSourceRevision(config, source_id) &&
             !hs::RendererIsSourceRevision(config, "environment/unadmitted.meshbin") &&
             !hs::RendererIsSourceRevision(config, "vfx/vfx_mesh_atlas.hsbin"),
@@ -617,23 +695,23 @@ void CheckPackAssetReads(bool native)
         config.packed_source_revisions = revisions;
         const auto original = revisions[0];
         revisions[0].asset_id = hs::MakeAssetId("wrong/source");
-        Check(!hs::ValidatePackedRevisionCatalog(config), "wrong source identity accepted");
+        Check(!validate_revisions(config), "wrong source identity accepted");
         revisions[0] = original; revisions[0].product_id = {};
         revisions[0].asset_id = hs::MakeAssetId(revisions[0].product_id);
-        Check(!hs::ValidatePackedRevisionCatalog(config), "empty source identity accepted");
+        Check(!validate_revisions(config), "empty source identity accepted");
         revisions[0] = {shader_bulks[base_index].asset_id, shader_id, original.digest};
-        Check(!hs::ValidatePackedRevisionCatalog(config), "source/bulk overlap accepted");
+        Check(!validate_revisions(config), "source/bulk overlap accepted");
         revisions[0] = original;
         bulk_revisions[0].bulk_index = UINT32_MAX;
-        Check(!hs::ValidatePackedRevisionCatalog(config), "invalid revision bulk reference accepted");
+        Check(!validate_revisions(config), "invalid revision bulk reference accepted");
         bulk_revisions[0].bulk_index = feedback_index;
-        Check(!hs::ValidatePackedRevisionCatalog(config), "wrong revision bulk identity accepted");
+        Check(!validate_revisions(config), "wrong revision bulk identity accepted");
         bulk_revisions[0].bulk_index = base_index;
         bulk_revisions[0].product_id = "render/lighting/not-a-material.rpkg";
-        Check(!hs::ValidatePackedRevisionCatalog(config), "non-material revision bulk accepted");
+        Check(!validate_revisions(config), "non-material revision bulk accepted");
         bulk_revisions[0].product_id = shader_id;
         shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::Package;
-        Check(!hs::ValidatePackedRevisionCatalog(config), "wrong revision bulk format accepted");
+        Check(!validate_revisions(config), "wrong revision bulk format accepted");
         shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::ShaderDxil;
         Check(hs::render_data::IsRendererMaterialRevisionProduct(source_id) &&
             hs::render_data::IsRendererMaterialRevisionProduct(shader_id) &&
@@ -667,7 +745,7 @@ void CheckPackAssetReads(bool native)
             terrain_config.packed_source_revisions = {};
             terrain_config.packed_bulks = terrain_bulks;
             terrain_config.packed_revision_bulks = terrain_revisions;
-            Check(bool(hs::ValidatePackedRevisionCatalog(terrain_config)),
+            Check(bool(validate_revisions(terrain_config)),
                 "terrain surface product rejected from packed revision catalog");
         }
         Check(hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/fullscreen_vs.dxil") &&
@@ -721,6 +799,66 @@ void CheckPackAssetReads(bool native)
     }
     Check(bool(initialized) && io.NativeEnabled() == native, "pack IO initialization mode mismatch");
     io.SetWaitForReads(true);
+    const auto digest_text = [](const std::array<std::byte, 32> &digest) {
+        constexpr char hex[] = "0123456789abcdef";
+        std::string text = "sha256:";
+        for (const auto value : digest)
+        {
+            const auto byte = std::to_integer<unsigned>(value);
+            text.push_back(hex[byte >> 4]);
+            text.push_back(hex[byte & 15]);
+        }
+        return text;
+    };
+    const auto whole_file_bytes = std::vector<std::byte>(pack_bytes.begin(), pack_bytes.end());
+    const auto whole_file_digest = digest_text(hs::Sha256(std::span(pack_bytes)));
+    auto loose_unbound = hs::RendererAssetSource::Loose(path);
+    const auto loose_unbound_snapshot = loose_unbound;
+    auto malformed_digest = whole_file_digest.substr(0, whole_file_digest.size() - 1);
+    Check(!loose_unbound.BindExpectedDigest(malformed_digest) && loose_unbound == loose_unbound_snapshot,
+        "malformed selected digest changed an unbound loose source");
+    auto uppercase_digest = whole_file_digest;
+    uppercase_digest[7] = 'A';
+    Check(!loose_unbound.BindExpectedDigest(uppercase_digest) && loose_unbound == loose_unbound_snapshot,
+        "uppercase selected digest changed an unbound loose source");
+    Check(bool(loose_unbound.BindExpectedDigest(whole_file_digest)) && loose_unbound.HasAdmittedWholeFileProof() &&
+        bool(loose_unbound.BindExpectedDigest(whole_file_digest)) &&
+        loose_unbound.AdmittedWholeFileProof() == hs::LooseRendererAsset::WholeFileProof{
+            whole_file_bytes.size(), hs::Sha256(whole_file_bytes)},
+        "loose selected digest binding was not successful and idempotent");
+    const auto admitted_loose_snapshot = loose_unbound;
+    auto wrong_loose_digest = whole_file_digest;
+    wrong_loose_digest[7] = wrong_loose_digest[7] == '0' ? '1' : '0';
+    Check(!loose_unbound.BindExpectedDigest(wrong_loose_digest) && loose_unbound == admitted_loose_snapshot,
+        "mismatched selected digest changed an admitted loose proof");
+    auto packed_match = source;
+    Check(bool(packed_match.BindExpectedDigest(digest_text(hs::Sha256(payload)))) && packed_match == source,
+        "matching packed selected digest was rejected or changed its range");
+    auto packed_mismatch = source;
+    const auto packed_mismatch_snapshot = packed_mismatch;
+    Check(!packed_mismatch.BindExpectedDigest(whole_file_digest) && packed_mismatch == packed_mismatch_snapshot,
+        "mismatched packed selected digest changed its range");
+    std::filesystem::copy_file(path,loose_path);
+    auto loose_bound_read = hs::RendererAssetSource::Loose(loose_path);
+    Check(bool(loose_bound_read.BindExpectedDigest(whole_file_digest)) &&
+        bool(loose_bound_read.Read(output, whole_file_bytes.size())) && output == whole_file_bytes,
+        "bound loose whole-file read did not return authenticated bytes");
+    const std::vector<std::byte> unchanged_output{std::byte{0x31}, std::byte{0x42}};
+    output = unchanged_output;
+    auto damaged_loose_bytes = whole_file_bytes;
+    damaged_loose_bytes[0] ^= std::byte{1};
+    {
+        std::ofstream file(loose_path,std::ios::binary|std::ios::trunc);
+        file.write(reinterpret_cast<const char *>(damaged_loose_bytes.data()),
+            static_cast<std::streamsize>(damaged_loose_bytes.size()));
+        file.close();
+        Check(bool(file), "could not write loose corruption fixture");
+    }
+    Check(!loose_bound_read.Read(output, whole_file_bytes.size()) && output == unchanged_output,
+        "same-size loose file corruption changed output or was accepted");
+    std::filesystem::copy_file(path,loose_path,std::filesystem::copy_options::overwrite_existing);
+    Check(bool(loose_bound_read.Read(output, whole_file_bytes.size())) && output == whole_file_bytes,
+        "restored loose whole-file fixture failed its selected digest");
     if (native)
     {
         // Loose immutable products retain FILE->MEMORY transport for compact
@@ -759,6 +897,158 @@ void CheckPackAssetReads(bool native)
         Check(cancelled_range_output.ready && cancelled_range_output.cancelled &&
               cancelled_range_output.bytes.empty() && !residency.Contains(cancelled_range_storage),
               "queued native cancellation published bytes or released storage before terminal status");
+
+        auto corrupt_ranges = ranges;
+        corrupt_ranges[0].digest[0] ^= std::byte{1};
+        const auto native_corrupt_request = streaming.Request("native-range-digest-failure",
+            "native-range-digest-failure", "generation", 1);
+        const auto corrupt_range_storage = residency.ReserveHost(payload.size() * 2);
+        bool corrupt_range_submitted{};
+        Check(native_corrupt_request && corrupt_range_storage &&
+            bool(io.Enqueue({native_corrupt_request, "generation", "native-range-digest-failure", loose,
+                payload.size(), owner, {}, std::vector<hs::ImmutableAssetRange>(
+                    corrupt_ranges.begin(), corrupt_ranges.end())}, streaming, residency,
+                corrupt_range_storage, corrupt_range_submitted, true)) && corrupt_range_submitted,
+            "native corrupt range was not queued");
+        io.SubmitQueuedReads();
+        hs::AssetReadCompletion corrupt_range_output;
+        Check(!io.Poll(native_corrupt_request, streaming, residency, corrupt_range_output) &&
+            !corrupt_range_output.ready && !residency.Contains(corrupt_range_storage) &&
+            !io.HasPendingReads(), "native range digest mismatch was published or retained");
+
+#if defined(_DEBUG)
+        {
+            const auto allocation_request = streaming.Request("native-prepare-allocation-failure",
+                "native-prepare-allocation-failure", "generation", 1);
+            const auto allocation_storage = residency.ReserveHost(payload.size() * 2);
+            auto generation_lease = std::make_shared<int>(1);
+            std::weak_ptr<int> generation_weak = generation_lease;
+            std::atomic_bool prepare_ran{false};
+            bool allocation_submitted{};
+            Check(allocation_request && allocation_storage &&
+                bool(io.Enqueue({allocation_request, "generation", "native-prepare-allocation-failure",
+                    loose, payload.size(), generation_lease,
+                    [&prepare_ran](std::span<const std::byte>) { prepare_ran.store(true, std::memory_order_release); },
+                    std::vector<hs::ImmutableAssetRange>(ranges.begin(), ranges.end())}, streaming, residency,
+                    allocation_storage, allocation_submitted, true)) && allocation_submitted,
+                "native allocation-failure preparation was not queued");
+            io.SubmitQueuedReads();
+            generation_lease.reset();
+            hs::AssetReadCompletion allocation_output;
+            auto allocation_result = hs::Result::Success();
+            bool allocation_rejected{};
+            {
+                RejectOneAllocation reject_one;
+                allocation_result = io.Poll(allocation_request, streaming, residency, allocation_output);
+                allocation_rejected = reject_one.Rejected();
+            }
+            const auto *allocation_page = streaming.Find(allocation_request);
+            Check(allocation_rejected && !allocation_result && !allocation_output.ready &&
+                !prepare_ran.load(std::memory_order_acquire) && !residency.Contains(allocation_storage) &&
+                !io.HasPendingReads() && generation_weak.expired() && allocation_page &&
+                allocation_page->state == hs::StreamingPageState::Cancelled,
+                "native preparation start allocation failure was not contained and reclaimed");
+        }
+#endif
+
+        io.SetWaitForReads(false);
+        for (int mode = 0; mode < 4; ++mode)
+        {
+            struct ReleasePrepareGate
+            {
+                std::shared_ptr<std::promise<void>> promise;
+                bool released{};
+                void ReleaseOnce()
+                {
+                    if (!released) { promise->set_value(); released = true; }
+                }
+                ~ReleasePrepareGate() { ReleaseOnce(); }
+            };
+            const auto id = "native-prepare-" + std::to_string(mode);
+            const auto generation = mode == 3 ? "generation-old" : "generation";
+            const auto request = streaming.Request(id, id, generation, 1);
+            const auto storage = residency.ReserveHost(payload.size() * 2);
+            auto started = std::make_shared<std::promise<void>>();
+            const auto started_future = started->get_future();
+            auto release = std::make_shared<std::promise<void>>();
+            const auto release_future = release->get_future().share();
+            ReleasePrepareGate release_gate{release};
+            const auto prepare_done = std::make_shared<std::atomic_bool>(false);
+            auto generation_lease = std::make_shared<int>(mode);
+            std::weak_ptr<int> generation_weak = generation_lease;
+            bool submitted{};
+            Check(request && storage && bool(io.Enqueue({request, generation, id, loose, payload.size(),
+                generation_lease, [started, release_future, prepare_done, mode](std::span<const std::byte>) {
+                    started->set_value();
+                    release_future.wait();
+                    prepare_done->store(true, std::memory_order_release);
+                    if (mode == 2) throw std::runtime_error("failure after native cancellation");
+                }, std::vector<hs::ImmutableAssetRange>(ranges.begin(), ranges.end())},
+                streaming, residency, storage, submitted, true)) && submitted,
+                "native gated preparation was not queued");
+            generation_lease.reset();
+            io.SubmitQueuedReads();
+
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            bool prepare_started{};
+            hs::AssetReadCompletion pending_output;
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                Check(bool(io.Poll(request, streaming, residency, pending_output)) &&
+                    !pending_output.ready, "native gated preparation completed before release");
+                if (started_future.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+                { prepare_started = true; break; }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            Check(prepare_started, "native gated preparation callback did not start");
+            hs::StreamingRequestId replacement{};
+            if (mode == 1 || mode == 2) io.Cancel(request, streaming);
+            if (mode == 3)
+            {
+                streaming.Reset();
+                replacement = streaming.Request(id, id, "generation-new", 1);
+                Check(replacement && replacement.value != request.value,
+                    "native reset reused a pending request identity");
+            }
+            Check(bool(io.Poll(request, streaming, residency, pending_output)) &&
+                !pending_output.ready && residency.Contains(storage) && !generation_weak.expired(),
+                "native pending prepare released its host or generation owner before terminal completion");
+            release_gate.ReleaseOnce();
+
+            bool terminal{};
+            bool poll_succeeded{};
+            hs::AssetReadCompletion prepare_output;
+            deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            while (std::chrono::steady_clock::now() < deadline)
+            {
+                const auto result = io.Poll(request, streaming, residency, prepare_output);
+                if (!result) { terminal = true; break; }
+                if (prepare_output.ready) { terminal = true; poll_succeeded = true; break; }
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            Check(terminal && prepare_done->load(std::memory_order_acquire) &&
+                !io.HasPendingReads() && generation_weak.expired(),
+                "native prepare terminal path retained work, storage or its generation owner");
+            if (mode == 2)
+                Check(!poll_succeeded && !prepare_output.ready && !residency.Contains(storage),
+                    "native prepare exception after cancellation was hidden");
+            else if (mode == 0)
+                Check(poll_succeeded && prepare_output.ready && !prepare_output.cancelled &&
+                    prepare_output.bytes == std::vector<std::byte>(payload.begin(), payload.end()) &&
+                    residency.Contains(storage) && streaming.CompleteRead(request, generation) &&
+                    residency.ReleaseNow(prepare_output.storage) && !residency.Contains(storage),
+                    "native successful preparation did not publish and reclaim its bytes");
+            else
+                Check(poll_succeeded && prepare_output.ready && prepare_output.cancelled && prepare_output.bytes.empty() &&
+                    !residency.Contains(storage),
+                    "native cancelled or superseded preparation published bytes");
+            if (mode == 3)
+                Check(streaming.Find(replacement) &&
+                    streaming.Find(replacement)->state == hs::StreamingPageState::Requested &&
+                    streaming.Cancel(replacement) && streaming.Collect({}) == 1,
+                    "native replacement request was not retained for retry or cleaned up");
+        }
+        io.SetWaitForReads(true);
     }
     unsigned sequence{};
     const auto enqueue = [&](const hs::RendererAssetSource &input, std::function<void(std::span<const std::byte>)> prepare = {}) {
@@ -811,6 +1101,12 @@ void CheckPackAssetReads(bool native)
 
 int main()
 {
+#if defined(_DEBUG)
+    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+#endif
     try
     {
         hs::RendererTextureStreaming texture_working_set;

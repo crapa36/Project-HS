@@ -233,13 +233,13 @@ struct TextureStreamingLayout
         ResourceVersion sampled_version{};
         render_data::TextureDescription description{};
         std::uint32_t first_mip{}, target_mip{};
-        std::uint32_t map_count{}, unmap_count{}, pass_index{}, pass_id{};
+        std::uint32_t map_count{}, unmap_count{};
         std::vector<std::uint32_t> mapped_mips, unmapped_mips;
         bool pending{}, separate_target{}, reserved{}, copy_upload{}, software_copy{};
         bool opacity_sampling{true};
     };
     std::vector<Entry> entries;
-    std::uint32_t first_pass_id{};
+    std::uint32_t first_pass_id{}, copy_pass_index{};
     QueueHint queue{QueueHint::Copy};
 };
 // uint4 GPU ABI, indexed by the actual material texture binding slot.

@@ -190,10 +190,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes(
                 throw std::runtime_error("environment geometry metadata has invalid LOD/page identity");
             if (index % 3 == 0)
             {
-                if (auto loaded = environment_cluster_catalogs[index / 3].Load(config, package, logical_id,
-                        [](const RendererAssetSource &input, std::vector<std::byte> &output) {
-                            return ReadBinary(input, output);
-                        }); !loaded)
+                if (auto loaded = environment_cluster_catalogs[index / 3].Load(config, package, logical_id); !loaded)
                     return loaded;
             }
             page_id = package.dependencies[geometry_metadata.page_dependency_index];

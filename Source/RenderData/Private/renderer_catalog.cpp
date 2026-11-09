@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
-#include <unordered_set>
+#include <limits>
 
 namespace hs::render_data
 {
@@ -153,47 +153,122 @@ std::vector<std::byte> EncodeRendererCatalog(RendererCatalogView v)
     return std::move(b).Take();
 }
 
-Result DecodeRendererCatalog(std::span<const std::byte> bytes,std::uint64_t pack_size,RendererCatalogData &out)
+Result ValidateRendererCatalog(RendererCatalogView view, std::optional<std::uint64_t> pack_size)
 {
     try
     {
-        R r(bytes,"project_hs.renderer_catalog",3); RendererCatalogData next;
-        Rows(r,next.bulks,60,[](R &in,RendererBulkDescriptor &x){in.Fields(x.asset_id.value);Bulk(in,x.range);});
-        Rows(r,next.texture_storage,48,Texture); Rows(r,next.geometry_storage,100,Geometry);
-        Rows(r,next.material_storage,84,Material); Rows(r,next.character_storage,120,Character);
-        Rows(r,next.animation_storage,64,Animation);
-        r.Fields(next.has_atlas); if(next.has_atlas) Atlas(r,next.atlas);
-        Rows(r,next.source_revisions,24,[&](R &in,RendererSourceRevision &x){in.Fields(x.asset_id.value);next.revision_strings.emplace_back(in.String());x.product_id=next.revision_strings.back();Blob(in,x.digest);});
-        Rows(r,next.revision_bulks,12,[&](R &in,RendererRevisionBulk &x){next.revision_strings.emplace_back(in.String());x.product_id=next.revision_strings.back();in.Fields(x.bulk_index);});
-        r.Finish();
-        std::vector<AssetId> assets; assets.reserve(next.bulks.size());
-        std::unordered_set<std::uint64_t> ids;
-        for(const auto &x:next.bulks)
-        {
-            Require(x.asset_id.value && ids.insert(x.asset_id.value).second && x.range.format <= RenderBulkFormat::SurfaceLayoutAbi &&
-                x.range.offset <= pack_size && x.range.byte_count <= pack_size-x.range.offset,"Invalid renderer bulk.");
-            assets.push_back(x.asset_id);
-        }
-        const auto product = [&](AssetId asset,std::uint32_t index, RenderBulkFormat format) -> std::uint64_t {
-            Require(index < next.bulks.size() && next.bulks[index].asset_id.value == asset.value &&
-                    next.bulks[index].range.format == format && next.bulks[index].range.byte_count,
-                    "Invalid descriptor bulk identity or format.");
-            return next.bulks[index].range.byte_count;
+        Require(view.bulks.size() <= UINT32_MAX && view.textures.size() <= UINT32_MAX &&
+            view.geometry.size() <= UINT32_MAX && view.materials.size() <= UINT32_MAX &&
+            view.characters.size() <= UINT32_MAX && view.animations.size() <= UINT32_MAX,
+            "Renderer table exceeds its handle ABI.");
+        const auto rows = [](auto entries, auto validate) {
+            std::uint64_t previous{};
+            for (const auto &entry : entries)
+            {
+                Require(entry.asset_id.value > previous, "Renderer table IDs are zero, duplicated or unordered.");
+                validate(entry);
+                previous = entry.asset_id.value;
+            }
         };
-        for(const auto &x:next.texture_storage) { auto v=x.View();const auto size=product(v.asset_id,v.bulk_index,RenderBulkFormat::Package);
-            if(v.dimension==TextureDimension::Texture2DArray) ValidateTextureDescriptor(v,size);
-            else { Require(v.dimension==TextureDimension::Texture3D,"Invalid texture dimension.");ValidateVolumeTextureDescriptor(v,size); }
-            next.textures.push_back(v); }
-        for(const auto &x:next.geometry_storage) { auto v=x.View();ValidateGeometryDescriptor(v,product(v.asset_id,v.bulk_index,RenderBulkFormat::GeometryPage));next.geometry.push_back(v); }
-        for(const auto &x:next.material_storage) { auto v=x.View();(void)product(v.asset_id,v.bulk_index,RenderBulkFormat::Package);ValidateMaterialDescriptor(v,assets,next.textures);next.materials.push_back(v); }
-        for(const auto &x:next.character_storage) { auto v=x.View();ValidateCharacterDescriptor(v,next.bulks,next.geometry,next.materials);next.characters.push_back(v); }
-        for(const auto &x:next.animation_storage) { auto v=x.View();ValidateAnimationDescriptor(v,next.bulks,next.characters);next.animations.push_back(v); }
-        if(next.has_atlas) { Require(std::ranges::any_of(next.bulks,[&](const auto &x){return x.asset_id.value==next.atlas.asset_id.value && x.range.format==RenderBulkFormat::VfxMeshAtlas && x.range.byte_count != 0;}),"Invalid atlas asset."); for(const auto &x:next.atlas.meshes)
-            Require(x.vertex_count && x.vertex_count%3==0 && std::isfinite(x.transverse_radius) && x.transverse_radius>0 &&
-                std::isfinite(x.minimum_z) && std::isfinite(x.widest_z) && std::isfinite(x.maximum_z) &&
-                x.minimum_z<x.maximum_z && x.widest_z>=x.minimum_z && x.widest_z<=x.maximum_z,"Invalid atlas bounds."); }
-        for(const auto &x:next.source_revisions) Require(x.asset_id.value && MakeAssetId(x.product_id).value==x.asset_id.value,"Invalid source revision.");
-        for(const auto &x:next.revision_bulks) Require(x.bulk_index<next.bulks.size() && MakeAssetId(x.product_id).value==next.bulks[x.bulk_index].asset_id.value,"Invalid revision bulk.");
+        std::vector<AssetId> assets; assets.reserve(view.bulks.size());
+        rows(view.bulks, [&](const auto &entry) {
+            const auto &range = entry.range;
+            Require(range.format <= RenderBulkFormat::SurfaceLayoutAbi && range.byte_count &&
+                range.byte_count <= SIZE_MAX, "Invalid renderer bulk size or format.");
+            if (pack_size)
+                Require(range.offset >= 64 && range.offset % 64 == 0 && range.offset <= *pack_size &&
+                    range.byte_count <= *pack_size - range.offset, "Renderer bulk exceeds its aligned pack range.");
+            assets.push_back(entry.asset_id);
+        });
+        const auto product = [&](AssetId asset, std::uint32_t index, RenderBulkFormat format) -> const RendererBulkDescriptor & {
+            Require(index < view.bulks.size() && view.bulks[index].asset_id.value == asset.value &&
+                view.bulks[index].range.format == format, "Invalid descriptor bulk identity or format.");
+            return view.bulks[index];
+        };
+        rows(view.textures, [&](const auto &v) {
+            const auto size = product(v.asset_id,v.bulk_index,RenderBulkFormat::Package).range.byte_count;
+            if (v.dimension == TextureDimension::Texture2DArray) ValidateTextureDescriptor(v,size);
+            else { Require(v.dimension == TextureDimension::Texture3D,"Invalid texture dimension."); ValidateVolumeTextureDescriptor(v,size); }
+        });
+        rows(view.geometry, [&](const auto &v) {
+            ValidateGeometryDescriptor(v,product(v.asset_id,v.bulk_index,RenderBulkFormat::GeometryPage).range.byte_count);
+        });
+        rows(view.materials, [&](const auto &v) {
+            (void)product(v.asset_id,v.bulk_index,RenderBulkFormat::Package);
+            ValidateMaterialDescriptor(v,assets,view.textures);
+            for (const auto &program : v.programs)
+                Require(program.bulk_index < view.bulks.size() &&
+                    view.bulks[program.bulk_index].range.format == RenderBulkFormat::ShaderDxil,
+                    "Material program is not a shader bulk.");
+        });
+        rows(view.characters,[&](const auto &v) { ValidateCharacterDescriptor(v,view.bulks,view.geometry,view.materials); });
+        rows(view.animations,[&](const auto &v) { ValidateAnimationDescriptor(v,view.bulks,view.characters); });
+        if (view.atlas)
+        {
+            const auto &atlas = *view.atlas;
+            const auto found = std::lower_bound(view.bulks.begin(),view.bulks.end(),atlas.asset_id.value,
+                [](const auto &entry,std::uint64_t id) { return entry.asset_id.value < id; });
+            Require(found != view.bulks.end() && found->asset_id.value == atlas.asset_id.value &&
+                found->range.format == RenderBulkFormat::VfxMeshAtlas,"Invalid atlas asset.");
+            std::uint64_t vertices{};
+            for (const auto &x : atlas.meshes)
+            {
+                Require(x.vertex_count && x.vertex_count%3==0 && std::isfinite(x.transverse_radius) && x.transverse_radius>0 &&
+                    std::isfinite(x.minimum_z) && std::isfinite(x.widest_z) && std::isfinite(x.maximum_z) &&
+                    x.minimum_z<x.maximum_z && x.widest_z>=x.minimum_z && x.widest_z<=x.maximum_z,"Invalid atlas bounds.");
+                vertices += x.vertex_count;
+            }
+            Require(vertices <= (64ull*1024*1024/4-25)/12 && found->range.byte_count == 4*(25+vertices*12),
+                "Atlas size differs from its mesh table.");
+        }
+        rows(view.source_revisions, [&](const auto &source) {
+            const auto found = std::lower_bound(view.bulks.begin(),view.bulks.end(),source.asset_id.value,
+                [](const auto &entry,std::uint64_t id) { return entry.asset_id.value < id; });
+            Require(!source.product_id.empty() && MakeAssetId(source.product_id).value==source.asset_id.value &&
+                (found==view.bulks.end() || found->asset_id.value!=source.asset_id.value),"Invalid source revision or bulk overlap.");
+        });
+        Require(view.revision_bulks.size() <= view.bulks.size(),"Bulk revisions exceed the bulk catalogue.");
+        std::vector<bool> seen(view.bulks.size());
+        for (const auto &entry : view.revision_bulks)
+        {
+            Require(!entry.product_id.empty() && IsRendererMaterialRevisionProduct(entry.product_id) &&
+                entry.bulk_index < view.bulks.size() && !seen[entry.bulk_index],"Invalid or duplicated revision bulk.");
+            const auto id = entry.product_id;
+            const auto format = id.ends_with(".rpkg") ? RenderBulkFormat::Package : id.ends_with(".rpage") ? RenderBulkFormat::GeometryPage :
+                id.ends_with(".ghbin") ? RenderBulkFormat::GeometryHierarchy : id.ends_with(".shl1") ? RenderBulkFormat::SceneHlod :
+                id.ends_with(".dds") ? RenderBulkFormat::DdsTexture : RenderBulkFormat::ShaderDxil;
+            const auto &bulk = view.bulks[entry.bulk_index];
+            Require(MakeAssetId(id).value==bulk.asset_id.value && bulk.range.format==format &&
+                (format!=RenderBulkFormat::ShaderDxil || id.ends_with(".dxil")),"Revision bulk identity or format mismatch.");
+            seen[entry.bulk_index]=true;
+        }
+        return Result::Success();
+    }
+    catch(const std::exception &e) { return Result::Failure(ErrorCode::InvalidArgument,"hs_render_data",e.what()); }
+}
+
+Result DecodeRendererCatalog(std::span<const std::byte> bytes,std::uint64_t pack_size,
+                            std::shared_ptr<const RendererCatalogData> &out)
+{
+    try
+    {
+        R r(bytes,"project_hs.renderer_catalog",3);
+        auto next=std::shared_ptr<RendererCatalogData>(new RendererCatalogData);
+        Rows(r,next->bulks,60,[](R &in,RendererBulkDescriptor &x){in.Fields(x.asset_id.value);Bulk(in,x.range);});
+        Rows(r,next->texture_storage,48,Texture); Rows(r,next->geometry_storage,100,Geometry);
+        Rows(r,next->material_storage,84,Material); Rows(r,next->character_storage,120,Character);
+        Rows(r,next->animation_storage,64,Animation);
+        r.Fields(next->has_atlas); if(next->has_atlas) Atlas(r,next->atlas);
+        Rows(r,next->source_revisions,24,[&](R &in,RendererSourceRevision &x){in.Fields(x.asset_id.value);next->revision_strings.emplace_back(in.String());x.product_id=next->revision_strings.back();Blob(in,x.digest);});
+        Rows(r,next->revision_bulks,12,[&](R &in,RendererRevisionBulk &x){next->revision_strings.emplace_back(in.String());x.product_id=next->revision_strings.back();in.Fields(x.bulk_index);});
+        r.Finish();
+        for(const auto &x:next->texture_storage) next->textures.push_back(x.View());
+        for(const auto &x:next->geometry_storage) next->geometry.push_back(x.View());
+        for(const auto &x:next->material_storage) next->materials.push_back(x.View());
+        for(const auto &x:next->character_storage) next->characters.push_back(x.View());
+        for(const auto &x:next->animation_storage) next->animations.push_back(x.View());
+        if(auto valid=ValidateRendererCatalog(next->View(),pack_size);!valid) return valid;
+        next->pack_size_=pack_size;
         out=std::move(next); return Result::Success();
     }
     catch(const std::exception &e) { return Result::Failure(ErrorCode::InvalidArgument,"hs_render_data",e.what()); }

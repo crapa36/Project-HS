@@ -40,6 +40,7 @@ namespace hs
 {
 struct D3D12Renderer::Impl::StaticShadowCasterBatch
 {
+    static constexpr std::size_t kGeometryCount = kEnvironmentMaterialNames.size() + 1;
     struct Binding
     {
         const GeometryPageGpu *page{};
@@ -53,9 +54,14 @@ struct D3D12Renderer::Impl::StaticShadowCasterBatch
     std::uint32_t generation{};
     float density{}, wind_radius{};
     std::uint64_t material_revision{}, pipeline_revision{}, revision{};
+    std::array<std::uint64_t, kAuthoredMaterialNames.size()> material_revisions{};
     std::size_t leaf_count{};
-    std::array<std::uint64_t,kGpuVisibilityBucketCount+1> geometry{};
-    std::array<std::uint32_t,kGpuVisibilityBucketCount+1> passes{};
+    std::array<std::uint64_t, kGeometryCount> geometry{};
+    std::array<std::uint32_t, kGeometryCount> passes{};
+    std::array<std::array<float, 4>, kGeometryCount> caster_spheres{};
+    std::array<std::array<float, 6>, kGeometryCount> receiver_bounds{};
+    std::shared_ptr<const render_data::AdmittedSceneHlod> receiver_hlod_scene;
+    float water_radius{};
     std::vector<VirtualShadowCaster> records;
     std::vector<ShadowCasterMap::key_type> keys;
     std::vector<Binding> bindings;
@@ -65,7 +71,7 @@ struct D3D12Renderer::Impl::StaticShadowCasterBatch
     std::vector<ShadowSurfaceReceiver> surface_receivers;
     std::optional<ShadowSurfaceReceiver> surface_aggregate;
     std::size_t receiver_proxy_count{};
-    bool settled{}, mesh_shader{};
+    bool settled{}, mesh_shader{}, uses_default_material{};
 };
 
 // Dynamic texture-owner ordinals must not overlap the fixed feature pass IDs.
@@ -1102,7 +1108,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             auto selected = SelectMonsterLod(asset.geometry_lods, monster_own_resident_masks[family],
                 static_cast<float>(world_scale), projection);
             const auto key = MakeRenderSceneInstanceKey(source.stable_id,
-                static_cast<std::uint32_t>(source_index));
+                prepared_scene.original_source_ordinals[source_index]);
             // RenderAllViews sets this ID once before its sequential view loop;
             // a submitted first view publishes the matching canonical skin frame.
             bool committed_package_choice{};
@@ -1157,7 +1163,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         auto &lod_order = prepared_scene.order;
         lod_order = BuildRenderInstanceOrderWithMonsterLods(
             canonical_instances, selected_monster_lods, foliage_density, ordered_source_indices,
-            prepared_scene.order_scratch);
+            prepared_scene.order_scratch, prepared_scene.original_source_ordinals);
         if (!lod_order) return Result::Failure(ErrorCode::InvalidState,
             "hs_renderer_d3d12", "Monster LOD draw order is invalid.");
         auto &ordered_monster_lods = prepared_scene.ordered_lods;
@@ -2135,7 +2141,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     cpu_timings.ui_us = measure_stage();
     const auto instance_count = render_instances.size();
 
-    auto *constants = reinterpret_cast<FrameConstants *>(frame.mapped);
+    FrameConstants host_constants{};
+    auto *constants = &host_constants;
     auto &next_draw_instances = frame.next_draw_instances_scratch;
     if (reconcile_packet_scene) next_draw_instances.resize(instance_count);
     else next_draw_instances.clear();
@@ -3125,24 +3132,24 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     };
     const auto palette_prepare_start = capture_clock();
     // All views consume the same package-owned sampled palette.
-    using ArcherPaletteKey = RenderPoseSampleKey;
-    std::vector<ArcherPaletteKey> palette_keys;
+    std::vector<std::size_t> palette_sources;
+    palette_sources.reserve(archer_instance_count);
     std::vector<std::uint32_t> archer_palette_slots(instance_count,
                                                      std::numeric_limits<std::uint32_t>::max());
-    std::size_t palette_count{};
     for (std::size_t index = 0; index < render_instances.size(); ++index)
     {
         const auto &instance = render_instances[index];
         if (instance.mesh != RenderMesh::Archer) continue;
         const auto *instance_pose = instance.animation_clip_id.value ? nullptr : &pose_for_archer(instance);
         const auto key = MakeRenderPoseSampleKey(instance, instance_pose);
-        const auto found = std::ranges::find(palette_keys, key);
-        if (found != palette_keys.end())
+        const auto found = std::ranges::find_if(palette_sources,
+            [&](std::size_t source) { return impl_->prepared_archer_palettes[source].key == key; });
+        if (found != palette_sources.end())
         {
-            archer_palette_slots[index] = static_cast<std::uint32_t>(found - palette_keys.begin());
+            archer_palette_slots[index] = static_cast<std::uint32_t>(found - palette_sources.begin());
             continue;
         }
-        const auto slot = palette_count++;
+        const auto slot = palette_sources.size();
         if (slot >= archer_instance_count)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    "Archer palette count exceeded prepared frame capacity.");
@@ -3167,7 +3174,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         }
         std::memcpy(frame.mapped + archer_palette_data_offset + slot * archer_palette_stride,
                     prepared->bones.data(), archer_palette_stride);
-        palette_keys.push_back(key);
+        palette_sources.push_back(static_cast<std::size_t>(prepared - impl_->prepared_archer_palettes.begin()));
         archer_palette_slots[index] = static_cast<std::uint32_t>(slot);
     }
     cpu_timings.palette_prepare_us = capture_elapsed(palette_prepare_start);
@@ -3440,7 +3447,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         else if (source.mesh == RenderMesh::Archer || is_monster(source.mesh))
         {
             const auto key = MakeRenderSceneInstanceKey(
-                source.stable_id, ordered_source_indices[index]);
+                source.stable_id, prepared_scene.original_source_ordinals[ordered_source_indices[index]]);
             const auto skin = owned_view.skin_history.Resolve(
                 key, source, skin_pose,
                 source.mesh == RenderMesh::Archer ? 1.75f : 1.5f);
@@ -3619,7 +3626,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         if (reconcile_packet_scene)
         {
             slot = impl_->dynamic_scene_slots.Upsert(
-                MakeRenderSceneInstanceKey(source.stable_id, ordered_source_indices[index]),
+                MakeRenderSceneInstanceKey(source.stable_id,
+                    prepared_scene.original_source_ordinals[ordered_source_indices[index]]),
                 current_instance, scene_metadata, dynamic_canonical_inputs[index]);
             if (slot.conflict)
                 return Result::Failure(
@@ -3912,12 +3920,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         std::vector<std::size_t> removed_static_indices;
         std::size_t matched_previous_casters{};
         std::size_t prepared_casters{};
-#ifndef NDEBUG
-        auto &caster_key_oracle = shadow_owner.shadow_caster_key_oracle;
-        if (impl_->config.validation || impl_->config.gpu_validation)
-            BeginShadowCasterKeyOracle(caster_key_oracle, caster_preparation_epoch,
-                shadow_owner.shadow_caster_key_oracle_prepared);
-#endif
         current_shadow_casters.reserve(dynamic_draw_refs.size());
         casters.reserve(dynamic_draw_refs.size());
         std::uint32_t froxel_receiver_index = UINT32_MAX;
@@ -3997,35 +3999,78 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             }
         }
         const auto previous_static_batch=shadow_owner.static_shadow_casters;
+        std::array<std::array<float, 6>, kEnvironmentMaterialNames.size()> surface_bounds{};
+        std::array<bool, kEnvironmentMaterialNames.size()> surface_bounds_ready{};
+        const auto environment_surface_bounds = [&](std::size_t ordinal) -> const std::array<float, 6> & {
+            auto &box = surface_bounds[ordinal];
+            if (!surface_bounds_ready[ordinal])
+            {
+                const auto &first = impl_->environment_meshes[ordinal * 3].metadata.bounds;
+                for (unsigned axis = 0; axis < 3; ++axis)
+                { box[axis] = first.minimum[axis]; box[axis + 3] = first.maximum[axis]; }
+                for (unsigned lod = 1; lod < 3; ++lod)
+                {
+                    const auto &bounds = impl_->environment_meshes[ordinal * 3 + lod].metadata.bounds;
+                    for (unsigned axis = 0; axis < 3; ++axis)
+                    { box[axis] = std::min(box[axis], bounds.minimum[axis]); box[axis + 3] = std::max(box[axis + 3], bounds.maximum[axis]); }
+                }
+                surface_bounds_ready[ordinal] = true;
+            }
+            return box;
+        };
         Impl::StaticShadowCasterBatch signature;
         signature.source=static_scene; signature.generation=static_caster_generation;
         signature.leaf_count=static_leaf_ref_count;
         signature.receiver_proxy_count=hlod_static_instances.size();
+        if (!hlod_static_instances.empty()) signature.receiver_hlod_scene=impl_->hlod_runtime->scene;
         signature.density=static_draws.foliage_density; signature.wind_radius=grass_visibility_radius;
         signature.material_revision=impl_->material_parameter_revision; signature.pipeline_revision=impl_->pipeline_revision;
         signature.mesh_shader=impl_->mesh_shader_enabled;
-        for(std::size_t bucket=0;bucket<kGpuVisibilityBucketCount;++bucket)
+        for(std::size_t ordinal=0;ordinal<kEnvironmentMaterialNames.size();++ordinal)
         {
-            if (bucket >= kEnvironmentVisibilityBucketCount || static_environment_ranges[bucket].second == 0)
-                continue;
+            const auto bucket=ordinal*3+2;
+            if (static_environment_ranges[bucket].second == 0) continue;
             const auto *page=bucket_pages[bucket];
-            signature.geometry[bucket]=page ? (std::uint64_t(page->generation)<<32)|page->page_slot : 0;
-            signature.passes[bucket]=static_geometry_passes[bucket][1];
+            signature.geometry[ordinal]=page ? (std::uint64_t(page->generation)<<32)|page->page_slot : 0;
+            signature.passes[ordinal]=static_geometry_passes[bucket][1];
+            if (page) signature.caster_spheres[ordinal]=page->metadata.bounds.sphere;
+            signature.receiver_bounds[ordinal]=environment_surface_bounds(ordinal);
+            if (ordinal==render_data::kMeadowWaterGeometry)
+                signature.water_radius=impl_->environment_variant_radii[ordinal];
         }
         if (static_ground_range.second != 0)
         {
             signature.geometry.back()=(std::uint64_t(impl_->procedural_geometry.generation)<<32)|impl_->procedural_geometry.page_slot;
             signature.passes.back()=ground_geometry_passes[1];
+            const auto &bounds=impl_->procedural_geometry.metadata.bounds;
+            signature.caster_spheres.back()=bounds.sphere;
+            for(unsigned axis=0;axis<3;++axis)
+            { signature.receiver_bounds.back()[axis]=bounds.minimum[axis]; signature.receiver_bounds.back()[axis+3]=bounds.maximum[axis]; }
         }
         const bool static_same_members=!new_session && previous_static_batch &&
             previous_static_batch->source==signature.source && previous_static_batch->generation==signature.generation &&
             previous_static_batch->leaf_count==signature.leaf_count && previous_static_batch->density==signature.density &&
             previous_static_batch->receiver_proxy_count==signature.receiver_proxy_count;
-        const bool static_same_bounds=static_same_members &&
-            previous_static_batch->wind_radius==signature.wind_radius && previous_static_batch->geometry==signature.geometry;
+        const bool static_same_receiver_bounds=static_same_members &&
+            previous_static_batch->wind_radius==signature.wind_radius &&
+            previous_static_batch->receiver_bounds==signature.receiver_bounds &&
+            previous_static_batch->receiver_hlod_scene==signature.receiver_hlod_scene &&
+            previous_static_batch->water_radius==signature.water_radius;
+        const bool static_same_bounds=static_same_receiver_bounds &&
+            previous_static_batch->caster_spheres==signature.caster_spheres;
+        const bool material_publication_changed=previous_static_batch &&
+            previous_static_batch->material_revision!=signature.material_revision;
+        bool static_same_materials=static_same_bounds &&
+            (!material_publication_changed || !previous_static_batch->uses_default_material);
+        if (static_same_materials && material_publication_changed)
+            for (std::size_t ordinal=0;ordinal<previous_static_batch->material_revisions.size();++ordinal)
+                if (previous_static_batch->material_revisions[ordinal] &&
+                    previous_static_batch->material_revisions[ordinal]!=impl_->material_parameter_revisions[ordinal])
+                { static_same_materials=false; break; }
         const bool static_warm=static_same_bounds &&
-            previous_static_batch->material_revision==signature.material_revision &&
+            static_same_materials &&
             previous_static_batch->pipeline_revision==signature.pipeline_revision && previous_static_batch->mesh_shader==signature.mesh_shader &&
+            previous_static_batch->geometry==signature.geometry &&
             previous_static_batch->passes==signature.passes;
         const bool static_rebind=static_same_members && !static_warm;
         std::unordered_map<Impl::ShadowCasterMap::key_type,std::size_t,Impl::ShadowCasterKeyHash> old_static_indices,static_indices;
@@ -4037,9 +4082,16 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
 #endif
             static_shadow_batch=std::make_shared<Impl::StaticShadowCasterBatch>(*previous_static_batch);
             static_shadow_batch->material_revision=signature.material_revision;
+            for (std::size_t ordinal=0;ordinal<static_shadow_batch->material_revisions.size();++ordinal)
+                if (static_shadow_batch->material_revisions[ordinal])
+                    static_shadow_batch->material_revisions[ordinal]=impl_->material_parameter_revisions[ordinal];
             static_shadow_batch->pipeline_revision=signature.pipeline_revision;
             static_shadow_batch->mesh_shader=signature.mesh_shader;
             static_shadow_batch->geometry=signature.geometry;
+            static_shadow_batch->caster_spheres=signature.caster_spheres;
+            static_shadow_batch->receiver_bounds=signature.receiver_bounds;
+            static_shadow_batch->receiver_hlod_scene=signature.receiver_hlod_scene;
+            static_shadow_batch->water_radius=signature.water_radius;
             static_shadow_batch->wind_radius=signature.wind_radius;
             static_shadow_batch->passes=signature.passes;
             static_shadow_batch->bindings.clear();
@@ -4081,8 +4133,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             if(proxy_bounds) merge_local(*proxy_bounds); // HLOD pages contain baked world-space vertices.
             else if(environment)
             {
-                const auto ordinal=environment_mesh_index(source);
-                for(unsigned lod=0;lod<3;++lod) merge_local(impl_->environment_meshes[ordinal*3+lod].metadata.bounds);
+                const auto &box=environment_surface_bounds(environment_mesh_index(source));
+                for(unsigned axis=0;axis<3;++axis) { lo[axis]=box[axis];hi[axis]=box[axis+3]; }
             }
             else if(source.mesh==RenderMesh::Archer)
             {
@@ -4092,13 +4144,13 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 if(dynamic_index>=archer_palette_slots.size()||archer_palette_slots[dynamic_index]==UINT32_MAX)
                 { camera_receiver_domain_closed=false;return Result::Success(); }
                 const auto &bounds=impl_->archer_geometry.metadata.bounds;
-                const auto offset=archer_palette_data_offset+std::size_t(archer_palette_slots[dynamic_index])*archer_palette_stride;
+                const auto &palette=impl_->prepared_archer_palettes[
+                    palette_sources[archer_palette_slots[dynamic_index]]].bones;
                 lo={0,0,0};hi={0,0,0};std::array<double,3> magnitude{};
                 double source_l1{};
                 for(unsigned bone=0;bone<impl_->archer_bone_count;++bone)
                 {
-                    DirectX::XMFLOAT4X4 matrix;
-                    std::memcpy(&matrix,frame.mapped+offset+bone*sizeof(matrix),sizeof(matrix));
+                    const auto &matrix=palette[bone];
                     for(unsigned corner=0;corner<8;++corner)
                     {
                         const std::array<double,4> p{bounds.minimum[0],bounds.minimum[1],bounds.minimum[2],1};
@@ -4155,29 +4207,12 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 }
                 // Other placeholder operations only shrink the source box.
             }
-            const double sine=std::sin(yaw),cosine=std::cos(yaw);
-            std::array<double,3> low{INFINITY,INFINITY,INFINITY},high{-INFINITY,-INFINITY,-INFINITY},magnitude{};
-            for(unsigned corner=0;corner<8;++corner)
-            {
-                const double x=(corner&1?hi[0]:lo[0])*scale.x,y=(corner&2?hi[1]:lo[1])*scale.y,z=(corner&4?hi[2]:lo[2])*scale.z;
-                const std::array<double,3> p{center.x+cosine*x+sine*z,center.y+y,center.z-sine*x+cosine*z};
-                const std::array<double,3> absolute{std::abs(double(center.x))+std::abs(x)+std::abs(z),std::abs(double(center.y))+std::abs(y),
-                    std::abs(double(center.z))+std::abs(x)+std::abs(z)};
-                for(unsigned axis=0;axis<3;++axis)
-                { low[axis]=std::min(low[axis],p[axis]);high[axis]=std::max(high[axis],p[axis]);magnitude[axis]=std::max(magnitude[axis],absolute[axis]); }
-            }
             const double wind=HasEnvironmentWind(source.mesh,source.environment_variant)?grass_visibility_radius:0;
-            std::array<float,3> minimum{},maximum{};
-            for(unsigned axis=0;axis<3;++axis)
-            {
-                const double pad=wind+magnitude[axis]*0x1p-18+1.e-5;
-                if(!std::isfinite(low[axis])||!std::isfinite(high[axis])||low[axis]-pad<=-FLT_MAX||high[axis]+pad>=FLT_MAX)
-                    return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Camera shadow receiver bounds are unbounded.");
-                minimum[axis]=std::nextafter(float(low[axis]-pad),-FLT_MAX);
-                maximum[axis]=std::nextafter(float(high[axis]+pad),FLT_MAX);
-            }
-            const ShadowSurfaceReceiver receiver{{minimum[0],minimum[1],minimum[2],0},{maximum[0],maximum[1],maximum[2],1}};
-            destination.push_back(receiver);return Result::Success();
+            const auto receiver=TransformShadowSurfaceBounds(lo,hi,{scale.x,scale.y,scale.z},
+                {center.x,center.y,center.z},yaw,wind);
+            if(!receiver)
+                return Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12","Camera shadow receiver bounds are unbounded.");
+            destination.push_back(*receiver);return Result::Success();
         };
         const auto append_caster = [&](const RenderInstance &source, const GpuStaticDrawRef &reference,
                 std::uint32_t ref_index, bool immutable, const GpuInstance *instance,
@@ -4207,8 +4242,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             const UINT material = ordinal < kAuthoredMaterialNames.size()
                 ? (impl_->material_parameter_bases[ordinal] << 1) | 1u : kDefaultSceneDrawMaterial | 1u;
             const auto binding_key = (std::uint64_t(material) << 32) | (immutable ? 0x80000000u : 0u) | page->page_slot;
-            const auto binding_slot = bucket != UINT32_MAX ? static_cast<std::size_t>(bucket)
-                : kGpuVisibilityBucketCount + (terrain ? 0u : 1u);
+            const auto binding_slot = ShadowCasterGroupSelector(bucket, kGpuVisibilityBucketCount, terrain);
             const auto draw_group = ResolveShadowCasterGroup(
                 shadow_group_indices[immutable ? 1u : 0u][binding_slot], groups, binding_key, [&] {
                     // The pipeline belongs to the draw group, not each static instance.
@@ -4285,7 +4319,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             }
             caster.current_revisions = immutable ? source.revisions
                 : impl_->dynamic_scene_slots.Revisions(reference.instance_index);
-            caster.current_revisions.material ^= impl_->material_parameter_revision;
+            caster.current_revisions.material ^= ordinal < kAuthoredMaterialNames.size()
+                ? impl_->material_parameter_revisions[ordinal] : impl_->material_parameter_revision;
             caster.current_cut_revision = cut_revision;
             caster.instance_index = instance_index;
             caster.instance_generation = reference.instance_generation;
@@ -4304,10 +4339,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             {
                 current=&current_shadow_casters.try_emplace(key).first->second;
                 const bool inserted=MarkShadowCasterPrepared(current->prepared_epoch,caster_preparation_epoch);
-#ifndef NDEBUG
-                if(impl_->config.validation || impl_->config.gpu_validation)
-                    assert(inserted==MarkShadowCasterKeyOracle(caster_key_oracle,key,caster_preparation_epoch));
-#endif
                 if(!inserted) return Result::Success();
                 ++prepared_casters;
             }
@@ -4334,7 +4365,13 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 if (immutable) static_shadow_batch->opacity_materials[ordinal] = true;
                 else shadow_opacity_materials[ordinal] = true;
             }
-            if(immutable) static_shadow_batch->records.push_back(caster);
+            if(immutable)
+            {
+                if (ordinal < kAuthoredMaterialNames.size())
+                    static_shadow_batch->material_revisions[ordinal]=impl_->material_parameter_revisions[ordinal];
+                else static_shadow_batch->uses_default_material=true;
+                static_shadow_batch->records.push_back(caster);
+            }
             else { current->caster=caster; casters.push_back(caster); }
             if (is_monster(source.mesh) && static_cast<UINT>(source.mesh) - static_cast<UINT>(RenderMesh::MonsterMelee) < 3)
             {
@@ -4352,7 +4389,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                             nullptr, SIZE_MAX, static_shadow_batch->surface_receivers); !added) return added;
             for (std::size_t index = 0; index < hlod_static_instances.size(); ++index)
                 if (auto added = append_surface(hlod_static_instances[index], nullptr, SIZE_MAX,
-                        static_shadow_batch->surface_receivers, &impl_->hlod_runtime->scene.proxies.at(index).bounds); !added)
+                        static_shadow_batch->surface_receivers, &impl_->hlod_runtime->scene->Value().proxies.at(index).bounds); !added)
                     return added;
             for (const auto &surface : static_shadow_batch->surface_receivers)
             {
@@ -4385,8 +4422,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         else if (static_rebind)
         {
             // Rebind the retained membership to current geometry and pipelines.
-            // Only changed geometry or wind requires new receiver bounds.
-            if (!static_same_bounds)
+            // Native allocation changes do not change the receiver enclosure.
+            if (!static_same_receiver_bounds)
                 if (auto prepared = prepare_static_surfaces(); !prepared) return prepared;
             for (auto &caster : static_shadow_batch->records)
             {
@@ -4401,8 +4438,10 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                     return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                         "Virtual caster has no complete geometry record.");
                 const auto cut_revision = (std::uint64_t(page->generation) << 32) | page->page_slot;
+                const auto shape = environment ? bucket / 3 : Impl::StaticShadowCasterBatch::kGeometryCount - 1;
                 auto &base = static_draws.shadow_bases[caster.source_ref];
-                if (!base.valid || base.geometry_revision != cut_revision)
+                if (!base.valid || base.geometry_revision != cut_revision ||
+                    previous_static_batch->caster_spheres[shape] != static_shadow_batch->caster_spheres[shape])
                 {
                     const auto &sphere = page->metadata.bounds.sphere;
                     const float sx = sphere[0] * source.scale.x, sy = sphere[1] * source.scale.y;
@@ -4416,11 +4455,13 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                 caster.current_bounds = base.sphere;
                 if (caster.wind) caster.current_bounds.w += grass_visibility_radius;
                 caster.current_cut_revision = cut_revision;
-                const UINT ordinal = environment
-                    ? render_data::EnvironmentGeometryMaterialOrdinal(bucket / 3) : kTerrainMaterialOrdinal;
-                const UINT material = (impl_->material_parameter_bases[ordinal] << 1) | 1u;
+                const bool terrain = source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch;
+                const UINT ordinal = environment ? render_data::EnvironmentGeometryMaterialOrdinal(bucket / 3)
+                    : terrain ? kTerrainMaterialOrdinal : UINT32_MAX;
+                const UINT material = ordinal < kAuthoredMaterialNames.size()
+                    ? (impl_->material_parameter_bases[ordinal] << 1) | 1u : kDefaultSceneDrawMaterial | 1u;
                 const auto binding_key = (std::uint64_t(material) << 32) | 0x80000000u | page->page_slot;
-                const auto binding_slot = environment ? static_cast<std::size_t>(bucket) : kGpuVisibilityBucketCount;
+                const auto binding_slot = ShadowCasterGroupSelector(bucket, kGpuVisibilityBucketCount, terrain);
                 caster.draw_group = ResolveShadowCasterGroup(
                     shadow_group_indices[1][binding_slot], groups, binding_key, [&] {
                         auto *pipeline = environment ? environment_pipeline(bucket, true) : impl_->shadow_pipeline.Get();
@@ -4431,7 +4472,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
                     });
                 note_shadow_material(bindings[caster.draw_group], environment, ordinal);
                 caster.geometry_record = pass >> 2;
-                caster.current_revisions.material = source.revisions.material ^ impl_->material_parameter_revision;
+                caster.current_revisions.material = source.revisions.material ^ (ordinal < kAuthoredMaterialNames.size()
+                    ? impl_->material_parameter_revisions[ordinal] : impl_->material_parameter_revision);
                 // The global pipeline revision has no per-shadow-shader change
                 // notification; conservatively invalidate shadow content.
                 caster.force_content_invalidation =
@@ -4440,7 +4482,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             for (std::size_t i = 0; i < bindings.size(); ++i)
                 static_shadow_batch->bindings.push_back({bindings[i].page, bindings[i].pipeline, bindings[i].material,
                     groups[i].frontend, groups[i].binding_key, bindings[i].source_material});
-            if (!static_same_bounds)
+            if (!static_same_receiver_bounds)
             {
                 for (std::size_t index = 0; index < static_leaf_ref_count; ++index)
                 {
@@ -4511,14 +4553,6 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         if (water_receiver) { water_receiver->maximum.w=1;receivers.push_back(*water_receiver); }
         if (gel_receiver) { gel_receiver->maximum.w=1;receivers.push_back(*gel_receiver); }
         PruneShadowCasterStorage(current_shadow_casters, caster_preparation_epoch, prepared_casters);
-#ifndef NDEBUG
-        if (impl_->config.validation || impl_->config.gpu_validation)
-        {
-            PruneShadowCasterKeyOracle(caster_key_oracle, caster_preparation_epoch, prepared_casters,
-                shadow_owner.shadow_caster_key_oracle_prepared);
-            assert(caster_key_oracle.size() == prepared_casters);
-        }
-#endif
         assert(current_shadow_casters.size() == prepared_casters);
         // Unique current keys matching every previous key prove that no caster was removed.
         if (!new_session && matched_previous_casters != owned_view.previous_shadow_casters.size())
@@ -4575,7 +4609,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         inputs.view_origin = lod_eye;
         inputs.inverse_view_projection = camera_relative_inverse_view_projection;
         for (UINT i = 0; i < 3; ++i) inputs.coverage_extents[i] = cascade_extents[i] * 0.5f;
-        inputs.baked_static=primary_sun && impl_->material_parameter_revision==impl_->baked_generation_material_revision &&
+        inputs.baked_static=primary_sun && impl_->material_parameters_match_generation &&
             impl_->pipeline_revision==impl_->baked_generation_pipeline_revision &&
             owned_view.virtual_shadows.MatchesBake(static_scene,*primary_sun,inputs.coverage_extents);
         inputs.depth_span = shadow_distance * 2;
@@ -4674,7 +4708,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
         }
     }
     for (auto &input : cluster_inputs) input.constants.active_view_mask = active_view_mask;
-    if (auto prepared = impl_->PrepareClusterFrame(owned_view, frame_slot, cluster_inputs); !prepared) return prepared;
+    if (auto prepared = impl_->PrepareClusterFrame(owned_view, frame_slot, *constants, cluster_inputs); !prepared) return prepared;
     record_scene_substage(cpu_timings.scene_cluster_prepare_us);
     std::array<float, kEnvironmentMaterialNames.size()> geometry_demand{};
     const float shadow_demand_projection[]{constants->lod_projection.y,
@@ -5798,7 +5832,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     local_probe_inputs.static_instance_generation = impl_->static_gpu_scene
         ? impl_->static_gpu_scene->instance_generation : 0;
     local_probe_inputs.material_parameter_revision =
-        impl_->material_parameter_revision - impl_->baked_generation_material_revision;
+        impl_->MaterialOverrideRevision();
     local_probe_inputs.pipeline_revision = impl_->pipeline_revision;
     local_probe_inputs.foliage_density = foliage_density;
     local_probe_inputs.frame_constants = constants;
@@ -8387,7 +8421,7 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     local_probe_inputs.lights = std::span<const LightView>(frame_lights.data(), authoritative_light_count);
     local_probe_inputs.static_instance_generation = impl_->static_gpu_scene ? impl_->static_gpu_scene->instance_generation : 0;
     local_probe_inputs.material_parameter_revision =
-        impl_->material_parameter_revision - impl_->baked_generation_material_revision;
+        impl_->MaterialOverrideRevision();
     local_probe_inputs.pipeline_revision = impl_->pipeline_revision;
     local_probe_inputs.foliage_density = foliage_density;
     local_probe_inputs.frame_constants = constants;
@@ -10096,6 +10130,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     owned_view.hdr_capture_valid = false;
     owned_view.hdr_capture_source.Reset();
 #endif
+    // Prepare on cached CPU memory; upload heaps are write-only from the CPU.
+    std::memcpy(frame.mapped, constants, sizeof(*constants));
     cpu_timings.descriptors_us = measure_stage();
 #if defined(HS_DEVELOPMENT_TOOLS)
     frame.timing_execute_begin_qpc = RendererDiagnosticsCounter();
@@ -10350,6 +10386,8 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
             static_shadow_batch->revision=++shadow_owner.static_shadow_caster_revision;
             static_shadow_batch->settled=true;
         }
+        if (static_shadow_batch)
+            static_shadow_batch->material_revision=impl_->material_parameter_revision;
         shadow_owner.static_shadow_casters=std::move(static_shadow_batch);
     }
 
@@ -10646,7 +10684,9 @@ Result D3D12Renderer::RenderView(const CanonicalFrame &canonical_frame,
     std::memcpy(frame_result.unjittered_view_projection.data(), &constants->current_unjittered_view_projection,
         sizeof(constants->current_unjittered_view_projection));
     if (consume_scene_inputs) impl_->previous_ribbon_eye = ribbon_eye;
-    impl_->CountValidationErrors();
+#if defined(HS_DEVELOPMENT_TOOLS)
+    if (auto collected = impl_->CountValidationErrors(); !collected) return collected;
+#endif
     cpu_timings.diagnostics_us = measure_stage();
     // Current CPU records and graph callbacks can borrow saved logical-token
     // arrays during graph recording and synchronous completion. Publish or

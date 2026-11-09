@@ -204,8 +204,6 @@ Result DecalSurfaceSystem::RegisterFrame(RenderGraphBuilder &graph,const DecalSu
     for (std::size_t index = 0; index < input.materials.size(); ++index)
     {
         const auto &m = input.materials[index]; const auto &p = m.package;
-        try { render_data::ValidateDecalReceiverPolicy(p.receivers); }
-        catch (const std::exception &) { return Failure(ErrorCode::InvalidArgument, "Decal package receiver policy is invalid."); }
         if (p.program.kind != render_data::MaterialProgramKind::DecalSurfaceCS ||
             m.parameter_base > input.parameter_slot_count || !m.parameter_count ||
             m.parameter_count > input.parameter_slot_count - m.parameter_base)

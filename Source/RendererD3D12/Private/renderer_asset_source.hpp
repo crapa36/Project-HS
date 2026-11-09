@@ -133,6 +133,44 @@ struct RendererAssetSource
         return Result::Success();
     }
 
+    [[nodiscard]] Result BindExpectedDigest(std::string_view digest)
+    {
+        if (digest.size() != 71 || !digest.starts_with("sha256:"))
+            return Result::Failure(ErrorCode::InvalidArgument, "RendererAssetSource", "Expected digest must be sha256 plus 64 lowercase hexadecimal digits.");
+        std::array<std::byte, 32> parsed{};
+        const auto nibble = [](char value) -> int {
+            if (value >= '0' && value <= '9') return value - '0';
+            if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+            return -1;
+        };
+        for (std::size_t index = 0; index < parsed.size(); ++index)
+        {
+            const auto high = nibble(digest[7 + index * 2]);
+            const auto low = nibble(digest[8 + index * 2]);
+            if (high < 0 || low < 0)
+                return Result::Failure(ErrorCode::InvalidArgument, "RendererAssetSource", "Expected digest contains a non-lowercase hexadecimal digit.");
+            parsed[index] = static_cast<std::byte>((high << 4) | low);
+        }
+        if (auto *packed = std::get_if<PackedRendererAsset>(&storage))
+        {
+            if (packed->range.expected_digest != parsed)
+                return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Selected digest differs from the packed range digest.");
+            return Result::Success();
+        }
+        auto &loose = std::get<LooseRendererAsset>(storage);
+        if (loose.admitted)
+        {
+            if (loose.admitted->digest != parsed)
+                return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Selected digest differs from the admitted loose product.");
+            return Result::Success();
+        }
+        std::uint64_t bytes{};
+        if (auto result = ByteCount(bytes); !result) return result;
+        // Selected metadata is bound before I/O; every full read still verifies actual bytes.
+        loose.admitted = LooseRendererAsset::WholeFileProof{bytes, parsed};
+        return Result::Success();
+    }
+
     [[nodiscard]] Result Read(std::vector<std::byte> &output,
         std::optional<std::uint64_t> expected_bytes = std::nullopt) const
     {

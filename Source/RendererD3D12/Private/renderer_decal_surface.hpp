@@ -23,7 +23,7 @@ class RendererPipelineCache;
 struct DecalSurfaceGuide { ResourceVersion version; ID3D12Resource *resource{}; };
 struct DecalSurfaceMaterial
 {
-    render_data::DecalMaterialPackageData package;
+    render_data::DecalMaterialPackageData package; // Receiver policy is admitted by the catalogue/package decoder.
     std::uint32_t parameter_base{}, parameter_count{};
 };
 struct DecalSurfaceInputs

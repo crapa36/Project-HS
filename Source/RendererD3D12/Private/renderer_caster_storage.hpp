@@ -1,7 +1,6 @@
 #pragma once
 
 #include <algorithm>
-#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -24,6 +23,12 @@ void AdvanceShadowCasterHistory(Caster &caster) noexcept
     caster.previous_skin=caster.skin;
     caster.previous_wind=caster.wind;
     caster.previous_animated_alpha=caster.animated_alpha;
+}
+
+[[nodiscard]] constexpr std::size_t ShadowCasterGroupSelector(std::uint32_t bucket,
+    std::size_t bucket_count, bool terrain) noexcept
+{
+    return bucket < bucket_count ? bucket : bucket_count + (terrain ? 0u : 1u);
 }
 
 // The caller's selector must identify an immutable binding within this attempt.
@@ -66,36 +71,6 @@ void PruneShadowCasterStorage(Map &current, std::uint64_t epoch, std::size_t pre
 {
     if (prepared_count != current.size())
         std::erase_if(current, [&](const auto &entry) { return entry.second.prepared_epoch != epoch; });
-}
-
-// Independent Debug membership oracle. Only keys/attempt epochs are retained;
-// submitted caster records never enter this map.
-template <typename Map>
-void BeginShadowCasterKeyOracle(Map &oracle, std::uint64_t epoch, bool &prepared)
-{
-    assert(epoch != 0);
-    // A failed attempt owns no reusable membership; wrap cannot reuse an ancient epoch 1.
-    if (!prepared || epoch == 1) oracle.clear();
-    prepared = false;
-}
-
-template <typename Map>
-[[nodiscard]] bool MarkShadowCasterKeyOracle(Map &oracle,
-    const typename Map::key_type &key, std::uint64_t epoch)
-{
-    const auto [entry, allocated] = oracle.try_emplace(key, epoch);
-    const bool first = allocated || entry->second != epoch;
-    entry->second = epoch;
-    return first;
-}
-
-template <typename Map>
-void PruneShadowCasterKeyOracle(Map &oracle, std::uint64_t epoch, std::size_t prepared_count,
-    bool &prepared)
-{
-    if (oracle.size() != prepared_count)
-        std::erase_if(oracle, [&](const auto &entry) { return entry.second != epoch; });
-    prepared = true;
 }
 
 template <typename Map>

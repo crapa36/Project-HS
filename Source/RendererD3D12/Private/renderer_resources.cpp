@@ -100,8 +100,10 @@ Result D3D12Renderer::Impl::CreateAllocation(AllocationResource &output,
                                             D3D12_RESOURCE_STATES initial_state,
                                             const D3D12_CLEAR_VALUE *clear)
 {
-    const bool bootstrap_allocation = essential_bootstrap_active &&
-        !resident_preparation_accounting.enabled;
+    bool bootstrap_allocation = essential_bootstrap_active;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    bootstrap_allocation = bootstrap_allocation && !resident_preparation_accounting.enabled;
+#endif
     ResidencySegment bootstrap_segment = ResidencySegment::Local;
     if (bootstrap_allocation)
     {
@@ -119,8 +121,10 @@ Result D3D12Renderer::Impl::CreateAllocation(AllocationResource &output,
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                 "Essential renderer bootstrap exceeds the adapter-reported physical memory allowance.");
     }
+#if defined(HS_DEVELOPMENT_TOOLS)
     else if (auto admitted = AdmitResidentAllocation(resource, allocation); !admitted)
         return admitted;
+#endif
     const auto effective_state =
         enhanced && resource.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER
             ? D3D12_RESOURCE_STATE_COMMON
@@ -145,7 +149,9 @@ Result D3D12Renderer::Impl::CreateAllocation(AllocationResource &output,
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
             "Essential renderer bootstrap allocation exceeds the adapter-reported physical memory allowance.");
     }
+#if defined(HS_DEVELOPMENT_TOOLS)
     RecordResidentAllocation(output, allocation.HeapType);
+#endif
     return Result::Success();
 }
 
@@ -1092,8 +1098,10 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors(OwnedView &owner, std::ui
 Result D3D12Renderer::Impl::CreateGpuData()
 {
     residency.Reset();
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (resident_preparation_accounting.enabled)
         if (auto budget = UpdateResidencyBudget(); !budget) return budget;
+#endif
     D3D12MA::ALLOCATION_DESC upload_allocation{};
     upload_allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
     D3D12_RANGE no_read{};
@@ -1537,7 +1545,9 @@ Result D3D12Renderer::Impl::CreateGpuData()
 
     // Particle execution state belongs to the live renderer, independently of
     // the immutable resident asset generation.
+#if defined(HS_DEVELOPMENT_TOOLS)
     if (!resident_preparation_accounting.enabled)
+#endif
     {
         D3D12MA::ALLOCATION_DESC default_allocation{};
         default_allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;

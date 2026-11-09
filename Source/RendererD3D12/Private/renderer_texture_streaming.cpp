@@ -8,6 +8,7 @@
 #include <bit>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
@@ -77,8 +78,9 @@ struct UploadBatch
     std::vector<MipBacking> maps;
     std::vector<std::uint32_t> unmap_mips;
     std::vector<TileMapping> unmaps;
-    ComPtr<ID3D12CommandAllocator> allocator;
-    ComPtr<ID3D12GraphicsCommandList> list;
+    std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints;
+    std::vector<UINT> destinations;
+    UINT16 copy_array_size{}, copy_source_mips{}, copy_destination_mips{};
     StreamingRequestId request;
     std::uint32_t target_mip{};
     std::size_t transaction_chunk_end{};
@@ -230,10 +232,13 @@ bool MetadataReservationBytes(const TextureOwner &texture, std::uint64_t &bytes)
     const auto count = texture.ranged_descriptor.subresources.empty()
         ? static_cast<std::uint64_t>(texture.registration.description.array_size) * texture.registration.description.mip_count
         : static_cast<std::uint64_t>(texture.ranged_descriptor.subresources.size());
-    if (count > (UINT64_MAX - sizeof(render_data::TexturePackageView)) /
-            sizeof(render_data::TextureSubresourceView))
+    // Admission covers the view and peak upload-layout arrays; retained layouts
+    // stay reserved until GPU completion, after the payload/view can be freed.
+    constexpr auto per_subresource = sizeof(render_data::TextureSubresourceView) +
+        sizeof(D3D12_PLACED_SUBRESOURCE_FOOTPRINT) + 3 * sizeof(UINT) + sizeof(UINT64);
+    if (count > (UINT64_MAX - sizeof(render_data::TexturePackageView)) / per_subresource)
         return false;
-    bytes = sizeof(render_data::TexturePackageView) + count * sizeof(render_data::TextureSubresourceView);
+    bytes = sizeof(render_data::TexturePackageView) + count * per_subresource;
     return true;
 }
 bool RefreshTextureHostTarget(TextureOwner &texture, const ResidencyBudgetSnapshot &budget) noexcept
@@ -921,6 +926,11 @@ Result RendererTextureStreaming::Impl::Prepare(TextureOwner &texture, std::uint3
     auto transaction_footprint = texture.transaction_next;
     if (upload_needed)
     {
+        const auto selected_count = texture.request_subresources.empty()
+            ? static_cast<std::size_t>(package.description.array_size) * (package.description.mip_count - target)
+            : texture.request_subresources.size();
+        footprints.reserve(selected_count); rows.reserve(selected_count); row_bytes.reserve(selected_count);
+        destinations.reserve(selected_count); source_indices.reserve(selected_count);
         for (UINT slice = 0; slice < package.description.array_size; ++slice)
             for (UINT mip = target; mip < package.description.mip_count; ++mip)
             {
@@ -1077,26 +1087,8 @@ Result RendererTextureStreaming::Impl::Prepare(TextureOwner &texture, std::uint3
             }
             batch->upload.resource->Unmap(0, nullptr);
         }
-        hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY, IID_PPV_ARGS(&batch->allocator));
-        if (SUCCEEDED(hr)) hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY,
-            batch->allocator.Get(), nullptr, IID_PPV_ARGS(&batch->list));
-        if (FAILED(hr)) { rollback(); return NativeFailure("Create streamed texture copy list", hr); }
-        if (upload_needed)
-        {
-            // The graph hands Copy batches textures in COMMON. Copy queues
-            // cannot transition texture layouts; copies keep COMMON layout
-            // (or use legacy implicit promotion/decay) through submission.
-            for (std::size_t index = 0; index < footprints.size(); ++index)
-            {
-                D3D12_TEXTURE_COPY_LOCATION destination{}, source{};
-                destination.pResource = batch->resource.Get(); destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                destination.SubresourceIndex = destinations[index]; source.pResource = batch->upload.resource.Get();
-                source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT; source.PlacedFootprint = footprints[index];
-                batch->list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
-            }
-        }
-        hr = batch->list->Close();
-        if (FAILED(hr)) { rollback(); return NativeFailure("Close streamed texture copy list", hr); }
+        batch->footprints = std::move(footprints);
+        batch->destinations = std::move(destinations);
         // Publication cannot allocate: reserve both vectors before queue work.
         texture.backing.reserve(texture.backing.size() + batch->maps.size());
         // Several textures may publish together. Every such retirement must
@@ -1113,11 +1105,9 @@ Result RendererTextureStreaming::Impl::Prepare(TextureOwner &texture, std::uint3
         if (texture.software_transaction)
             texture.pending->candidate_owner = std::move(texture.software_candidate);
         if (texture.read_ticket) static_cast<void>(residency.ReleaseNow(texture.read_ticket));
-        if (texture.decode_ticket && !texture.software_transaction)
-            static_cast<void>(residency.ReleaseNow(texture.decode_ticket));
         texture.read_ticket = {};
         if (!texture.software_transaction)
-        { texture.decode_ticket = {}; texture.metadata_ticket_committed = false; texture.prepared_package = {}; }
+            texture.prepared_package = {};
         else
             for (auto &subresource : texture.prepared_package.subresources) subresource.bytes = {};
         texture.request_ranges.clear(); texture.request_subresources.clear();
@@ -1223,46 +1213,9 @@ Result RendererTextureStreaming::Impl::PrepareSoftwareCopy(TextureOwner &texture
         batch->software_copy = true;
         batch->software_final_chunk = true;
 
-        HRESULT hr = device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY,
-            IID_PPV_ARGS(&batch->allocator));
-        if (SUCCEEDED(hr))
-            hr = device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY,
-                batch->allocator.Get(), nullptr, IID_PPV_ARGS(&batch->list));
-        if (FAILED(hr))
-        {
-            rollback();
-            return NativeFailure("Create software texture copy list", hr);
-        }
-        const auto source_mips = static_cast<std::uint64_t>(source_description.MipLevels);
-        const auto destination_mips = static_cast<std::uint64_t>(destination_description.MipLevels);
-        for (std::uint32_t slice = 0; slice < texture.registration.description.array_size; ++slice)
-            for (std::uint32_t mip = target; mip < texture.registration.description.mip_count; ++mip)
-            {
-                const auto source_index = static_cast<std::uint64_t>(slice) * source_mips +
-                    (mip - texture.first_mip);
-                const auto destination_index = static_cast<std::uint64_t>(slice) * destination_mips +
-                    (mip - target);
-                if (source_index >= source_subresources || destination_index >= destination_subresources ||
-                    source_index > UINT32_MAX || destination_index > UINT32_MAX)
-                {
-                    rollback();
-                    return Failure("Software coarsening copy subresource index is out of range.");
-                }
-                D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
-                source.pResource = batch->software_copy_source.Get();
-                source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                source.SubresourceIndex = static_cast<UINT>(source_index);
-                destination.pResource = batch->resource.Get();
-                destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-                destination.SubresourceIndex = static_cast<UINT>(destination_index);
-                batch->list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
-            }
-        hr = batch->list->Close();
-        if (FAILED(hr))
-        {
-            rollback();
-            return NativeFailure("Close software texture copy list", hr);
-        }
+        batch->copy_array_size = destination_description.DepthOrArraySize;
+        batch->copy_source_mips = source_description.MipLevels;
+        batch->copy_destination_mips = destination_description.MipLevels;
 
         // Reserve publication retirement before the copy can be submitted.
         retired.reserve(retired.size() + textures.size());
@@ -1336,6 +1289,10 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
         const auto owner = TextureStreamId{static_cast<std::uint32_t>(owner_index + 1u)};
         const auto batch = texture.pending;
         if (!batch || !batch->submitted || !batch->completion.IsSatisfiedBy(completed)) continue;
+        // A retained graph callback may still own the batch after its GPU work.
+        // Free the CPU layouts before releasing their host reservation.
+        std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT>{}.swap(batch->footprints);
+        std::vector<UINT>{}.swap(batch->destinations);
         if (!streaming.TryPublish(batch->request, texture.registration.generation, completed))
         {
             const auto *request = streaming.Find(batch->request);
@@ -1423,6 +1380,8 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
         texture.publication_frame = frame;
         ++texture.revision;
         if (residency.ReleaseNow(batch->upload_ticket)) ++texture.reclaims;
+        if (texture.decode_ticket) static_cast<void>(residency.ReleaseNow(texture.decode_ticket));
+        texture.decode_ticket = {}; texture.metadata_ticket_committed = false;
         static_cast<void>(streaming.Retire(batch->request, batch->completion));
         texture.pending.reset(); texture.request = {};
     }
@@ -2040,8 +1999,7 @@ bool RendererTextureStreaming::MatchesLayout(std::uint32_t first_pass,
                 entry.reserved!=batch->reserved||entry.copy_upload!=bool(batch->upload.resource)||
                 entry.software_copy!=batch->software_copy||
                 entry.target_mip!=batch->target_mip||entry.map_count!=batch->maps.size()||
-                entry.unmap_count!=batch->unmaps.size()||
-                entry.pass_id!=first_pass+index)return false;
+                entry.unmap_count!=batch->unmaps.size())return false;
             if(entry.mapped_mips.size()!=batch->maps.size()||
                 entry.unmapped_mips!=batch->unmap_mips)return false;
             for(std::size_t mip=0;mip<batch->maps.size();++mip)
@@ -2069,9 +2027,6 @@ Result RendererTextureStreaming::AddPendingPassesImpl(RenderGraphBuilder &graph,
     {
         if(!MatchesLayout(first_pass,*retained))
             return Failure("Texture streaming retained topology changed.");
-        for(const auto &entry:retained->entries)
-            if(entry.pending&&!graph.BindPass(entry.pass_index,entry.pass_id))
-                return Failure("Texture streaming retained Copy pass changed.");
     }
     if(layout)
     {
@@ -2079,6 +2034,15 @@ Result RendererTextureStreaming::AddPendingPassesImpl(RenderGraphBuilder &graph,
         layout->entries.resize(impl_->textures.size());
     }
     bindings.clear(); bindings.reserve(impl_->textures.size());
+    struct CopyBatch
+    {
+        std::vector<std::shared_ptr<UploadBatch>> uploads;
+        ComPtr<ID3D12CommandAllocator> allocator;
+        ComPtr<ID3D12GraphicsCommandList> list;
+    };
+    std::shared_ptr<CopyBatch> copies;
+    std::optional<PassBuilder> copy_pass;
+    std::vector<ExternalResourceAccess> copy_accesses;
     for (std::size_t index = 0; index < impl_->textures.size(); ++index)
     {
         auto &texture = impl_->textures[index]; const auto view = View({static_cast<std::uint32_t>(index + 1u)});
@@ -2145,48 +2109,30 @@ Result RendererTextureStreaming::AddPendingPassesImpl(RenderGraphBuilder &graph,
                 capture->unmap_count=static_cast<std::uint32_t>(batch->unmaps.size());
                 for(const auto &mapping:batch->maps)capture->mapped_mips.push_back(mapping.mip);
                 capture->unmapped_mips=batch->unmap_mips;
-                capture->pass_index=graph.PassCount();capture->pass_id=first_pass+static_cast<std::uint32_t>(index);
             }
-            auto pass=retained?*graph.BindPass(entry.pass_index,entry.pass_id):
-                graph.AddPass(first_pass+static_cast<std::uint32_t>(index),"Texture mip map/upload",QueueHint::Copy);
+            if (!copy_pass)
+            {
+                copies=std::make_shared<CopyBatch>();
+                copies->uploads.reserve(impl_->textures.size());
+                if (retained) copy_pass=graph.BindPass(retained->copy_pass_index,first_pass);
+                else
+                {
+                    if (layout) layout->copy_pass_index=graph.PassCount();
+                    copy_pass=graph.AddPass(first_pass,"Texture mip map/upload",QueueHint::Copy);
+                    copy_accesses.reserve(impl_->textures.size()*2);
+                }
+                if (!copy_pass) return Failure("Texture streaming retained Copy pass changed.");
+            }
+            auto &pass=*copy_pass;
             if (batch->software_copy && !retained) pass.Read(graph.Version(handle), Access::CopySource);
             const auto written=retained?ResourceVersion{target,1}:
                 pass.Write(graph.Version(target),Access::CopyDest);
-            const std::array<ExternalResourceAccess, 2> copy_accesses{{
-                {handle, Access::Common, Access::Common},
-                {target, Access::Common, Access::Common}}};
-            const ExternalResourceAccess target_access{target, Access::Common, Access::Common};
-            auto retained_queue = queue; retained_queue.resource_lease = batch;
-            auto execute=[batch](RenderExternalPassContext &context, ExternalQueueCompletion &completion) {
-                    completion.resource_lease = batch;
-                    auto *native_queue = static_cast<ID3D12CommandQueue *>(context.NativeCommandQueue());
-                    if (!native_queue || batch->started) return Failure("Texture copy/mapping batch submitted twice.");
-                    batch->started = true;
-                    for (const auto &backing : batch->maps)
-                        for (const auto &mapping : backing.mappings)
-                        {
-                            D3D12_TILE_REGION_SIZE region{}; region.NumTiles = mapping.tiles;
-                            const D3D12_TILE_RANGE_FLAGS flags = D3D12_TILE_RANGE_FLAG_NONE;
-                            const UINT offset = static_cast<UINT>(backing.memory.allocation->GetOffset() /
-                                D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES) + mapping.heap_tile;
-                            native_queue->UpdateTileMappings(batch->resource.Get(), 1, &mapping.coordinate, &region,
-                                backing.memory.allocation->GetHeap(), 1, &flags, &offset, &mapping.tiles, D3D12_TILE_MAPPING_FLAG_NONE);
-                        }
-                    for (const auto &mapping : batch->unmaps)
-                    {
-                        D3D12_TILE_REGION_SIZE region{}; region.NumTiles = mapping.tiles;
-                        const D3D12_TILE_RANGE_FLAGS flags = D3D12_TILE_RANGE_FLAG_NULL; const UINT offset{};
-                        native_queue->UpdateTileMappings(batch->resource.Get(), 1, &mapping.coordinate, &region,
-                            nullptr, 1, &flags, &offset, &mapping.tiles, D3D12_TILE_MAPPING_FLAG_NONE);
-                    }
-                    ID3D12CommandList *lists[]{batch->list.Get()}; native_queue->ExecuteCommandLists(1, lists);
-                    return Result::Success();
-                };
-            if(retained)pass.BindExternalExecute(std::move(retained_queue),std::move(execute));
-            else if (batch->software_copy)
-                pass.SetExternalExecute(std::move(retained_queue), copy_accesses, std::move(execute));
-            else pass.SetExternalExecute(std::move(retained_queue), {&target_access,1}, std::move(execute));
-            batch->scheduled = true;
+            if (!retained)
+            {
+                if (batch->software_copy) copy_accesses.push_back({handle,Access::Common,Access::Common});
+                copy_accesses.push_back({target,Access::Common,Access::Common});
+            }
+            copies->uploads.push_back(batch);
             if (target.value == handle.value) version = written;
             else if(!retained)graph.SetFinalAccess(written, Access::Common);
         }
@@ -2198,6 +2144,94 @@ Result RendererTextureStreaming::AddPendingPassesImpl(RenderGraphBuilder &graph,
             texture.registration.logical_id,view.resident_min_mip,required_mip,texture.desired_mip,
             !texture.pending&&texture.desired_mip<=required_mip&&
                 view.resident_min_mip<=required_mip,view.opacity_sampling});
+    }
+    if (copy_pass)
+    {
+        const bool has_copies = std::ranges::any_of(copies->uploads, [](const auto &batch) {
+            return batch->software_copy || !batch->footprints.empty();
+        });
+        if (has_copies)
+        {
+            HRESULT hr = impl_->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY,
+                IID_PPV_ARGS(&copies->allocator));
+            if (SUCCEEDED(hr)) hr = impl_->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY,
+                copies->allocator.Get(), nullptr, IID_PPV_ARGS(&copies->list));
+            if (FAILED(hr)) return NativeFailure("Create streamed texture copy list", hr);
+            for (const auto &batch : copies->uploads)
+            {
+                if (batch->software_copy)
+                {
+                    // Prepare admitted both complete array chains and their 32-bit
+                    // subresource span. Coarsening copies the matching suffix.
+                    for (UINT slice = 0; slice < batch->copy_array_size; ++slice)
+                        for (UINT mip = 0; mip < batch->copy_destination_mips; ++mip)
+                        {
+                            D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
+                            source.pResource = batch->software_copy_source.Get();
+                            source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                            source.SubresourceIndex = slice * batch->copy_source_mips +
+                                batch->copy_source_mips - batch->copy_destination_mips + mip;
+                            destination.pResource = batch->resource.Get();
+                            destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                            destination.SubresourceIndex = slice * batch->copy_destination_mips + mip;
+                            copies->list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+                        }
+                }
+                else
+                    for (std::size_t index = 0; index < batch->footprints.size(); ++index)
+                    {
+                        D3D12_TEXTURE_COPY_LOCATION source{}, destination{};
+                        source.pResource = batch->upload.resource.Get();
+                        source.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+                        source.PlacedFootprint = batch->footprints[index];
+                        destination.pResource = batch->resource.Get();
+                        destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+                        destination.SubresourceIndex = batch->destinations[index];
+                        copies->list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+                    }
+            }
+            hr = copies->list->Close();
+            if (FAILED(hr)) return NativeFailure("Close streamed texture copy list", hr);
+        }
+        queue.resource_lease=copies;
+        auto execute=[copies](RenderExternalPassContext &context,ExternalQueueCompletion &completion) {
+            completion.resource_lease=copies;
+            auto *native_queue=static_cast<ID3D12CommandQueue *>(context.NativeCommandQueue());
+            if (!native_queue || std::ranges::any_of(copies->uploads,[](const auto &batch) { return batch->started; }))
+                return Failure("Texture copy/mapping batch submitted twice.");
+            for (const auto &batch:copies->uploads) batch->started=true;
+            // Copy resources enter/leave COMMON. All mappings precede the
+            // shared list; the graph signals completion for mapping-only work too.
+            for (const auto &batch:copies->uploads)
+            {
+                for (const auto &backing:batch->maps)
+                    for (const auto &mapping:backing.mappings)
+                    {
+                        D3D12_TILE_REGION_SIZE region{}; region.NumTiles=mapping.tiles;
+                        const D3D12_TILE_RANGE_FLAGS flags=D3D12_TILE_RANGE_FLAG_NONE;
+                        const UINT offset=static_cast<UINT>(backing.memory.allocation->GetOffset()/
+                            D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES)+mapping.heap_tile;
+                        native_queue->UpdateTileMappings(batch->resource.Get(),1,&mapping.coordinate,&region,
+                            backing.memory.allocation->GetHeap(),1,&flags,&offset,&mapping.tiles,D3D12_TILE_MAPPING_FLAG_NONE);
+                    }
+                for (const auto &mapping:batch->unmaps)
+                {
+                    D3D12_TILE_REGION_SIZE region{}; region.NumTiles=mapping.tiles;
+                    const D3D12_TILE_RANGE_FLAGS flags=D3D12_TILE_RANGE_FLAG_NULL; const UINT offset{};
+                    native_queue->UpdateTileMappings(batch->resource.Get(),1,&mapping.coordinate,&region,
+                        nullptr,1,&flags,&offset,&mapping.tiles,D3D12_TILE_MAPPING_FLAG_NONE);
+                }
+            }
+            if (copies->list)
+            {
+                ID3D12CommandList *lists[]{copies->list.Get()};
+                native_queue->ExecuteCommandLists(1, lists);
+            }
+            return Result::Success();
+        };
+        if (retained) copy_pass->BindExternalExecute(std::move(queue),std::move(execute));
+        else copy_pass->SetExternalExecute(std::move(queue),copy_accesses,std::move(execute));
+        for (const auto &batch:copies->uploads) batch->scheduled=true;
     }
     return Result::Success();
 }

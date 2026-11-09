@@ -5,6 +5,7 @@
 #include <hs/render_data/render_revision.hpp>
 #include <hs/render_data/surface_layout.hpp>
 #include <hs/core/sha256.hpp>
+#include <hs/render_data/renderer_catalog.hpp>
 #include <hs/core/cooked_format.hpp>
 #include "checked_binary_read.hpp"
 
@@ -75,8 +76,16 @@ class RendererDevelopmentCatalog
     std::unordered_set<std::uint64_t> closure_ids_;
     std::unordered_set<std::uint64_t> source_revision_assets_;
 
-public:
     std::vector<render_data::RendererBulkDescriptor> bulks;
+    RendererDevelopmentCatalog() = default;
+public:
+    ~RendererDevelopmentCatalog() = default;
+    [[nodiscard]] render_data::RendererCatalogView View() const noexcept
+    {
+        render_data::RendererCatalogView view{};
+        view.bulks = bulks; view.textures = texture_views_; view.materials = material_views_;
+        return view;
+    }
 
     void Bind(RendererConfig &config) const noexcept
     {
@@ -99,6 +108,9 @@ public:
             [](const auto &entry, std::uint64_t value) { return entry.asset_id.value < value; });
         return found != bulks.end() && found->asset_id.value == asset.value;
     }
+
+    [[nodiscard]] const render_data::RendererBulkDescriptor &Bulk(AssetId asset) const
+    { return bulks[BulkIndex(asset)]; }
 
     [[nodiscard]] std::uint32_t BulkIndex(AssetId asset) const
     {
@@ -383,7 +395,7 @@ public:
         if (config.packed_content || !config.content_generation_lease || config.product_paths.empty() ||
             config.product_paths.size() != config.product_digests.size())
             throw std::runtime_error("Developer catalog requires one leased, complete Generation");
-        auto result = std::make_shared<RendererDevelopmentCatalog>();
+        auto result = std::shared_ptr<RendererDevelopmentCatalog>(new RendererDevelopmentCatalog);
         std::vector<std::pair<AssetId, std::string>> products;
         for (const auto &[id, path] : config.product_paths)
         {
@@ -470,6 +482,8 @@ public:
         }
         result->material_views_.reserve(result->material_storage_.size());
         for (const auto &entry : result->material_storage_) result->material_views_.push_back(entry.View());
+        if (auto admitted = render_data::ValidateRendererCatalog(result->View(),std::nullopt); !admitted)
+            throw std::runtime_error(std::string(admitted.Message()));
         return result;
     }
 };

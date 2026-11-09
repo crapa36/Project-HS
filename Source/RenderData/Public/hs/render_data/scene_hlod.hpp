@@ -80,12 +80,13 @@ void ValidateSceneHlodPages(const SceneHlod &scene, std::span<const GeometryData
 [[nodiscard]] std::vector<std::byte> EncodeSceneHlod(const SceneHlod &scene);
 [[nodiscard]] SceneHlod DecodeSceneHlod(std::span<const std::byte> bytes);
 
-// Owns decoded, validated metadata and page-local proxy references for offline admission.
+// Owns decoded, validated metadata shared by offline admission and native views.
 class AdmittedSceneHlod
 {
 public:
     explicit AdmittedSceneHlod(std::span<const std::byte> bytes);
     [[nodiscard]] const SceneHlod &Value() const noexcept { return scene_; }
+    [[nodiscard]] std::uint64_t RetainedBytes() const noexcept;
     void ValidatePage(std::uint32_t page_index, const PreparedGeometryPage &page) const;
 private:
     SceneHlod scene_;

@@ -205,12 +205,8 @@ Result ScreenOverlaySystem::RegisterFrame(RenderGraphBuilder &graph,const Screen
     std::uint32_t count{};
     for(const auto &v:input.commands)
     {
-        const float values[]{v.color.x,v.color.y,v.color.z,v.hdr,v.alpha,v.gradient_age,v.envelope,v.center_clear,v.edge_power,
-            v.source_direction.x,v.source_direction.y,v.source_direction.z};
-        if(!std::all_of(std::begin(values),std::end(values),[](float x){return std::isfinite(x);})||v.color.x<0||v.color.y<0||v.color.z<0||v.hdr<0||v.alpha<0||v.alpha>1||
-           v.gradient_age<0||v.gradient_age>1||v.envelope<0||v.envelope>1||v.center_clear<0||v.center_clear>=1||v.edge_power<=0||
-           v.gradient_row>=gradient.Height||v.shape>VfxScreenShape::DirectionalArc)
-            return Failure(ErrorCode::InvalidArgument,"Screen overlay command violates its analytic opacity contract.");
+        if(v.gradient_row>=gradient.Height)
+            return Failure(ErrorCode::InvalidArgument,"Screen overlay command exceeds the native gradient LUT.");
         if(v.alpha==0)continue;
         const auto dot=[](Float3 a,DirectX::XMFLOAT3 b){return a.x*b.x+a.y*b.y+a.z*b.z;};
         commands[count++]={{v.color.x,v.color.y,v.color.z,1},{v.alpha,v.hdr,v.gradient_age,v.envelope},

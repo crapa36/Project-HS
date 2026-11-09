@@ -57,7 +57,7 @@ struct LocalProbeRuntimeFrameInputs
     std::shared_ptr<const StaticRenderScene> scene;
     std::span<const LightView> lights; // Same authoritative static lights bound below.
     std::uint32_t static_instance_generation{};
-    std::uint64_t material_parameter_revision{}, pipeline_revision{}; // Material overrides since admitted Generation.
+    std::uint64_t material_parameter_revision{}, pipeline_revision{}; // Material: 0 matches the admitted Generation, otherwise a unique publication stamp.
     float foliage_density{};
     const renderer_detail::FrameConstants *frame_constants{}; // Copied at Register.
     std::span<const LocalProbePageRevision> page_revisions;

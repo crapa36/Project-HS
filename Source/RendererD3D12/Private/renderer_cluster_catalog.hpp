@@ -102,11 +102,8 @@ struct ClusterCatalogPage
 {
     std::string logical_id;
     RendererAssetSource source;
-    std::string digest;
     bool pinned{};
 };
-using ClusterCatalogRead = std::function<Result(const RendererAssetSource &, std::vector<std::byte> &)>;
-
 // Owns one of the fourteen environment material catalogs. The selected
 // Generation is immutable: Load reads only GHI1, while page paths/digests are
 // retained for the existing nonblocking native streaming path.
@@ -114,8 +111,8 @@ class EnvironmentClusterCatalog
 {
 public:
     [[nodiscard]] Result Load(const RendererConfig &config,
-        const render_data::PackageView &main_package, std::string_view main_product_id,
-        const ClusterCatalogRead &read);
+        const render_data::PackageView &main_package, std::string_view main_product_id);
+    // Called only after the source/AssetIo verified these exact retained bytes.
     [[nodiscard]] Result DecodePage(std::uint32_t page_index,
         std::span<const std::byte> bytes, render_data::GeometryData &output,
         const std::function<void(const render_data::PackageView &, const render_data::GeometryData &)> &admit = {}) const;

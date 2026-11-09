@@ -218,8 +218,10 @@ void EnvironmentIndirectLightingComponents(bool diffuse_consumed,HsSurfaceClosur
     float3 F0=prepared.f0;
     ambient_diffuse=0.0;
     ambient_specular=0.0;
-    [branch] if(HsBsdfCanUseCoatedIbl(closure,nv))
+    [branch] if(HsBsdfCanUseCoatedIbl(closure))
     {
+        // The sampled lobe rejects a non-facing view; positive grazing uses the validated LUT.
+        if(nv<=0.0) return;
 #ifdef HS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS
         HsTranslucencyDiagnosticsAdd(28u);
 #endif

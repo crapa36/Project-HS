@@ -459,13 +459,6 @@ void ValidateGeometryHierarchyPages(const GeometryHierarchy &hierarchy,
     }
 }
 
-void ValidateGeometryHierarchyPage(const GeometryHierarchy &hierarchy,
-    std::uint32_t page_index, const GeometryData &page)
-{
-    ValidateGeometryHierarchy(hierarchy);
-    ValidatePagePayload(hierarchy, page_index, page);
-}
-
 AdmittedGeometryHierarchy::AdmittedGeometryHierarchy(std::span<const std::byte> bytes)
     : hierarchy_(DecodeGeometryHierarchy(bytes)), page_clusters_(hierarchy_.pages.size())
 {

@@ -1,5 +1,7 @@
 #include "geometry_cooker.hpp"
+#include "geometry_hierarchy_cooker.hpp"
 #include "scene_hlod_cooker.hpp"
+#include <hs/render_data/geometry_descriptor.hpp>
 #include <hs/presentation/environment_layout.hpp>
 #include <hs/render_data/material_schema.hpp>
 #include <hs/render_data/material_descriptor.hpp>
@@ -40,6 +42,35 @@ rd::GeometryData Grid(bool nonplanar = false)
                            vertex(x + 1, z), vertex(x, z + 1), vertex(x + 1, z + 1)})
                 vertices.push_back(v);
     return gc::CookGeometry(vertices, 0);
+}
+void TestSerializedHierarchyPages()
+{
+    const auto geometry = Grid();
+    std::vector<rd::ExpandedVertex> source;
+    for (const auto index : geometry.indices) source.push_back(geometry.vertices[index]);
+    gc::GeometryHierarchyCookOptions options;
+    options.max_page_meshlets = 1;
+    const auto cooked = gc::CookGeometryHierarchy(source, geometry.flags, "render/hierarchy/fixture", {}, options);
+    const auto hierarchy_bytes = rd::EncodeGeometryHierarchy(cooked.hierarchy);
+    const rd::AdmittedGeometryHierarchy admitted(hierarchy_bytes);
+    Check(cooked.pages.size() > 1, "hierarchy fixture must span multiple serialized pages");
+    for (std::uint32_t index = 0; index < cooked.pages.size(); ++index)
+    {
+        const auto id = hs::MakeAssetId(cooked.hierarchy.pages[index].logical_id);
+        const auto bytes = rd::BuildGeometryPage(id, {}, cooked.pages[index]);
+        const auto prepared = rd::PrepareGeometryPagePayload(bytes, id, geometry.flags);
+        admitted.ValidatePage(index, prepared);
+    }
+    auto different_material = cooked.pages.front();
+    for (auto &vertex : different_material.vertices) vertex.material_index = 1;
+    for (auto &submesh : different_material.submeshes) submesh.material_index = 1;
+    const auto id = hs::MakeAssetId(cooked.hierarchy.pages.front().logical_id);
+    const auto bytes = rd::BuildGeometryPage(id, {}, different_material);
+    const auto prepared = rd::PrepareGeometryPagePayload(bytes, id, geometry.flags);
+    bool rejected{};
+    try { admitted.ValidatePage(0, prepared); }
+    catch (const std::exception &) { rejected = true; }
+    Check(rejected, "valid serialized page cannot substitute a different hierarchy material");
 }
 void TestCertifiedTriangleDistanceBound()
 {
@@ -311,7 +342,8 @@ void TestIndexedVertexFieldIdentity()
 }
 void Validate(const gc::CookedSceneHlod &cooked, std::uint32_t page_limit)
 {
-    const auto decoded = rd::DecodeSceneHlod(rd::EncodeSceneHlod(cooked.scene));
+    const rd::AdmittedSceneHlod admitted(rd::EncodeSceneHlod(cooked.scene));
+    const auto &decoded = admitted.Value();
     rd::ValidateSceneHlodPages(decoded, cooked.pages);
     for (const auto &group : decoded.groups)
     {
@@ -523,6 +555,7 @@ int main()
     {
         TestAssetActionSnapshot();
         TestGameDataFloatConversion();
+        TestSerializedHierarchyPages();
         TestCertifiedTriangleDistanceBound();
         TestAnalyticErrorSurfaces();
         TestGeometryErrorQualificationFallback();

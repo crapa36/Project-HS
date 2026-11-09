@@ -17,17 +17,6 @@ Result HlodFailure(std::string message)
 {
     return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", std::move(message));
 }
-std::string HlodDigest(std::span<const std::byte> bytes)
-{
-    constexpr char hex[] = "0123456789abcdef";
-    std::string result = "sha256:";
-    for (const auto value : render_data::Sha256(bytes))
-    {
-        const auto byte = std::to_integer<unsigned>(value);
-        result += hex[byte >> 4]; result += hex[byte & 15];
-    }
-    return result;
-}
 std::string ProductDigest(const RendererConfig &config, const std::string &id)
 {
     const auto digest = RendererProductDigest(config, id);
@@ -123,42 +112,41 @@ Result D3D12Renderer::Impl::AppendHlodPages(ClusterRuntimeState &runtime)
         next->generation = runtime.generation;
         RendererAssetSource path;
         if (auto result = ResolveRendererAsset(config, next->logical_id, path); !result) return result;
+        if (auto result = path.BindExpectedDigest(ProductDigest(config, next->logical_id)); !result) return result;
         std::vector<std::byte> bytes;
         if (auto result = ReadBinary(path, bytes); !result) return result;
-        if (!path.IsPacked() && HlodDigest(bytes) != ProductDigest(config, next->logical_id))
-            return HlodFailure("SHL1 bytes differ from selected Generation digest.");
-        next->scene = render_data::DecodeSceneHlod(bytes);
-        if (next->scene.scene_asset_id.value != MakeAssetId(next->logical_id).value)
+        next->scene = std::make_shared<const render_data::AdmittedSceneHlod>(bytes);
+        if (next->scene->Value().scene_asset_id.value != MakeAssetId(next->logical_id).value)
             return HlodFailure("SHL1 scene asset identity differs from selected product.");
-        for (const auto &dependency : next->scene.dependencies)
+        for (const auto &dependency : next->scene->Value().dependencies)
         {
             RendererAssetSource resolved;
             if (auto result = ResolveRendererAsset(config, dependency, resolved); !result) return result;
             (void)ProductDigest(config, dependency);
         }
         next->page_base = static_cast<std::uint32_t>(runtime.cpu.pages.size());
-        if (next->scene.pages.size() > UINT32_MAX - next->page_base)
+        if (next->scene->Value().pages.size() > UINT32_MAX - next->page_base)
             return HlodFailure("Shared HLOD page directory exceeds32-bit addressing.");
-        for (const auto &page : next->scene.pages)
+        for (const auto &page : next->scene->Value().pages)
         {
             RendererAssetSource resolved;
             if (auto result = ResolveRendererAsset(config, page.logical_id, resolved); !result) return result;
+            if (auto result = resolved.BindExpectedDigest(ProductDigest(config, page.logical_id)); !result) return result;
             next->page_sources.push_back(std::move(resolved));
-            next->page_digests.push_back(ProductDigest(config, page.logical_id));
         }
-        for (const auto &proxy : next->scene.proxies)
-            next->proxy_material_ordinals.push_back(MaterialOrdinal(next->scene, proxy));
-        next->group_pages.resize(next->scene.groups.size());
-        next->group_priorities.resize(next->scene.groups.size());
-        next->admitted_groups.resize(next->scene.groups.size());
-        std::vector<std::uint32_t> page_groups(next->scene.pages.size(), render_data::kNoSceneHlodGroup);
-        for (std::uint32_t group = 0; group < next->scene.groups.size(); ++group)
+        for (const auto &proxy : next->scene->Value().proxies)
+            next->proxy_material_ordinals.push_back(MaterialOrdinal(next->scene->Value(), proxy));
+        next->group_pages.resize(next->scene->Value().groups.size());
+        next->group_priorities.resize(next->scene->Value().groups.size());
+        next->admitted_groups.resize(next->scene->Value().groups.size());
+        std::vector<std::uint32_t> page_groups(next->scene->Value().pages.size(), render_data::kNoSceneHlodGroup);
+        for (std::uint32_t group = 0; group < next->scene->Value().groups.size(); ++group)
         {
-            const auto &entry = next->scene.groups[group];
+            const auto &entry = next->scene->Value().groups[group];
             auto &pages = next->group_pages[group];
             for (std::uint32_t proxy = entry.first_proxy; proxy < entry.first_proxy + entry.proxy_count; ++proxy)
             {
-                const auto page = next->scene.proxies[proxy].page_index;
+                const auto page = next->scene->Value().proxies[proxy].page_index;
                 if (page_groups[page] != render_data::kNoSceneHlodGroup && page_groups[page] != group)
                     return HlodFailure("A scene HLOD page is shared by distinct group transactions.");
                 page_groups[page] = group;
@@ -169,9 +157,9 @@ Result D3D12Renderer::Impl::AppendHlodPages(ClusterRuntimeState &runtime)
         }
         hlod_runtime = std::move(next);
         auto &hlod = *hlod_runtime;
-        for (std::uint32_t local = 0; local < hlod.scene.pages.size(); ++local)
+        for (std::uint32_t local = 0; local < hlod.scene->Value().pages.size(); ++local)
         {
-            const auto &page = hlod.scene.pages[local];
+            const auto &page = hlod.scene->Value().pages[local];
             ClusterPageStream stream;
             stream.catalog = kClusterRuntimeCatalogs; stream.local_page = local;
             stream.logical_slot = hlod.page_base + local;
@@ -192,15 +180,13 @@ Result D3D12Renderer::Impl::AppendHlodPages(ClusterRuntimeState &runtime)
                 try
                 {
                     const auto &value = *owner;
-                    const auto &entry = value.scene.pages.at(local);
-                    if (HlodDigest(payload) != value.page_digests.at(local))
-                        return HlodFailure("HLOD page differs from selected Generation digest.");
+                    const auto &entry = value.scene->Value().pages.at(local);
                     const auto package = render_data::ReadPackage(payload, MakeAssetId(entry.logical_id),
                         render_data::PackageReadMode::GeometryDecoderValidatesVertices);
-                    if (package.dependencies != value.scene.dependencies)
+                    if (package.dependencies != value.scene->Value().dependencies)
                         return HlodFailure("HLOD page dependencies differ from its scene directory.");
                     auto geometry = render_data::DecodeGeometryPagePayload(package, entry.geometry_flags);
-                    render_data::ValidateSceneHlodPage(value.scene, local, geometry);
+                    render_data::ValidateSceneHlodPage(value.scene->Value(), local, geometry);
                     if (development_catalog)
                         static_cast<void>(development_catalog->AdmitGeometry(
                             MakeAssetId(entry.logical_id), payload, package, geometry));
@@ -284,7 +270,7 @@ Result D3D12Renderer::Impl::BeginHlodViewPackage(const RenderPackage &input)
         {
             owner = std::make_unique<HlodViewRuntime>();
             owner->view_id = input_view.id; owner->session_id = session;
-            owner->group_priorities.resize(runtime.scene.groups.size());
+            owner->group_priorities.resize(runtime.scene->Value().groups.size());
         }
         owner->participating = true;
         const auto owned = owned_views.find(input_view.id.value);
@@ -294,8 +280,8 @@ Result D3D12Renderer::Impl::BeginHlodViewPackage(const RenderPackage &input)
         if (input_view.camera_cut || (prior_origins && input_view.scene_origin != prior_origin))
             InvalidateHlodQualification(*owner);
         if (!scene || scene->content_generation_id != runtime.content_generation ||
-            scene->layout_abi != runtime.scene.layout_abi || scene->eligible_layout_digest != runtime.scene.layout_digest ||
-            scene->eligible_static_members.size() != runtime.scene.members.size())
+            scene->layout_abi != runtime.scene->Value().layout_abi || scene->eligible_layout_digest != runtime.scene->Value().layout_digest ||
+            scene->eligible_static_members.size() != runtime.scene->Value().members.size())
         {
             InvalidateHlodQualification(*owner);
             owner->matching_scene.reset();
@@ -317,9 +303,9 @@ Result D3D12Renderer::Impl::PrepareHlodStaticScene(
         view.matching_scene.reset(); InvalidateHlodQualification(view);
         return PumpHlodDemand();
     };
-    if (!runtime.prepared_scene.Resolve(source, runtime.scene, runtime.content_generation,
+    if (!runtime.prepared_scene.Resolve(source, runtime.scene->Value(), runtime.content_generation,
                                          runtime.proxy_material_ordinals)) return invalidate();
-    const auto total = source->instances.size() + runtime.scene.proxies.size();
+    const auto total = source->instances.size() + runtime.scene->Value().proxies.size();
     if (total > UINT32_MAX) return HlodFailure("HLOD static slot span exceeds32-bit addressing.");
     if (total > view.static_capacity)
     {
@@ -340,7 +326,7 @@ Result D3D12Renderer::Impl::PrepareHlodStaticScene(
             return ReadBinary(path, bytes);
         };
         std::uint64_t default_bytes{}, upload_bytes{};
-        if (auto result = view.system.AllocationRequirements(device.Get(), runtime.scene,
+        if (auto result = view.system.AllocationRequirements(device.Get(), *runtime.scene,
             static_cast<std::uint32_t>(total), kFrameCount, default_bytes, upload_bytes); !result) return result;
         SampleAllocatorBudgetStats(false, false);
         const auto upload_segment = ResidencySegmentForHeap(D3D12_HEAP_TYPE_UPLOAD);
@@ -411,7 +397,7 @@ Result D3D12Renderer::Impl::PrepareHlodFrame(std::uint32_t frame_slot,
     for (std::uint32_t command = 0; command < order.size(); ++command)
     {
         const auto index = order[command];
-        const auto &proxy = runtime.scene.proxies[index];
+        const auto &proxy = runtime.scene->Value().proxies[index];
         const GpuStaticDrawRef expected{view.proxy_slot_base + index,
             proxy.mesh_semantic, 1.0f, generation};
         auto &ref = refs[leaf_count + command];
@@ -432,16 +418,16 @@ Result D3D12Renderer::Impl::PrepareHlodFrame(std::uint32_t frame_slot,
     if (rebuild_bindings)
     {
         native.members.clear(); native.bindings.clear(); native.buckets.clear(); native.material_ordinals.clear();
-        native.members.reserve(runtime.scene.members.size());
-        for (std::size_t index = 0; index < runtime.scene.members.size(); ++index)
-            native.members.push_back({runtime.scene.members[index].stable_id,
+        native.members.reserve(runtime.scene->Value().members.size());
+        for (std::size_t index = 0; index < runtime.scene->Value().members.size(); ++index)
+            native.members.push_back({runtime.scene->Value().members[index].stable_id,
                 runtime.prepared_scene.member_slots[index], generation});
         native.bindings.resize(order.size());
     }
     for (std::uint32_t command = 0; command < order.size(); ++command)
     {
         const auto index = order[command];
-        const auto &proxy = runtime.scene.proxies[index];
+        const auto &proxy = runtime.scene->Value().proxies[index];
         const auto material = runtime.proxy_material_ordinals[index];
         const auto ref_index = static_cast<std::uint32_t>(leaf_count + command);
         const auto slot = view.proxy_slot_base + index;
@@ -487,7 +473,7 @@ Result D3D12Renderer::Impl::PrepareHlodFrame(std::uint32_t frame_slot,
     native.prepared_hlod_generation = runtime.generation;
     native.prepared_leaf_count = leaf_count;
     native.prepared_pipeline_revision = pipeline_revision;
-    const auto readback_bytes = std::max<std::uint64_t>(4u, runtime.scene.pages.size() * 4u) + 64u;
+    const auto readback_bytes = std::max<std::uint64_t>(4u, runtime.scene->Value().pages.size() * 4u) + 64u;
     const auto ensure = [&](AllocationResource &resource, ResidencyTicket &ticket, std::uint64_t bytes,
                             D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state) -> Result {
         if (resource.resource && resource.resource->GetDesc().Width >= bytes) return Result::Success();
@@ -609,7 +595,7 @@ Result D3D12Renderer::Impl::AddHlodFramePasses(std::uint32_t frame_slot,std::uin
         copy.Read(state.outputs.page_demand,Access::CopySource);copy.Read(state.outputs.status,Access::CopySource);
         (void)copy.Write(graph.Version(state.readback),Access::CopyDest);
     }
-    copy.SetExecute([frame=&native,bytes=hlod_runtime->scene.pages.size()*4ull](RenderPassContext &context){
+    copy.SetExecute([frame=&native,bytes=hlod_runtime->scene->Value().pages.size()*4ull](RenderPassContext &context){
         auto *list=static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         if(bytes)list->CopyBufferRegion(frame->readback.resource.Get(),0,frame->outputs.resources[5],0,bytes);
         list->CopyBufferRegion(frame->readback.resource.Get(),bytes,frame->outputs.resources[6],0,64u);
@@ -716,11 +702,11 @@ Result D3D12Renderer::Impl::PumpHlodDemand()
         for (auto &frame : view.frames)
         {
             if (!frame.readback_pending || !frame.readback_completion.IsSatisfiedBy(completed)) continue;
-            const auto bytes = runtime.scene.pages.size() * 4u;
+            const auto bytes = runtime.scene->Value().pages.size() * 4u;
             void *mapped{}; const D3D12_RANGE read{0, bytes + 64u};
             const auto hr = frame.readback.resource->Map(0, &read, &mapped);
             if (FAILED(hr)) return HResultFailure("Map HLOD page demand/status", hr);
-            std::vector<std::uint32_t> demand(runtime.scene.pages.size());
+            std::vector<std::uint32_t> demand(runtime.scene->Value().pages.size());
             std::array<std::uint32_t, 16> status{};
             if (bytes) std::memcpy(demand.data(), mapped, bytes);
             std::memcpy(status.data(), static_cast<const std::byte *>(mapped) + bytes, 64u);
@@ -746,10 +732,10 @@ Result D3D12Renderer::Impl::PumpHlodDemand()
                 if (priority && (!std::isfinite(std::bit_cast<float>(priority)) || std::bit_cast<float>(priority) <= 0.0f))
                     return HlodFailure("HLOD demand priority must encode a finite positive value.");
             std::fill(view.group_priorities.begin(), view.group_priorities.end(), 0u);
-            for (std::uint32_t group = 0; group < runtime.scene.groups.size(); ++group)
+            for (std::uint32_t group = 0; group < runtime.scene->Value().groups.size(); ++group)
             {
                 const auto &pages = runtime.group_pages[group];
-                if (!runtime.scene.groups[group].child_count || pages.empty() || pages.size() > capacity) continue;
+                if (!runtime.scene->Value().groups[group].child_count || pages.empty() || pages.size() > capacity) continue;
                 std::uint32_t priority{}; bool complete = true;
                 for (const auto page : pages)
                 {
@@ -763,17 +749,17 @@ Result D3D12Renderer::Impl::PumpHlodDemand()
         for (std::uint32_t group = 0; group < runtime.group_priorities.size(); ++group)
             runtime.group_priorities[group] = std::max(runtime.group_priorities[group], view.group_priorities[group]);
     }
-    std::vector<std::uint8_t> admitted(runtime.scene.groups.size());
+    std::vector<std::uint8_t> admitted(runtime.scene->Value().groups.size());
     std::vector<std::uint32_t> frontier;
     std::uint32_t admitted_pages{};
     const auto admit = [&](std::uint32_t group) {
         const auto &pages = runtime.group_pages[group];
         if (!runtime.group_priorities[group] || pages.size() > capacity - admitted_pages) return;
-        const auto &entry = runtime.scene.groups[group];
+        const auto &entry = runtime.scene->Value().groups[group];
         const auto first = static_cast<std::uint64_t>(entry.first_member), end = first + entry.member_count;
         for (const auto other : frontier)
         {
-            const auto &interval = runtime.scene.groups[other];
+            const auto &interval = runtime.scene->Value().groups[other];
             const auto other_first = static_cast<std::uint64_t>(interval.first_member);
             if (first < other_first + interval.member_count && other_first < end) return;
         }
@@ -785,7 +771,7 @@ Result D3D12Renderer::Impl::PumpHlodDemand()
     for (std::uint32_t group = 0; group < runtime.admitted_groups.size(); ++group)
         if (runtime.admitted_groups[group]) admit(group);
     const auto retained = admitted;
-    std::vector<std::uint32_t> order(runtime.scene.groups.size());
+    std::vector<std::uint32_t> order(runtime.scene->Value().groups.size());
     std::iota(order.begin(), order.end(), 0u);
     std::ranges::sort(order, [&](auto left, auto right) {
         const auto a = runtime.group_priorities[left], b = runtime.group_priorities[right];
@@ -793,7 +779,7 @@ Result D3D12Renderer::Impl::PumpHlodDemand()
     });
     for (const auto group : order) if (!admitted[group]) admit(group);
     const auto apply = [&](const std::vector<std::uint8_t> &groups) -> Result {
-        std::vector<std::uint8_t> pages(runtime.scene.pages.size());
+        std::vector<std::uint8_t> pages(runtime.scene->Value().pages.size());
         for (std::uint32_t group = 0; group < groups.size(); ++group)
             if (groups[group]) for (const auto page : runtime.group_pages[group]) pages[page] = 1u;
         for (std::uint32_t page = 0; page < pages.size(); ++page)

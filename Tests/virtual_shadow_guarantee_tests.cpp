@@ -382,6 +382,54 @@ void TestVirtualShadowGuarantees()
     auto invalid_skin=skin_enclosure;invalid_skin.maximum.z=std::numeric_limits<float>::infinity();
     Require(!hs::ShadowSurfaceCasterSphere(invalid_skin),"unbounded skin enclosure is never a qualified caster");
 
+    const std::array<double,3> local_lo{-2,-1,-4},local_hi{3,5,2};
+    struct SurfaceTransformCase { hs::Float3 scale,center;double yaw,wind; };
+    const std::array transforms{
+        SurfaceTransformCase{{2,.5f,3},{4,-2,7},0,.2},
+        SurfaceTransformCase{{1.25f,2,.75f},{-8,5,3},.63,.5},
+        SurfaceTransformCase{{-1.5f,-.5f,-2},{3,7,-4},-1.1,.25},
+        SurfaceTransformCase{{-.75f,2,1.25f},{2,-3,6},1.5707963267948966,.1},
+        SurfaceTransformCase{{0,1.5f,0},{-1,2,4},-.2,.05},
+        SurfaceTransformCase{{.75f,1.25f,2},{100000,-200000,300000},.4,.5}};
+    for(const auto &transform:transforms)
+    {
+        const auto bounds=hs::TransformShadowSurfaceBounds(local_lo,local_hi,transform.scale,
+            transform.center,transform.yaw,transform.wind);
+        Require(bool(bounds),"finite yaw-scale transform produces surface bounds");
+        const double c=std::cos(transform.yaw),s=std::sin(transform.yaw);
+        for(unsigned corner=0;corner<8;++corner)
+        {
+            const double x=(corner&1?local_hi[0]:local_lo[0])*transform.scale.x;
+            const double y=(corner&2?local_hi[1]:local_lo[1])*transform.scale.y;
+            const double z=(corner&4?local_hi[2]:local_lo[2])*transform.scale.z;
+            const std::array<double,3> point{
+                double(transform.center.x)+c*x+s*z,
+                double(transform.center.y)+y,
+                double(transform.center.z)-s*x+c*z};
+            const std::array<double,3> minimum{bounds->minimum.x,bounds->minimum.y,bounds->minimum.z};
+            const std::array<double,3> maximum{bounds->maximum.x,bounds->maximum.y,bounds->maximum.z};
+            for(unsigned axis=0;axis<3;++axis)
+                Require(minimum[axis]<=point[axis]-transform.wind&&maximum[axis]>=point[axis]+transform.wind,
+                        "transformed surface AABB encloses every yawed corner with wind padding");
+        }
+        Require(bounds->minimum.w==0.0f&&bounds->maximum.w==1.0f,
+                "transformed receiver keeps its world-bound role");
+    }
+    const auto axis_aligned=hs::TransformShadowSurfaceBounds(local_lo,local_hi,
+        transforms[0].scale,transforms[0].center,transforms[0].yaw,transforms[0].wind);
+    Require(axis_aligned&&std::abs(double(axis_aligned->minimum.x)+.2)<.001&&
+            std::abs(double(axis_aligned->maximum.x)-10.2)<.001&&
+            std::abs(double(axis_aligned->minimum.y)+2.7)<.001&&
+            std::abs(double(axis_aligned->maximum.y)-.7)<.001&&
+            std::abs(double(axis_aligned->minimum.z)+5.2)<.001&&
+            std::abs(double(axis_aligned->maximum.z)-13.2)<.001,
+            "zero-yaw scaled bounds retain tight literal extents with only existing outward padding");
+    Require(!hs::TransformShadowSurfaceBounds(local_lo,local_hi,transforms[0].scale,transforms[0].center,
+                std::numeric_limits<double>::quiet_NaN(),transforms[0].wind)&&
+            !hs::TransformShadowSurfaceBounds(local_lo,local_hi,transforms[0].scale,
+                {std::numeric_limits<float>::max(),0,0},0,transforms[0].wind),
+            "nonfinite yaw and float-range overflow cannot produce surface bounds");
+
     facts=CompleteFacts();
     facts.draw_group_count = 0;
     facts.segment_capacity = 0;

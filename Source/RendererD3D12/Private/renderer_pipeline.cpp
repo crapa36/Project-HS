@@ -1233,7 +1233,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
         post.PS = {pixel_shader.data(), pixel_shader.size()};
         const auto create_result = pipeline_cache.CreateGraphics(
             &post, IID_PPV_ARGS(pipeline));
-        if (FAILED(create_result)) CountValidationErrors();
+        if (FAILED(create_result)) (void)CountValidationErrors();
         return SUCCEEDED(create_result) ? Result::Success()
                                         : HResultFailure("Create post-process PSO", create_result);
     };
@@ -1365,6 +1365,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     return CreateClusterPipelines(pipeline_config);
 }
 
+#if defined(HS_DEVELOPMENT_TOOLS)
 Result D3D12Renderer::ReloadShaderGeneration(
     const std::string &generation_id,
     const std::unordered_map<std::string, std::filesystem::path> &product_paths,
@@ -1408,6 +1409,7 @@ Result D3D12Renderer::ReloadShaderGeneration(
     RendererConfig candidate = impl_->config;
     // This API explicitly selects loose developer Generation products.
     candidate.packed_content.reset();
+    candidate.prepared_renderer_catalog.reset();
     candidate.packed_bulks = {};
     candidate.packed_textures = {};
     candidate.packed_geometry = {};
@@ -1749,6 +1751,8 @@ Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config, bool
     return result;
 }
 
+
+#endif
 
 void D3D12Renderer::Impl::FillMaterialFrameConstants(renderer_detail::FrameConstants &constants) const
 {

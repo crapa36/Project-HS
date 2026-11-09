@@ -324,7 +324,6 @@ Result D3D12Renderer::Impl::ReloadResidentGeneration(RendererConfig candidate_co
     ++pipeline_revision;
     for (auto &[id, view] : owned_views) view->ui_draw_content.fill(nullptr);
     ++material_parameter_revision;
-    baked_generation_material_revision = material_parameter_revision;
     baked_generation_pipeline_revision = pipeline_revision;
     static_gpu_scene.reset();
     InvalidateCanonicalDeformationAfterCompletion();
@@ -393,6 +392,7 @@ Result D3D12Renderer::ReloadContentGeneration(
     RendererConfig candidate = impl_->config;
     // This API explicitly selects loose developer Generation products.
     candidate.packed_content.reset();
+    candidate.prepared_renderer_catalog.reset();
     candidate.packed_bulks = {};
     candidate.packed_textures = {};
     candidate.packed_geometry = {};

@@ -420,7 +420,11 @@ void RendererAssetIo::SubmitQueuedReads() noexcept
 Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &streaming,
                              ResidencyManager &residency, AssetReadCompletion &output)
 {
-    output = {};
+    output.ready = output.cancelled = false;
+    output.storage = {};
+    // Release the previous payload without allocating another Debug iterator proxy.
+    output.bytes.clear();
+    output.bytes.shrink_to_fit();
     const auto found = impl_->reads.find(request.value);
     if (found == impl_->reads.end()) return IoFailure("Asset read owner is missing.");
     auto &read = *found->second;
@@ -428,11 +432,17 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
     read.cancelled = read.cancelled || !page || page->state == StreamingPageState::Cancelled ||
         page->content_generation != read.input.generation;
     if (read.cancelled) read.cancellation->store(true, std::memory_order_release);
+    const auto fail_completed_read = [&](std::string message) {
+        static_cast<void>(streaming.FinishRead(request));
+        static_cast<void>(streaming.Cancel(request));
+        static_cast<void>(residency.ReleaseNow(read.storage));
+        impl_->reads.erase(found);
+        return IoFailure(std::move(message));
+    };
     HRESULT hr = S_OK;
 #if HS_WITH_DIRECTSTORAGE
     if (read.transport)
     {
-        read.transport->ReadErrors();
         if (wait_for_reads_)
         {
             const auto event_result = WaitForSingleObject(read.event.value, INFINITE);
@@ -451,6 +461,8 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
             if (event_result == WAIT_TIMEOUT) return Result::Success();
             if (event_result != WAIT_OBJECT_0) return IoFailure("DirectStorage completion event wait failed.");
         }
+        // Error details borrow the completed request's file; drain them before its owner retires.
+        read.transport->ReadErrors();
         if (SUCCEEDED(hr) && !read.cancelled)
         {
             if (!read.prepare_future.valid())
@@ -486,10 +498,10 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
                         if (!cancellation->load(std::memory_order_acquire) && *prepare) (*prepare)(*bytes);
                     });
                 }
-                catch (...)
+                catch (const std::exception &error)
                 {
-                    read.cpu_task = {};
-                    throw;
+                    return fail_completed_read("Could not submit immutable asset verification: " +
+                                               std::string(error.what()));
                 }
             }
         }
@@ -501,14 +513,9 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
             try { read.prepare_future.get(); }
             catch (const std::exception &error)
             {
-                if (!read.cancelled)
-                {
-                    static_cast<void>(streaming.FinishRead(request));
-                    static_cast<void>(streaming.Cancel(request));
-                    static_cast<void>(residency.ReleaseNow(read.storage));
-                    impl_->reads.erase(found);
-                    return IoFailure("Immutable asset verification or preparation failed: " + std::string(error.what()));
-                }
+                // Cancellation does not turn a completed integrity/prepare failure into success.
+                return fail_completed_read("Immutable asset verification or preparation failed: " +
+                                           std::string(error.what()));
             }
         }
     }
@@ -522,13 +529,13 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
         try { read.bytes = read.future.get(); }
         catch (const std::exception &error)
         {
-            static_cast<void>(streaming.FinishRead(request));
-            static_cast<void>(streaming.Cancel(request));
-            static_cast<void>(residency.ReleaseNow(read.storage));
-            impl_->reads.erase(found);
-            return IoFailure("Immutable asset read failed: " + std::string(error.what()));
+            return fail_completed_read("Immutable asset read failed: " + std::string(error.what()));
         }
     }
+    if (SUCCEEDED(hr) && !read.cancelled &&
+        (read.bytes.size() != read.input.expected_bytes ||
+         !residency.CommitHost(read.storage, read.bytes.capacity())))
+        return fail_completed_read("Completed immutable read size or shared host accounting is invalid.");
     static_cast<void>(streaming.FinishRead(request));
     output.ready = true;
     output.cancelled = read.cancelled;
@@ -539,13 +546,6 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
     }
     else
     {
-        if (read.bytes.size() != read.input.expected_bytes || !residency.CommitHost(read.storage, read.bytes.capacity()))
-        {
-            static_cast<void>(streaming.Cancel(request));
-            static_cast<void>(residency.ReleaseNow(read.storage));
-            impl_->reads.erase(found);
-            return IoFailure("Completed immutable read size or shared host accounting is invalid.");
-        }
         output.bytes = std::move(read.bytes);
         output.storage = read.storage;
     }
@@ -563,8 +563,8 @@ void RendererAssetIo::Cancel(StreamingRequestId request, StreamingManager &strea
 #if HS_WITH_DIRECTSTORAGE
     if (found->second->transport)
     {
-        SubmitQueuedReads(); // Make a deferred owner visible to native cancellation/status tracking.
         found->second->transport->queue->CancelRequestsWithTag(UINT64_MAX, found->second->tag);
+        SubmitQueuedReads(); // Submit completion markers after cancelling deferred reads.
     }
 #endif
 }

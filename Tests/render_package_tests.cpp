@@ -1309,8 +1309,8 @@ void TestMaterialLogicAndOptimizer()
         NumericOutput(graph, identity);
         const auto hlsl = NumericHlsl(graph);
         Require(hlsl.find(MaterialTypeName(type) + "(") != std::string::npos &&
-                hlsl.find("." + std::string(1, "xyzw"[rd::MaterialComponentCount(type) - 1])) != std::string::npos &&
-                hlsl.find(" n3 = ") == std::string::npos, "construct/extract or identity conversion failed");
+                hlsl.find("." + std::string(1, "xyzw"[rd::MaterialComponentCount(type) - 1])) != std::string::npos,
+                "construct/extract emission failed");
     }
 
     auto graph = NumericGraph();

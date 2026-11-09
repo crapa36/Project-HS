@@ -106,7 +106,7 @@ D3D12_RESOURCE_DESC PreintegrateDescription()
 }
 
 constexpr UINT kLegacyCaseCount = 7;
-constexpr UINT kCoatedCaseCount = 72;
+constexpr UINT kCoatedCaseCount = 136;
 constexpr UINT kFresnelCaseCount = 14;
 constexpr UINT kProbeCaseCount = kLegacyCaseCount + kCoatedCaseCount + kFresnelCaseCount + 1;
 

@@ -36,25 +36,27 @@ def statistics(pixels):
             "half_max_components": sum(abs(value) == 65504 for value in finite)}
 
 
-def compare_components(baseline, actual, layers, hdr):
+def compare_components(baseline, actual, hdr, core, normalize):
     if len(baseline) != len(actual):
         raise ValueError("Linearity inputs changed texture extent")
-    maximum_relative_error = [0.0] * 4
+    maximum_relative_error = [0.0] * 3
     mismatched = compared = 0
-    for reference, observed in zip(baseline, actual):
-        if reference[3] <= 0:
-            continue
+    for index in core:
+        reference, observed = baseline[index], actual[index]
         compared += 1
-        for component in range(4):
-            expected = reference[component] * layers * (hdr if component < 3 else 1)
-            value = observed[component]
+        divisor = observed[3] if normalize else 1.0
+        if not math.isfinite(divisor) or divisor <= 0:
+            mismatched += 3
+            continue
+        for component in range(3):
+            expected = reference[component] / reference[3] * hdr
+            value = observed[component] / divisor
             if not math.isfinite(value):
                 mismatched += 1
                 continue
             relative_error = abs(value - expected) / max(abs(expected), 1e-6)
             maximum_relative_error[component] = max(maximum_relative_error[component], relative_error)
-            # .2% accommodates capture/shader rounding, but rejects22-layer half
-            # saturation (66000 ->65504). The same-camera fixture has no fog.
+            # Compare resolved RGB, allowing capture rounding across storage scales.
             if abs(value - expected) > 1e-6 + .002 * abs(expected):
                 mismatched += 1
     return {"compared_pixels": compared, "relative_tolerance": .002, "absolute_tolerance": 1e-6,
@@ -64,10 +66,14 @@ def compare_components(baseline, actual, layers, hdr):
 def analyze(directory):
     cases = [(1, 1), (22, 1), (11, 2), (64, 5.5)]
     baseline = read_surface(directory / "oit-overdraw-1.json", "oit_accumulation", 4)
-    core = [index for index, pixel in enumerate(baseline) if pixel[3] > 0]
+    baseline_revealage = read_surface(directory / "oit-overdraw-1.json", "oit_revealage", 1)
+    if len(baseline_revealage) != len(baseline):
+        raise ValueError("OIT baseline surfaces changed texture extent")
+    core = [index for index, pixel in enumerate(baseline)
+            if pixel[3] > 0 and baseline_revealage[index][0] == 0]
     if not core or not any(any(value > 0 for value in baseline[index][:3]) for index in core):
-        raise ValueError("The one-layer baseline has no actual positive RGB/alpha output")
-    if statistics(baseline)["nonfinite"]:
+        raise ValueError("The one-layer baseline has no actual positive fully-covered core")
+    if statistics(baseline)["nonfinite"] or statistics(baseline_revealage)["nonfinite"]:
         raise ValueError("The one-layer baseline is already nonfinite")
     rows = []
     for frame, (layers, hdr) in enumerate(cases, 1):
@@ -78,35 +84,28 @@ def analyze(directory):
         document = json.loads(metadata.read_text(encoding="utf-8"))
         accumulation_format = next(row["format"] for row in document["resources"]
                                    if row["name"] == "oit_accumulation")
-        if len(accumulation) != len(baseline) or len(revealage) != len(baseline):
+        if any(len(surface) != len(baseline) for surface in (accumulation, revealage, composite)):
             raise ValueError("OIT cases changed texture extent")
         if not any(pixel[3] > 0 for pixel in accumulation):
             raise ValueError(f"Frame {frame} has empty accumulation")
         if not any(pixel[0] < 1 for pixel in revealage):
             raise ValueError(f"Frame {frame} has no transparent coverage")
-        predicted_max = [max(baseline[i][c] * layers * (hdr if c < 3 else 1)
-                             for i in core) for c in range(4)]
         rows.append({"frame": frame, "layers": layers, "input_hdr": hdr,
                      "accumulation_format": accumulation_format,
-                     "predicted_unbounded_component_max": predicted_max,
-                     "observed_component_max": [max((pixel[c] for pixel in accumulation
-                         if math.isfinite(pixel[c])), default=0) for c in range(4)],
-                     "linearity": compare_components(baseline, accumulation, layers, hdr),
+                     "normalized_color": compare_components(baseline, accumulation, hdr, core, True),
+                     "composite_color": compare_components(baseline, composite, hdr, core, False),
+                     "coverage_mismatched_pixels": sum(abs(revealage[i][0]) > 1e-6 for i in core),
+                     "revealage_range_valid": all(math.isfinite(pixel[0]) and 0 <= pixel[0] <= 1
+                                                  for pixel in revealage),
                      "accumulation": statistics(accumulation), "revealage": statistics(revealage),
                      "composite": statistics(composite)})
-    failed = any(row["accumulation"]["nonfinite"] or row["revealage"]["nonfinite"] or row["composite"]["nonfinite"] or
-                 (row["accumulation_format"] == "DXGI_FORMAT_R16G16B16A16_FLOAT" and
-                  row["accumulation"]["half_max_components"]) for row in rows)
-    beyond_half = all(rows[i]["observed_component_max"][3] > 65504 for i in (1, 3))
-    fp32 = all(row["accumulation_format"] == "DXGI_FORMAT_R32G32B32A32_FLOAT" for row in rows)
-    proportional = all(not row["linearity"]["mismatched_components"] for row in rows)
-    # A rescaled writer must not pass this regression accidentally: policy keeps
-    # the existing3000 maximum weight and verifies actual 66000/192000 alpha.
-    weight_preserved = abs(rows[0]["observed_component_max"][3] - 3000) < 1
-    return {"scope": "Actual saved GPU surfaces; arithmetic prediction is separate from observed output",
-            "baseline_nonempty_pixels": len(core), "range_failure_observed": failed,
-            "alpha_22_and_64_exceed_half_max": beyond_half,
-            "precision_regression_passed": fp32 and not failed and proportional and beyond_half and weight_preserved,
+    failed = any(row["accumulation"]["nonfinite"] or row["revealage"]["nonfinite"] or
+                 row["composite"]["nonfinite"] or not row["revealage_range_valid"] or
+                 row["coverage_mismatched_pixels"] or row["normalized_color"]["mismatched_components"] or
+                 row["composite_color"]["mismatched_components"] for row in rows)
+    return {"scope": "Saved surfaces: finite output and normalized/composited RGB in the fully-covered stress core; GPU evidence requires a native capture",
+            "baseline_opaque_core_pixels": len(core), "output_failure_observed": failed,
+            "precision_regression_passed": not failed,
             "cases": rows}
 
 
@@ -160,13 +159,7 @@ def analyze_camera(directory):
 def selfcheck():
     assert statistics([(0, 65504, float("inf"), float("nan"))]) == {
         "nonfinite": 2, "finite_max": 65504, "half_max_components": 1}
-    assert struct.unpack("<e", struct.pack("<e", 3000))[0] == 3000
-    assert 22 * 3000 > 65504 and 11 * 2 * 3000 > 65504
     reference = [(2146, 293.25, 395.75, 3000)]
-    assert compare_components(reference, [(47212, 6451.5, 8706.5, 66000)], 22, 1)["mismatched_components"] == 0
-    assert compare_components(reference, [(47212, 6451.5, 8706.5, 65504)], 22, 1)["mismatched_components"] == 1
-    assert compare_components(reference, [(755392, 103224, 139304, 192000)], 64, 5.5)["mismatched_components"] == 0
-    assert struct.unpack("<f", struct.pack("<f", 192000))[0] == 192000
     camera_rows = [dict(frame=frame, alpha_bounds=[100, 100, 399, 199],
                         alpha_bounds_extent=[300, 100], texture_extent=[640, 360], foreground_depth_pixels=0)
                    for frame in range(1, 7)]
@@ -185,20 +178,30 @@ def selfcheck():
     # these are not saved GPU results or renderer validation evidence.
     with tempfile.TemporaryDirectory(prefix="hs-oit-analyzer-", dir=Path.cwd()) as temporary:
         directory = Path(temporary)
-        for frame, (layers, hdr) in enumerate(((1, 1), (22, 1), (11, 2), (64, 5.5)), 1):
-            resources = []
-            for name, fmt, code, values in (
-                ("oit_accumulation", "DXGI_FORMAT_R32G32B32A32_FLOAT", "ffff",
-                 tuple(reference[0][c] * layers * (hdr if c < 3 else 1) for c in range(4))),
-                ("oit_revealage", "DXGI_FORMAT_R16_FLOAT", "e", (0,)),
-                ("composite_hdr", "DXGI_FORMAT_R16G16B16A16_FLOAT", "eeee", (.7, .1, .2, 1))):
-                filename = f"{frame}-{name}.raw"
-                raw = struct.pack("<" + code, *values)
-                (directory / filename).write_bytes(raw)
-                resources.append(dict(name=name, format=fmt, file=filename, width=1, height=1, row_size=len(raw)))
-            (directory / f"oit-overdraw-{frame}.json").write_text(json.dumps(dict(resources=resources)), encoding="utf-8")
+        def write_fixture(accumulation_format, accumulation_code, scale):
+            for frame, (layers, hdr) in enumerate(((1, 1), (22, 1), (11, 2), (64, 5.5)), 1):
+                resources = []
+                for name, fmt, code, values in (
+                    ("oit_accumulation", accumulation_format, accumulation_code,
+                     tuple(reference[0][c] * scale * layers * (hdr if c < 3 else 1) for c in range(4))),
+                    ("oit_revealage", "DXGI_FORMAT_R16_FLOAT", "e", (0,)),
+                    ("composite_hdr", "DXGI_FORMAT_R16G16B16A16_FLOAT", "eeee",
+                     tuple(reference[0][c] / reference[0][3] * hdr for c in range(3)) + (1,))):
+                    filename = f"{frame}-{name}.raw"
+                    raw = struct.pack("<" + code, *values)
+                    (directory / filename).write_bytes(raw)
+                    resources.append(dict(name=name, format=fmt, file=filename, width=1, height=1, row_size=len(raw)))
+                (directory / f"oit-overdraw-{frame}.json").write_text(json.dumps(dict(resources=resources)), encoding="utf-8")
+        write_fixture("DXGI_FORMAT_R32G32B32A32_FLOAT", "ffff", 1)
         assert analyze(directory)["precision_regression_passed"]
         (directory / "2-oit_accumulation.raw").write_bytes(struct.pack("<ffff", 47212, 6451.5, 8706.5, 65504))
+        assert not analyze(directory)["precision_regression_passed"]
+        write_fixture("DXGI_FORMAT_R16G16B16A16_FLOAT", "eeee", 1 / 256)
+        assert analyze(directory)["precision_regression_passed"]
+        (directory / "4-composite_hdr.raw").write_bytes(struct.pack("<eeee", .01, .01, .01, 1))
+        assert not analyze(directory)["precision_regression_passed"]
+        write_fixture("DXGI_FORMAT_R32G32B32A32_FLOAT", "ffff", 1)
+        (directory / "2-oit_accumulation.raw").write_bytes(struct.pack("<ffff", 47212, 6451.5, 8706.5, float("inf")))
         assert not analyze(directory)["precision_regression_passed"]
 
 
@@ -206,7 +209,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path, nargs="?")
     parser.add_argument("--require-finite", action="store_true",
-                        help="Require finite FP32 output, preserved weights and unsaturated layer/HDR proportionality")
+                        help="Require finite output and correct normalized/composited color and opaque-core coverage")
     parser.add_argument("--camera-basis", action="store_true")
     parser.add_argument("--runner", type=Path)
     parser.add_argument("--generation", type=Path)

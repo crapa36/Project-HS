@@ -1152,10 +1152,6 @@ struct D3D12Renderer::Impl
         ShadowCasterMap scratch_shadow_casters;
         std::shared_ptr<StaticShadowCasterBatch> static_shadow_casters;
         std::uint64_t static_shadow_caster_revision{};
-#ifndef NDEBUG
-        std::unordered_map<ShadowCasterMap::key_type, std::uint64_t, ShadowCasterKeyHash> shadow_caster_key_oracle;
-        bool shadow_caster_key_oracle_prepared{};
-#endif
         std::uint64_t shadow_caster_preparation_epoch{};
         std::array<std::uint32_t, kGeometryPageCapacity> previous_geometry_page_versions{};
         std::uint32_t width{}, height{}, render_width{}, render_height{}, last_presented_index{};
@@ -1415,23 +1411,29 @@ struct D3D12Renderer::Impl
         DisplayState &, std::optional<bool> cadence_suppression = std::nullopt);
     [[nodiscard]] Result PreparePresentationGuides(const RendererConfig &, ViewExtent output, ViewExtent capacity,
         const DisplayState &, SdkPresentationOwner, PresentationGuidesCandidate &) const;
+#if defined(HS_DEVELOPMENT_TOOLS)
     [[nodiscard]] Result ReloadPipeline(RendererConfig candidate_config, bool parameters_changed);
     [[nodiscard]] Result InitializeResidentAssetContext(const RendererConfig &, std::unique_ptr<Impl> &);
     [[nodiscard]] Result PrepareResidentAssetData(Impl &candidate);
     [[nodiscard]] Result PrepareResidentPublication(Impl &candidate);
     void SwapResidentAssetData(Impl &candidate) noexcept;
     void PublishResidentAssetDescriptors(const Impl &candidate) noexcept;
+#endif
     [[nodiscard]] Result SubmitResidentUtilityUpload(ID3D12GraphicsCommandList *, ID3D12CommandAllocator *,
                                                     std::vector<AllocationResource> &);
     void CollectResidentUtilityUploads() noexcept;
     [[nodiscard]] bool HasUnresolvedResidentUtilityUploads() const noexcept;
+#if defined(HS_DEVELOPMENT_TOOLS)
     [[nodiscard]] Result AdmitResidentAllocation(const D3D12_RESOURCE_DESC &,
         const D3D12MA::ALLOCATION_DESC &);
     void RecordResidentAllocation(const AllocationResource &, D3D12_HEAP_TYPE) noexcept;
+#endif
+#if defined(HS_DEVELOPMENT_TOOLS)
     [[nodiscard]] Result PrepareResidentServices(Impl &candidate);
     void SwapResidentServices(Impl &candidate) noexcept;
     void SwapResidentPipelines(Impl &candidate) noexcept;
     [[nodiscard]] Result ReloadResidentGeneration(RendererConfig candidate_config);
+#endif
     [[nodiscard]] Result CreateGpuData();
     [[nodiscard]] Result CreateCharacterTextures();
     [[nodiscard]] Result UploadVfxNoiseVolume(std::vector<AllocationResource> &uploads);
@@ -1440,6 +1442,10 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result PrepareMaterialParameters(const RendererConfig &candidate,
         bool require_compatible_layout, MaterialPreparationScope scope = MaterialPreparationScope::Resident);
     void CommitMaterialParameters() noexcept;
+    [[nodiscard]] std::uint64_t MaterialOverrideRevision() const noexcept
+    {
+        return material_parameters_match_generation ? 0 : material_parameter_revision;
+    }
     void FillMaterialFrameConstants(renderer_detail::FrameConstants &constants) const;
     [[nodiscard]] Result PrepareDecalMaterialParameters(const RendererConfig &, bool require_compatible_layout,
         std::vector<render_data::MaterialParameterSlot> &slots);
@@ -1554,7 +1560,8 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result CommitClusterFrameGraph(OwnedView &, std::uint32_t frame_slot,
         ClusterFrameGraph &, const CompletionSet &);
     [[nodiscard]] Result PrepareClusterFrame(OwnedView &, std::uint32_t frame_slot,
-        const std::array<ClusterCutInput, kEnvironmentMaterialNames.size()> &inputs);
+        const renderer_detail::FrameConstants &frame_constants,
+        const std::array<ClusterCutInput, kClusterRuntimeCatalogs> &inputs);
     [[nodiscard]] Result CaptureClusterFrame(std::uint32_t frame_slot);
     [[nodiscard]] Result DemandClusterPage(std::uint32_t logical_slot,
         std::uint32_t generation_tag, std::uint32_t priority);
@@ -1668,7 +1675,7 @@ struct D3D12Renderer::Impl
                           D3D12_RESOURCE_STATES after, D3D12_BARRIER_SYNC before_sync,
                           D3D12_BARRIER_SYNC after_sync, D3D12_BARRIER_ACCESS before_access,
                           D3D12_BARRIER_ACCESS after_access);
-    void CountValidationErrors();
+    [[nodiscard]] Result CountValidationErrors();
     void WriteDred(HRESULT reason) const;
     [[nodiscard]] Result WritePng(const std::filesystem::path &path, const std::byte *pixels,
                                   std::uint32_t row_pitch, ViewExtent extent) const;
@@ -1702,11 +1709,15 @@ struct D3D12Renderer::Impl
     HANDLE fence_event{};
     std::uint64_t next_fence{1};
     D3D12MA::Allocator *allocator{};
+#if defined(HS_DEVELOPMENT_TOOLS)
     ComPtr<D3D12MA::Allocator> resident_allocator_lease;
     std::shared_ptr<void> resident_fence_event_owner;
+#endif
     std::vector<ResidentUtilitySubmission> resident_utility_submissions;
+#if defined(HS_DEVELOPMENT_TOOLS)
     ResidentPreparationAccounting resident_preparation_accounting;
     std::vector<std::unique_ptr<Impl>> unresolved_resident_candidates;
+#endif
     std::array<FrameContext, kFrameCount> frames;
     std::array<VisibilityFrameBuffers, kFrameCount> visibility_frames;
     ResidencyManager residency;
@@ -1807,13 +1818,18 @@ struct D3D12Renderer::Impl
     bool material_parameter_upload_pending{};
     std::uint32_t material_parameter_slot_count{};
     std::uint64_t material_parameter_revision{};
-    std::uint64_t baked_generation_material_revision{};
+    std::array<std::byte, 32> generation_material_parameters{};
+    bool generation_material_parameters_valid{};
+    bool material_parameters_match_generation{true};
     std::uint64_t baked_generation_pipeline_revision{};
     mutable std::shared_ptr<const VirtualShadowBakeData> baked_shadow_source;
     std::uint64_t pipeline_revision{};
     std::uint32_t material_parameter_candidate_slot_count{};
     std::array<std::uint32_t, kResidentMaterialCount> material_parameter_bases{};
     std::array<std::uint32_t, kResidentMaterialCount> material_parameter_candidate_bases{};
+    std::array<std::uint32_t, kResidentMaterialCount> material_parameter_counts{},
+        material_parameter_candidate_counts{};
+    std::array<std::uint64_t, kResidentMaterialCount> material_parameter_revisions{};
     std::array<std::string, kResidentMaterialCount> material_parameter_layouts{};
     std::array<std::string, kResidentMaterialCount> material_parameter_candidate_layouts{};
     std::vector<render_data::MaterialParameterSlot> material_parameter_slots, material_parameter_candidate_slots;
@@ -2175,6 +2191,9 @@ struct D3D12Renderer::Impl
     std::array<GeometryPageDescriptorBank, kFrameCount> geometry_page_descriptor_banks{};
     std::uint64_t validation_errors{};
     RendererValidationStatus validation_status{};
+#if defined(HS_DEVELOPMENT_TOOLS)
+    ComPtr<ID3D12InfoQueue> validation_info_queue;
+#endif
     std::uint32_t last_particle_count{};
     bool enhanced{};
     bool mesh_shader_supported{};

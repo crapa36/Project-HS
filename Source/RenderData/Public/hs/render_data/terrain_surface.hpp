@@ -6,11 +6,9 @@
 
 namespace hs::render_data
 {
-inline constexpr std::uint32_t kTerrainSurfaceLayoutVersion = 5;
-inline constexpr std::uint32_t kTerrainSurfaceLeafLayoutVersion = 4;
+inline constexpr std::uint32_t kTerrainSurfaceLayoutVersion = 6;
 inline constexpr std::uint32_t kTerrainSurfacePageEdge = 4096;
 inline constexpr std::uint32_t kTerrainSurfacePageMips = 13;
-inline constexpr std::size_t kTerrainSurfaceMaxPageSections = 21;
 struct TerrainSurfaceSection
 {
     float x{}, z{}, span_x{}, span_z{}, cosine{}, sine{};
@@ -33,25 +31,19 @@ struct TerrainSurfacePackageView
 {
     std::vector<TerrainSurfaceSection> sections;
     TextureDescription description;
-    // Layout 1-3: one product per section; 4: three planes per section; 5: one leaf metadata product per tile.
+    // Layout 6: three direct plane-product references per section.
     std::vector<std::string> section_products;
     std::array<std::byte, 32> source_identity{};
     std::uint32_t layout_version{};
 };
 
-// TSF1 v2 keeps 32-byte little-endian section records and three dependency
-// indices per section. Each plane is an independent bounded texture package.
-// Layout 4 uses 4096 pages with a 256-texel continuation around the interior.
+// TSF1 wire 4/layout 6 keeps 32-byte little-endian section records and three
+// direct plane-product references per section, for up to 64 sections.
+// Layout 6 uses 4096 pages with a 256-texel continuation around the interior.
 // Depth is an averaged appearance value, not a conservative height bound.
 [[nodiscard]] std::vector<std::byte> BuildTerrainSurfacePackage(
     AssetId asset_id, std::span<const std::string> section_products,
     std::span<const TerrainSurfaceSection> sections, TextureDescription description,
-    const std::array<std::byte, 32> &source_identity);
-
-// Layout 5 indexes one layout-4 leaf metadata package per tile.
-[[nodiscard]] std::vector<std::byte> BuildTerrainSurfaceIndex(
-    AssetId asset_id, std::span<const std::string> leaf_products,
-    std::span<const TerrainSurfaceSection> tiles, TextureDescription description,
     const std::array<std::byte, 32> &source_identity);
 
 // Section records and logical product IDs are decoded into owned storage.

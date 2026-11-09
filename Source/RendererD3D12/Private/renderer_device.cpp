@@ -6,6 +6,9 @@ namespace hs
 
 Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, OwnedView &view)
 {
+    if (configuration.ribbon_history_points < renderer_detail::kRibbonHistorySamples)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+            "Ribbon point budget must provide at least one 64-sample slot");
     config = configuration;
 #if !defined(HS_DEVELOPMENT_TOOLS)
     config.validation = false;
@@ -268,9 +271,11 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
     view.render_height = capacity.height;
     (void)UpdateViewState(view.state, {view.width, view.height}, capacity,
         view.reconstruction_plan.render_active);
-    // Instrumented PSOs stay in memory; disk identity is shared with ordinary runs.
+    // GPU-validation PSOs stay in memory; other runs share device/driver cache identity.
     if (auto cached = pipeline_cache.Initialize(device.Get(), adapter.Get(),
-                config.gpu_validation || config.artifact_directory.empty() ? std::filesystem::path{} :
+                config.gpu_validation ? std::filesystem::path{} :
+                !config.pipeline_cache_directory.empty() ? config.pipeline_cache_directory :
+                config.artifact_directory.empty() ? std::filesystem::path{} :
                 config.artifact_directory / "pso-cache", config.capture_timing_stream); !cached) return cached;
     if (auto prepared = PrepareReconstructionProvider(config.reconstruction_request
             ? &*config.reconstruction_request : nullptr, reconstruction_configuration.dynamic_resolution,
@@ -301,12 +306,15 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
 #if defined(HS_DEVELOPMENT_TOOLS)
     if (config.validation || config.gpu_validation)
     {
-        ComPtr<ID3D12InfoQueue> info_queue;
-        if (SUCCEEDED(device.As(&info_queue)))
+        const auto acquired = device.As(&validation_info_queue);
+        if (FAILED(acquired))
         {
-            info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, FALSE);
-            info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, FALSE);
+            validation_status.message_collection_attempted = true;
+            validation_status.message_collection_hresult = acquired;
+            return HResultFailure("Acquire D3D12 validation message queue", acquired);
         }
+        validation_info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, FALSE);
+        validation_info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, FALSE);
     }
 #endif
 

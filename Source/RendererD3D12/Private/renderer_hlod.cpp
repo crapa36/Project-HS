@@ -179,7 +179,7 @@ struct HlodStorage
     AllocationResource groups, proxies, upload;
     std::vector<GpuMember> members_cpu;
     std::vector<Frame> frames;
-    render_data::SceneHlod scene;
+    std::shared_ptr<const render_data::AdmittedSceneHlod> scene;
     std::string content_id;
     std::uint32_t generation{}, slot_capacity{}, descriptor_stride{}, maximum_depth{1};
     HlodSlotSet member_slot_bits, command_ordinals;
@@ -226,14 +226,13 @@ std::uint64_t HlodCandidate::AllocatedBytes() const noexcept { return storage_ ?
 std::uint64_t HlodCandidate::DefaultBytes() const noexcept { return storage_ ? storage_->default_bytes : 0; }
 std::uint64_t HlodCandidate::UploadBytes() const noexcept { return storage_ ? storage_->upload_bytes : 0; }
 std::uint64_t HlodSystem::AllocatedBytes() const noexcept { return impl_->storage ? impl_->storage->bytes : 0; }
-Result HlodSystem::AllocationRequirements(ID3D12Device *device, const render_data::SceneHlod &scene,
+Result HlodSystem::AllocationRequirements(ID3D12Device *device, const render_data::AdmittedSceneHlod &admitted,
     std::uint32_t slots, std::uint32_t frames, std::uint64_t &default_bytes, std::uint64_t &upload_bytes) const
 {
     default_bytes = upload_bytes = 0;
     if (!device || !slots || slots > 1'000'000 || !frames || frames > 8)
         return Failure(ErrorCode::InvalidArgument, "Invalid HLOD allocation requirements inputs.");
-    try { render_data::ValidateSceneHlod(scene); }
-    catch (const std::exception &error) { return Failure(ErrorCode::InvalidArgument, error.what()); }
+    const auto &scene = admitted.Value();
     const auto layout = BufferLayout(scene, slots, frames);
     const auto add = [&](std::uint64_t bytes, bool uav, std::uint64_t &total) {
         const auto description = BufferDescription(bytes, uav);
@@ -257,16 +256,15 @@ CompletionSet HlodSystem::FrameCompletion(std::uint32_t slot) const noexcept
 }
 
 Result HlodSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *allocator,
-    const render_data::SceneHlod &scene, std::string_view content_id, std::uint32_t generation,
+    const std::shared_ptr<const render_data::AdmittedSceneHlod> &admitted, std::string_view content_id, std::uint32_t generation,
     std::uint32_t slot_capacity, std::uint32_t frame_slots, const ShaderReader &read_shader, HlodCandidate &candidate) const
 {
-    if (!device || !allocator || content_id.empty() || content_id.size() > 256 || !generation || !slot_capacity ||
+    if (!device || !allocator || !admitted || content_id.empty() || content_id.size() > 256 || !generation || !slot_capacity ||
         slot_capacity > 1'000'000 || !frame_slots || frame_slots > 8 || !read_shader)
         return Failure(ErrorCode::InvalidArgument, "Invalid HLOD device, identity, slot capacity or shader reader.");
-    try { render_data::ValidateSceneHlod(scene); }
-    catch (const std::exception &error) { return Failure(ErrorCode::InvalidArgument, error.what()); }
+    const auto &scene = admitted->Value();
     auto next = std::make_shared<HlodStorage>();
-    next->device = device; next->allocator = allocator; next->scene = scene; next->content_id = content_id;
+    next->device = device; next->allocator = allocator; next->scene = admitted; next->content_id = content_id;
     next->generation = generation; next->slot_capacity = slot_capacity; next->frames.resize(frame_slots);
     next->member_slot_bits.Resize(slot_capacity);
     next->command_ordinals.Resize(static_cast<std::uint32_t>(scene.proxies.size()));
@@ -398,7 +396,7 @@ Result HlodSystem::PrepareFrameRecordData(const HlodFrameInputs &inputs,HlodFram
     if (inputs.frame_slot >= storage->frames.size() || !inputs.rendered_frame_id ||
         !storage->frames[inputs.frame_slot].completion.IsSatisfiedBy(inputs.completed) || !ExternalShape(inputs.static_scene, 64))
         return Failure(ErrorCode::InvalidArgument, "HLOD registration requires a completed frame slot and current static scene table.");
-    const auto &scene = storage->scene;
+    const auto &scene = storage->scene->Value();
     const bool read_geometry=ExternalShape(inputs.geometry_records,64),read_refs=ExternalShape(inputs.proxy_refs,16);
     bool enabled = inputs.layout_abi == scene.layout_abi && inputs.layout_digest == scene.layout_digest &&
         inputs.content_generation_id == storage->content_id && inputs.static_scene_generation != 0 &&
@@ -464,7 +462,7 @@ bool HlodSystem::MatchesLayout(const HlodFrameInputs &inputs,const HlodFrameReco
     return layout.valid&&s&&prepared.owner==s.get()&&prepared.inputs==&inputs&&prepared.rendered_frame_id==inputs.rendered_frame_id&&
         layout.history==prepared.history&&layout.upload==prepared.upload&&prepared.upload==!s->metadata_ready&&
         layout.read_geometry==prepared.read_geometry&&layout.read_refs==prepared.read_refs&&
-        layout.shape==std::array<std::uint64_t,5>{s->slot_capacity,s->scene.groups.size(),s->scene.proxies.size(),s->scene.pages.size(),s->scene.members.size()}&&
+        layout.shape==std::array<std::uint64_t,5>{s->slot_capacity,s->scene->Value().groups.size(),s->scene->Value().proxies.size(),s->scene->Value().pages.size(),s->scene->Value().members.size()}&&
         layout.guides==std::array{inputs.static_scene.version,inputs.geometry_records.version,inputs.proxy_refs.version};
 }
 
@@ -497,7 +495,7 @@ Result HlodSystem::RegisterFrame(RenderGraphBuilder &graph,const HlodFrameInputs
     if(!bound(inputs.static_scene,true)||!bound(inputs.geometry_records,prepared->read_geometry)||
         !bound(inputs.proxy_refs,prepared->read_refs))
         return Failure(ErrorCode::InvalidArgument,"HLOD graph inputs do not match prepared native buffers.");
-    const auto &scene=storage->scene;
+    const auto &scene=storage->scene->Value();
     const bool enabled=prepared->enabled,history=prepared->history;
     const auto slot=prepared->slot,previous_slot=prepared->previous,bucket_count=prepared->bucket_count;
     auto &frame=storage->frames[slot];

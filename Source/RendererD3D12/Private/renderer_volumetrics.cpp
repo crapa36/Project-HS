@@ -412,12 +412,6 @@ Result PrepareVfxHeroVolumes(VfxVolumeInputs inputs, std::uint32_t gradient_rows
     prepared.admitted_ = true;
     return Result::Success();
 }
-Result ValidateVfxHeroVolumes(VfxVolumeInputs inputs, std::uint32_t gradient_rows)
-{
-    PreparedVfxHeroVolumes prepared;
-    return PrepareVfxHeroVolumes(inputs, gradient_rows, prepared);
-}
-
 VolumetricSystem::VolumetricSystem():impl_(std::make_unique<Impl>()){}
 VolumetricSystem::~VolumetricSystem()=default;
 std::uint64_t VolumetricCandidate::AllocatedBytes()const noexcept
