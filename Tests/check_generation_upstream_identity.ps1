@@ -140,7 +140,92 @@ try {
     if ($verify.ExitCode -ne 0) {
         throw "Immutable baseline Generation failed verification: $($verify.Output)"
     }
+
+    $audioSet = 'd' * 64
+    $audioProduct = Write-Product "Products/audio/$audioSet/audio_catalog.hsbin" 'audio-fixture'
+    $audioResult = [ordered]@{
+        schema_version = 1; action_id = 'audio'; namespace_path = 'audio'
+        action_key = 'sha256:' + ('4' * 64); product_set_id = $audioSet
+        upstream_product_dependencies = @()
+        products = @([ordered]@{
+            logical_id = 'audio/audio_catalog.hsbin'; locator = $audioProduct.locator
+            digest = $audioProduct.digest; size = $audioProduct.size
+        })
+    }
+    $audioResultPath = Write-Result 'audio' $audioResult
+    $audioCompose = Invoke-Generation @('--compose', '--build-root', $fixtureRoot,
+        '--scope', 'test-audio', '--result', $audioResultPath)
+    if ($audioCompose.ExitCode -ne 0) {
+        throw "Audio fixture compose failed: $($audioCompose.Output)"
+    }
+    $audioPointerPath = Join-Path $fixtureRoot 'GenerationState/test-audio.json'
+    $audioPointer = Get-Content -LiteralPath $audioPointerPath -Raw | ConvertFrom-Json
+    $audioManifestPath = Join-Path $fixtureRoot $audioPointer.manifest_locator
+    $audioManifest = Get-Content -LiteralPath $audioManifestPath -Raw | ConvertFrom-Json
+    $audioProductPath = Join-Path $fixtureRoot ($audioManifest.products[0].locator.Replace('/', [IO.Path]::DirectorySeparatorChar))
+    $checkerPath = Join-Path $PSScriptRoot 'check_audio_generation.ps1'
+    $childPowerShell = if ($PSVersionTable.PSEdition -eq 'Core') {
+        Join-Path $PSHOME 'pwsh.exe'
+    } else {
+        Join-Path $PSHOME 'powershell.exe'
+    }
+    $generationExecutableFull = [IO.Path]::GetFullPath($GenerationExecutable)
+    $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    $validOutput = (& $childPowerShell -NoProfile -File $checkerPath `
+        -GenerationExecutable $generationExecutableFull -BuildRoot $fixtureRoot `
+        -SourceRoot $sourceRoot 2>&1 | ForEach-Object { $_.ToString() } | Out-String).Trim()
+    $validExit = $LASTEXITCODE
+    if ($validExit -ne 0) {
+        throw "Audio checker rejected the valid fixture (exit $validExit): $validOutput"
+    }
+
+    $protectedPaths = @($audioResultPath, $audioPointerPath, $audioManifestPath)
+    $protectedContents = @($protectedPaths | ForEach-Object {
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($_))
+    })
+    foreach ($failureCase in @('corrupt-product', 'missing-product')) {
+        if ($failureCase -eq 'corrupt-product') {
+            $damagedBytes = [IO.File]::ReadAllBytes($audioProductPath)
+            if ($damagedBytes.Length -eq 0) { throw 'Audio fixture product must be non-empty.' }
+            $damagedBytes[0] = $damagedBytes[0] -bxor 0xff
+            [IO.File]::WriteAllBytes($audioProductPath, $damagedBytes)
+        } else {
+            Remove-Item -LiteralPath $audioProductPath -Force
+        }
+        $productExistsBefore = Test-Path -LiteralPath $audioProductPath -PathType Leaf
+        $productBytesBefore = if ($productExistsBefore) {
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($audioProductPath))
+        } else { $null }
+
+        $failureOutput = (& $childPowerShell -NoProfile -File $checkerPath `
+            -GenerationExecutable $generationExecutableFull -BuildRoot $fixtureRoot `
+            -SourceRoot $sourceRoot 2>&1 | ForEach-Object { $_.ToString() } | Out-String).Trim()
+        $failureExit = $LASTEXITCODE
+        try { $failureDiagnostic = $failureOutput | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw "Audio checker returned non-JSON output for $failureCase (exit $failureExit): $failureOutput" }
+        if ($failureExit -eq 0 -or $failureDiagnostic.error_code -cne $failureCase -or
+            $failureDiagnostic.scope -cne 'test-audio' -or
+            $failureDiagnostic.verify -isnot [bool] -or !$failureDiagnostic.verify) {
+            throw "Audio checker did not preserve the expected $failureCase failure (exit $failureExit): $failureOutput"
+        }
+        for ($i = 0; $i -lt $protectedPaths.Count; $i++) {
+            $currentContents = [Convert]::ToBase64String([IO.File]::ReadAllBytes($protectedPaths[$i]))
+            if ($currentContents -cne $protectedContents[$i]) {
+                throw "Audio checker changed protected fixture state for ${failureCase}: $($protectedPaths[$i])"
+            }
+        }
+        $productExistsAfter = Test-Path -LiteralPath $audioProductPath -PathType Leaf
+        $productBytesAfter = if ($productExistsAfter) {
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($audioProductPath))
+        } else { $null }
+        if ($productExistsAfter -ne $productExistsBefore -or
+            $productBytesAfter -cne $productBytesBefore) {
+            throw "Audio checker changed product state for $failureCase."
+        }
+        Write-Host "Audio checker case ${failureCase}: exit $failureExit, error_code $($failureDiagnostic.error_code), fixture state unchanged."
+    }
     Write-Host 'Generation upstream identity: selected edges verified, stale mixed upstream rejected, pointer unchanged.'
+    Write-Host "Audio checker: valid exit $validExit; corrupt and missing failures preserved fixture state."
 }
 finally {
     $parent = [IO.Path]::GetFullPath($FixtureParent).TrimEnd([IO.Path]::DirectorySeparatorChar)

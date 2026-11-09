@@ -52,6 +52,7 @@ $sourcePointerBytes = $null
 $fixtureRoot = $null
 $logPath = Join-Path $Artifacts "shader_hot_reload.log"
 $adapterPath = Join-Path $Artifacts "adapter.txt"
+$performancePath = Join-Path $Artifacts "performance.csv"
 $renderPath = Join-Path $Artifacts "render.json"
 $validationPath = Join-Path $Artifacts "d3d12_validation.log"
 $stdoutPath = Join-Path $Artifacts "runtime.stdout.log"
@@ -150,7 +151,7 @@ function Stop-Gracefully([switch]$RequireSuccess) {
 try {
     $env:LOCALAPPDATA = Join-Path $Artifacts "ProfileRoot"
     New-Item -ItemType Directory -Force -Path $Artifacts | Out-Null
-    Remove-Item -LiteralPath $logPath, $adapterPath, $renderPath, $validationPath,
+    Remove-Item -LiteralPath $logPath, $adapterPath, $performancePath, $renderPath, $validationPath,
         $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
 
     $sourcePointerPath = (Resolve-Path -LiteralPath $GenerationPointer).Path
@@ -192,7 +193,7 @@ try {
         throw "Shader reload fixture did not create distinct Generation IDs."
     }
 
-    $processArguments = "--generation=`"$activePointer`" --artifacts=`"$Artifacts`" --capture-diagnostics --no-vsync --frame-cap=60 --mute"
+    $processArguments = "--generation=`"$activePointer`" --artifacts=`"$Artifacts`" --capture-diagnostics --validation --no-vsync --frame-cap=60 --mute"
     $process = Start-Process -FilePath $Executable -ArgumentList $processArguments `
         -WindowStyle Hidden -RedirectStandardOutput $stdoutPath `
         -RedirectStandardError $stderrPath -PassThru
@@ -202,8 +203,8 @@ try {
     $null = $process.Handle
     Wait-For {
         (Test-Path -LiteralPath $adapterPath -PathType Leaf) -and
-        ((Read-ArtifactText $logPath) -match "ready active=$escapedBaseline(?:\r?\n|$)")
-    } "Renderer did not initialize with the fixture baseline Generation."
+        ((Read-ArtifactText $performancePath) -match '(?m)^[1-9][0-9]*,')
+    } "Renderer did not produce a frame with the fixture baseline Generation."
 
     $selectArguments = @($FixtureScript, "select", "--root", $fixtureRoot, "--candidate", "invalid")
     Invoke-Fixture $selectArguments
@@ -276,6 +277,10 @@ try {
         throw "ProjectHS did not write render.json."
     }
     $render = Get-Content -LiteralPath $renderPath -Raw | ConvertFrom-Json
+    if (!$render.validation_message_collection_attempted -or
+        [long]$render.validation_message_collection_hresult -ne 0) {
+        throw "D3D12 validation message collection did not complete."
+    }
     if ([int]$render.validation_errors -ne 0) {
         throw "D3D12 validation reported $($render.validation_errors) errors."
     }

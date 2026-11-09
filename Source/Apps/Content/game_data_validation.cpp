@@ -1,4 +1,4 @@
-#include "content_cooker.hpp"
+#include "game_data_parameters.hpp"
 
 #include <algorithm>
 #include <array>
@@ -126,22 +126,30 @@ void RequireCount(const Json &array, std::string_view file, std::string_view pat
     }
 }
 
-template <typename Expected>
-void RequireExactParameterKeys(const Json &entry, std::string_view file,
-                               std::string_view path, const Expected &expected)
+ParameterValues::ParameterValues(const Json &entry, std::string_view file,
+                                 std::string_view path)
 {
     const auto &parameters = RequireArray(entry, file, path, "parameters");
-    std::set<std::string, std::less<>> keys;
-    for (const auto key : expected) keys.emplace(key);
-    for (std::size_t i = 0; i < parameters.size(); ++i)
+    values_.reserve(parameters.size());
+    for (std::size_t index = 0; index < parameters.size(); ++index)
     {
-        const auto parameter_path = std::string(path) + "/parameters/" + std::to_string(i);
-        const auto key = RequireString(parameters[i], file, parameter_path, "key");
-        RequireString(parameters[i], file, parameter_path, "unit");
-        RequireMember(parameters[i], file, parameter_path, "value");
-        if (!keys.erase(key)) ThrowValidationError(file, parameter_path + "/key", "unexpected or duplicate parameter key");
+        const auto parameter_path = std::string(path) + "/parameters/" + std::to_string(index);
+        const auto &parameter = parameters[index];
+        const auto &key_value = RequireMember(parameter, file, parameter_path, "key");
+        if (!key_value.is_string() || key_value.get_ref<const std::string &>().empty())
+            ThrowValidationError(file, parameter_path + "/key", "expected non-empty string");
+        const auto key = std::string_view(key_value.get_ref<const std::string &>());
+        const auto &unit = RequireMember(parameter, file, parameter_path, "unit");
+        if (!unit.is_string() || unit.get_ref<const std::string &>().empty())
+            ThrowValidationError(file, parameter_path + "/unit", "expected non-empty string");
+        const auto &value = RequireMember(parameter, file, parameter_path, "value");
+        values_.emplace_back(key, &value);
     }
-    if (!keys.empty()) ThrowValidationError(file, std::string(path) + "/parameters", "missing parameter '" + *keys.begin() + "'");
+    std::ranges::sort(values_, {}, [](const auto &value) { return value.first; });
+    for (std::size_t index = 1; index < values_.size(); ++index)
+        if (values_[index - 1].first == values_[index].first)
+            ThrowValidationError(file, std::string(path) + "/parameters/" +
+                std::string(values_[index].first), "duplicate parameter key");
 }
 
 bool IsStableId(std::string_view value)
@@ -182,40 +190,27 @@ void RequireReference(const std::unordered_set<std::string> &ids,
     }
 }
 
-const Json &FindParameterValue(const Json &entry, std::string_view file,
+const Json &FindParameterValue(const ParameterValues &parameters, std::string_view file,
                                std::string_view path, std::string_view key)
 {
-    const auto &parameters = RequireArray(entry, file, path, "parameters");
-    const Json *found = nullptr;
-    for (std::size_t index = 0; index < parameters.size(); ++index)
-    {
-        const auto parameter_path = std::string(path) + "/parameters/" +
-                                    std::to_string(index);
-        const auto parameter_key =
-            RequireString(parameters[index], file, parameter_path, "key");
-        RequireString(parameters[index], file, parameter_path, "unit");
-        RequireMember(parameters[index], file, parameter_path, "value");
-        if (parameter_key == key)
-        {
-            if (found)
-            {
-                ThrowValidationError(file, parameter_path + "/key", "duplicate parameter key");
-            }
-            found = &parameters[index]["value"];
-        }
-    }
-    if (!found)
+    const auto values = parameters.Values();
+    const auto found = std::ranges::lower_bound(values, key,
+        [](std::string_view parameter_key, std::string_view expected_key) {
+            return parameter_key < expected_key;
+        },
+        [](const auto &parameter) { return parameter.first; });
+    if (found == values.end() || found->first != key)
     {
         ThrowValidationError(file, std::string(path) + "/parameters", "missing parameter '" +
                                                            std::string(key) + "'");
     }
-    return *found;
+    return *found->second;
 }
 
-double ParameterNumber(const Json &entry, std::string_view file, std::string_view path,
+double ParameterNumber(const ParameterValues &parameters, std::string_view file, std::string_view path,
                        std::string_view key)
 {
-    const auto &value = FindParameterValue(entry, file, path, key);
+    const auto &value = FindParameterValue(parameters, file, path, key);
     if (!value.is_number())
     {
         ThrowValidationError(file, std::string(path) + "/parameters/" + std::string(key),
@@ -479,11 +474,11 @@ void ValidateGameDataDocumentSemantics(const Json &document, std::string_view na
         {
             const auto path = "$/entries/" + std::to_string(index);
             const auto &keys = expected_parameters[index - 12];
+            const ParameterValues parameters(entries[index], name, path);
             if (keys[2].empty())
-                RequireExactParameterKeys(entries[index], name, path,
-                                          std::array{keys[0], keys[1]});
+                RequireParameterKeys(parameters, name, path, std::array{keys[0], keys[1]});
             else
-                RequireExactParameterKeys(entries[index], name, path, keys);
+                RequireParameterKeys(parameters, name, path, keys);
         }
         return;
     }
@@ -532,15 +527,18 @@ void ValidateGameDataDocumentSemantics(const Json &document, std::string_view na
                 ThrowValidationError(name, path + "/id", "skill order is part of cooked ABI");
             if (RequireString(entries[index], name, path, "logic_id") != expected_logics[index])
                 ThrowValidationError(name, path + "/logic_id", "skill logic order is part of cooked ABI");
-            RequireExactParameterKeys(entries[index], name, path, parameter_keys[index]);
-            const auto &parameters = RequireArray(entries[index], name, path, "parameters");
-            for (std::size_t parameter_index = 0; parameter_index < parameters.size(); ++parameter_index)
+            const ParameterValues parameters(entries[index], name, path);
+            RequireParameterKeys(parameters, name, path, parameter_keys[index]);
+            std::size_t parameter_index{};
+            for (const auto &[key, value_pointer] : parameters.Values())
             {
                 const auto parameter_path = path + "/parameters/" + std::to_string(parameter_index);
-                const auto &value = RequireMember(parameters[parameter_index], name, parameter_path, "value");
+                const auto &value = *value_pointer;
                 if (value.is_number() && (!std::isfinite(value.get<double>()) || value.get<double>() < 0.0))
                     ThrowValidationError(name, parameter_path + "/value",
                                          "numeric skill parameter must be finite and non-negative");
+                static_cast<void>(key);
+                ++parameter_index;
             }
         }
         return;

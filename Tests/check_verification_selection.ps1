@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path $PSScriptRoot -Parent
 . (Join-Path $repoRoot 'tools/verification_metadata.ps1')
 $ctest = Join-Path (Split-Path $CMake -Parent) 'ctest.exe'
-$temporaryRoot = [IO.Path]::GetFullPath((Join-Path $repoRoot 'Build')) + [IO.Path]::DirectorySeparatorChar
+$temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $fixtureRoot = Join-Path $temporaryRoot ('hs-selection-' + [guid]::NewGuid().ToString('N'))
 $buildRoot = Join-Path $fixtureRoot 'build'
 

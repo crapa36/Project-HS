@@ -11,6 +11,7 @@
 #include <hs/render_data/scene_probe.hpp>
 #include <hs/render_data/surface_layout.hpp>
 #include <hs/render_data/geometry_package.hpp>
+#include <hs/render_data/renderer_catalog.hpp>
 #include <hs/render_data/character_package.hpp>
 #include <hs/render_data/material_ir.hpp>
 #include <hs/render_data/quality_profiles.hpp>
@@ -1408,9 +1409,13 @@ std::pair<std::uint64_t, std::uint64_t> ValidateMaterialReloadShadowDepth(
     const auto &preparation = metadata.at("static_shadow_preparation");
     const auto builds = preparation.at("static_membership_builds").get<std::uint64_t>();
     const auto rebinds = preparation.at("static_binding_rebinds").get<std::uint64_t>();
+    const auto &probe = metadata.at("local_probe_revisions");
     receipt.push_back({{"capture", path.filename().string()}, {"resource", selected->at("name")},
         {"covered_depth_samples", visible}, {"static_membership_builds", builds},
-        {"static_binding_rebinds", rebinds}});
+        {"static_binding_rebinds", rebinds},
+        {"probe_material_override_revision", probe.at("material_parameter_revision")},
+        {"probe_material_compatibility", probe.at("compatibility").at("material")},
+        {"probe_material_baseline", probe.at("baseline").at("material")}});
     return {builds, rebinds};
 }
 
@@ -2060,6 +2065,8 @@ Json ValidationStatusReceipt(const hs::RendererValidationStatus &status)
         {"device_creation", {{"attempted", status.device_creation_attempted},
             {"succeeded", status.device_creation_succeeded}, {"hresult", status.device_creation_hresult},
             {"created_after_requested_enable_calls", status.device_created_after_requested_enable_calls}}},
+        {"message_collection", {{"attempted", status.message_collection_attempted},
+            {"hresult", status.message_collection_hresult}}},
         {"activation_state_getter_available", false}};
 }
 
@@ -2448,6 +2455,10 @@ int main(int argc, char **argv)
                 "--camera-motion, --capture-grid-frames, and AA selection require --grid-floor-probe");
         if (pointer.empty() || !pointer.is_absolute() || artifacts.empty() || !artifacts.is_absolute())
             throw std::runtime_error("--generation and --artifacts require absolute paths");
+#if !defined(HS_DEVELOPMENT_TOOLS)
+        if (material_reload_probe)
+            throw std::runtime_error("--material-reload is available only in development builds");
+#else
         if (material_reload_probe &&
             (material_reload_pointer.empty() || material_reload_invalid_pointer.empty() ||
              !material_reload_pointer.is_absolute() ||
@@ -2458,6 +2469,7 @@ int main(int argc, char **argv)
             throw std::runtime_error("material reload candidates must be different pointers");
         if (material_reload_probe && frames < 6)
             throw std::runtime_error("material reload probe requires at least 6 frames");
+#endif
         if (translucency_diagnostics_mode_explicit && !translucency_diagnostics_probe)
             throw std::runtime_error("--translucency-diagnostics-mode requires --translucency-diagnostics-probe");
         if (shadow_transition_probe && (!translucency_diagnostics_probe || !gameplay_scene))
@@ -3133,6 +3145,13 @@ int main(int argc, char **argv)
                 }
             config.packed_source_revisions = packed_source_revisions;
             config.packed_revision_bulks = packed_revision_bulks;
+            const hs::render_data::RendererCatalogView catalogue{config.packed_bulks,config.packed_textures,
+                config.packed_geometry,config.packed_materials,config.packed_characters,config.packed_animations,
+                config.packed_vfx_mesh_atlas,config.packed_source_revisions,config.packed_revision_bulks};
+            std::shared_ptr<const hs::render_data::RendererCatalogData> prepared_catalogue;
+            Require(hs::render_data::DecodeRendererCatalog(hs::render_data::EncodeRendererCatalog(catalogue),
+                config.packed_content->Size(),prepared_catalogue));
+            config.UseRendererCatalog(std::move(prepared_catalogue));
             config.product_paths.clear();
             config.product_digests.clear();
             receipt["packed_generation_maps_empty"] = config.product_paths.empty() && config.product_digests.empty();
@@ -3246,6 +3265,7 @@ int main(int argc, char **argv)
                 initial_residency.geometry_streaming_publications != 0)
                 throw std::runtime_error("Geometry streamed before any scene demand.");
             receipt["geometry_initial_requests"] = initial_residency.geometry_streaming_requests;
+#if defined(HS_DEVELOPMENT_TOOLS)
             auto missing_paths = generation.product_paths;
             auto changed_digests = generation.product_digests;
             const std::string probe_id = "render/lighting/default_probe.rpkg";
@@ -3263,6 +3283,7 @@ int main(int argc, char **argv)
             receipt["packed_developer_reload_missing_product_rejected"] = true;
             receipt["packed_developer_reload_rejection"] = rejection_message;
             receipt["packed_developer_reload_resident_preserved"] = !resident_replaced;
+#endif
         }
         const auto scene = Scene(generation.id);
         const auto grid_floor_scene = GridFloorScene(generation.id);
@@ -3960,6 +3981,7 @@ int main(int argc, char **argv)
                     if (frame == 3)
                         pair.current.camera.target.x += 0.5f;
                 }
+#if defined(HS_DEVELOPMENT_TOOLS)
                 else if (material_reload_probe)
                 {
                     if (frame == 3)
@@ -4039,6 +4061,7 @@ int main(int argc, char **argv)
                         };
                     }
                 }
+#endif
                 else if (!world_transport_probe && !single_layer_water_probe)
                 {
                     current[0].position.x = static_cast<float>(frame % 60) / 60.f;
@@ -5004,6 +5027,7 @@ int main(int argc, char **argv)
                     if (frame == 4)
                         ValidateGpuLodGrowthSteady(artifacts / name, receipt);
                 }
+#if defined(HS_DEVELOPMENT_TOOLS)
                 if (material_reload_probe && frame >= 2 && frame <= 6)
                 {
                     const auto name = frame == 2 ? "material-reload-before.png" :
@@ -5050,8 +5074,137 @@ int main(int argc, char **argv)
                                 throw std::runtime_error("material reload did not rebind static shadow records");
                         }
                         material_shadow_previous = shadow;
+                        const auto &readbacks = receipt["material_reload"]["shadow_depth_readbacks"];
+                        const auto &observed = readbacks.back();
+                        const auto &baseline = readbacks.front();
+                        const auto override_revision = observed.at("probe_material_override_revision").get<std::uint64_t>();
+                        if (frame == 4)
+                        {
+                            if (!override_revision || observed.at("probe_material_compatibility") ==
+                                baseline.at("probe_material_compatibility"))
+                                throw std::runtime_error("changed material parameters retained baked probe compatibility");
+                            if (baseline.at("resource") == "virtual_shadow_static" &&
+                                observed.at("resource") == baseline.at("resource"))
+                                throw std::runtime_error("changed material parameters reused incompatible baked shadow");
+                        }
+                        else
+                        {
+                            if (override_revision || observed.at("probe_material_compatibility") !=
+                                baseline.at("probe_material_baseline"))
+                                throw std::runtime_error("baseline or restored material parameters did not recover baked probe compatibility");
+                            if (baseline.at("resource") == "virtual_shadow_static" &&
+                                observed.at("resource") != baseline.at("resource"))
+                                throw std::runtime_error("restored material parameters did not reactivate baked shadow");
+                        }
+                    }
+                    if (frame == 6 && material_reload_terrain_archive)
+                    {
+                        std::array<bool, hs::render_data::kAuthoredMaterialNames.size()> changed_materials{};
+                        bool any_material_changed{};
+                        for (std::size_t ordinal = 0; ordinal < changed_materials.size(); ++ordinal)
+                        {
+                            const auto name = hs::render_data::kAuthoredMaterialNames[ordinal];
+                            const auto logical_id = "render/material/" + std::string(name) + "/parameters.rpkg";
+                            changed_materials[ordinal] = generation.product_digests.at(logical_id) !=
+                                material_reload_generation.product_digests.at(logical_id);
+                            any_material_changed |= changed_materials[ordinal];
+                        }
+                        if (!any_material_changed)
+                            throw std::runtime_error("valid material reload fixture changed no authored material parameters");
+                        if (!render_input.snapshots.current.static_scene)
+                            throw std::runtime_error("unreferenced material fixture has no admitted static scene");
+
+                        auto unreferenced_storage = std::make_unique<hs::StaticRenderSceneStorage>(
+                            *render_input.snapshots.current.static_scene);
+                        std::erase_if(unreferenced_storage->instances, [&](const hs::RenderInstance &instance) {
+                            std::size_t ordinal = std::numeric_limits<std::size_t>::max();
+                            if (hs::render_data::IsEnvironmentMesh(instance.mesh))
+                            {
+                                ordinal = hs::render_data::EnvironmentGeometryMaterialOrdinal(
+                                    hs::render_data::EnvironmentGeometryOrdinal(
+                                        instance.mesh, instance.environment_variant));
+                            }
+                            else if (instance.mesh == hs::RenderMesh::Ground ||
+                                     instance.mesh == hs::RenderMesh::DirtPatch)
+                            {
+                                ordinal = hs::render_data::kTerrainMaterialOrdinal;
+                            }
+                            return ordinal >= changed_materials.size() || changed_materials[ordinal];
+                        });
+                        if (unreferenced_storage->instances.empty())
+                            throw std::runtime_error("unreferenced material fixture removed every static instance");
+                        const auto static_instance_count = unreferenced_storage->instances.size();
+                        unreferenced_storage->scene_asset_id = hs::MakeAssetId(
+                            "fixture/material-reload/unreferenced");
+                        unreferenced_storage->layout_abi = 0;
+                        unreferenced_storage->eligible_layout_digest.fill(std::byte{});
+                        unreferenced_storage->eligible_static_members.clear();
+                        const auto unreferenced_scene = hs::FreezeStaticRenderScene(
+                            std::move(unreferenced_storage));
+
+                        auto unreferenced_pair = render_input.snapshots;
+                        unreferenced_pair.current.static_scene = unreferenced_scene;
+                        const hs::RenderPackage unreferenced_input{
+                            .views = render_input.views, .snapshots = unreferenced_pair,
+                            .vfx = {.world_batch = {unreferenced_pair.current.header.session_id,
+                                unreferenced_pair.current.header.tick}},
+                            .devtools = {.delta_seconds = 0.0f},
+                            .display_sample = hs::RenderDisplaySample{
+                                std::chrono::steady_clock::now(), 1.0f}};
+                        const auto submissions_before = renderer.GetDiagnostics().total_rendered_frames;
+                        hs::RendererFrameResult unreferenced_result;
+                        Require(renderer.Render(unreferenced_input, unreferenced_result));
+                        const auto before_path = artifacts / "material-shadow-unreferenced-before.json";
+                        Require(renderer.Capture({.path = before_path,
+                            .kind = hs::CaptureKind::SurfaceDiagnostics}));
+                        auto &unreferenced_readbacks =
+                            receipt["material_reload"]["unreferenced_shadow_readbacks"];
+                        unreferenced_readbacks["before"] = Json::array();
+                        const auto before = ValidateMaterialReloadShadowDepth(
+                            before_path, unreferenced_readbacks["before"]);
+
+                        Require(renderer.ReloadShaderGeneration(
+                            material_reload_generation.id, material_reload_generation.product_paths,
+                            material_reload_generation.product_digests));
+                        hs::RendererFrameResult reloaded_result;
+                        Require(renderer.Render(unreferenced_input, reloaded_result));
+                        const auto after_path = artifacts / "material-shadow-unreferenced-after.json";
+                        Require(renderer.Capture({.path = after_path,
+                            .kind = hs::CaptureKind::SurfaceDiagnostics}));
+                        unreferenced_readbacks["after"] = Json::array();
+                        const auto after = ValidateMaterialReloadShadowDepth(
+                            after_path, unreferenced_readbacks["after"]);
+                        const auto override_revision = unreferenced_readbacks["after"].front()
+                            .at("probe_material_override_revision").get<std::uint64_t>();
+                        const auto earlier_override = receipt["material_reload"]["shadow_depth_readbacks"].at(2)
+                            .at("probe_material_override_revision").get<std::uint64_t>();
+                        if (override_revision <= earlier_override)
+                            throw std::runtime_error("material override reused an earlier nonbaseline publication identity");
+                        if (before != after)
+                            throw std::runtime_error("unreferenced material reload changed static shadow builds or rebinds");
+
+                        const auto submissions_after = renderer.GetDiagnostics().total_rendered_frames;
+                        if (submissions_after != submissions_before + 2u)
+                            throw std::runtime_error("unreferenced material fixture did not add exactly two view submissions");
+                        receipt["material_reload"]["unreferenced_material"] = {
+                            {"static_instances", static_instance_count},
+                            {"before_static_membership_builds", before.first},
+                            {"before_static_binding_rebinds", before.second},
+                            {"after_static_membership_builds", after.first},
+                            {"after_static_binding_rebinds", after.second},
+                            {"additional_view_submissions", submissions_after - submissions_before}};
+                        const auto same_value_revision = renderer.MaterialParameterRevision();
+                        Require(renderer.ReloadShaderGeneration(
+                            material_reload_generation.id, material_reload_generation.product_paths,
+                            material_reload_generation.product_digests));
+                        if (renderer.MaterialParameterRevision() != same_value_revision)
+                            throw std::runtime_error("same-value material adoption changed the publication revision");
+                        receipt["material_reload"]["same_value_revision"] = same_value_revision;
+                        Require(renderer.ReloadShaderGeneration(
+                            generation.id, generation.product_paths, generation.product_digests));
                     }
                 }
+#endif
                 if (grid_floor_probe && capture_grid_frames &&
                     (frame == 1 || frame == 9 || frame == 17 || frame == 25))
                 {
@@ -5515,7 +5668,9 @@ int main(int argc, char **argv)
             ValidateDynamicLodSkinGrowthProbe(rows, frames, receipt);
         }
         const auto validation_errors = renderer.ValidationErrorCount();
-        const auto validation_status = ValidationStatusReceipt(renderer.ValidationStatus());
+        const auto native_validation = renderer.ValidationStatus();
+        const auto validation_status = ValidationStatusReceipt(native_validation);
+        const bool collection_valid = native_validation.MessageCollectionValid();
         receipt["validation_errors"] = validation_errors;
         receipt["validation_status"] = validation_status;
         receipt["frames"] = residency_streaming_probe || world_transport_probe ? rendered_frame_count : frames;
@@ -5523,10 +5678,10 @@ int main(int argc, char **argv)
         receipt["static_scene_upload_count"] = frame_result.static_scene_upload_count;
         receipt["enhanced_barriers"] = renderer.UsesEnhancedBarriers();
         receipt["timings_ms"] = std::move(timings);
-        receipt["execution_valid"] = validation_errors == 0;
-        receipt["error_code"] = validation_errors == 0
-            ? "" : "HS_RENDER_VALIDATION_FAILED";
-        exit_code = validation_errors == 0 ? 0 : 1;
+        receipt["execution_valid"] = collection_valid && validation_errors == 0;
+        receipt["error_code"] = !collection_valid ? "HS_RENDER_VALIDATION_COLLECTION_FAILED"
+            : validation_errors == 0 ? "" : "HS_RENDER_VALIDATION_FAILED";
+        exit_code = collection_valid && validation_errors == 0 ? 0 : 1;
     }
     catch (const std::exception &error)
     {

@@ -1,6 +1,9 @@
 #include <hs/runtime/audio_engine.hpp>
 
 #include <hs/asset_manifest/selected_generation.hpp>
+#include <hs/core/cooked_format.hpp>
+
+#include <nlohmann/json.hpp>
 
 #include <chrono>
 #include <filesystem>
@@ -12,6 +15,25 @@
 
 namespace fs = std::filesystem;
 
+namespace
+{
+void CheckCatalogCues(hs::AudioEngine &audio, const fs::path &catalog_path)
+{
+    std::ifstream input(catalog_path);
+    const auto catalog = nlohmann::json::parse(input);
+    const auto &entries = catalog.at("entries");
+    if (!input || !entries.is_array() || entries.empty() ||
+        audio.Status().loaded_cues != entries.size())
+        throw std::runtime_error("AudioEngine cue count does not match selected catalog");
+    for (const auto &entry : entries)
+    {
+        const auto cue = hs::MakeAssetId(entry.at("asset_id").get<std::string>());
+        if (audio.CueReadiness(cue) == hs::AudioCueReadiness::Missing)
+            throw std::runtime_error("AudioEngine is missing a selected catalog cue");
+    }
+}
+} // namespace
+
 int main(int argc, char **argv)
 {
     try
@@ -22,10 +44,20 @@ int main(int argc, char **argv)
             hs::SettingsData settings;
             settings.master_volume = 0;
             const auto initialization = audio.Initialize(settings);
-            if (!initialization || audio.Status().loaded_cues != 107)
+            if (!initialization)
                 throw std::runtime_error("default AudioEngine failed to load selected Generation: " +
                     std::string(initialization.Message()) + " cues=" +
                     std::to_string(audio.Status().loaded_cues));
+            const auto expected_cues = audio.Status().loaded_cues;
+            {
+                const fs::path root = fs::absolute(argv[0]).parent_path();
+                hs::SelectedGeneration generation;
+                const auto selected = hs::LoadSelectedGeneration(
+                    root / "GenerationState/runtime-full.json", generation);
+                if (!selected)
+                    throw std::runtime_error("invalid selected runtime Generation for audio check");
+                CheckCatalogCues(audio, generation.product_paths.at("audio/audio_cues.json"));
+            }
             std::ofstream(argv[2]) << "ready\n";
             const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
             bool retried = false;
@@ -33,7 +65,7 @@ int main(int argc, char **argv)
             {
                 if (!retried && fs::exists(argv[5]))
                 {
-                    if (audio.Initialize(settings) || audio.Status().loaded_cues != 107)
+                    if (audio.Initialize(settings) || audio.Status().loaded_cues != expected_cues)
                         throw std::runtime_error("failed reselect lost previous audio");
                     std::ofstream(std::string(argv[5]) + ".checked") << "ready\n";
                     retried = true;
@@ -60,6 +92,7 @@ int main(int argc, char **argv)
             root / "GenerationState/test-audio.json", generation);
         if (!selected || generation.scope != "test-audio")
             throw std::runtime_error("invalid selected audio Generation");
+        const auto catalog_path = generation.product_paths.at("audio/audio_cues.json");
 
         hs::AudioEngine audio;
         hs::SettingsData settings;
@@ -70,9 +103,8 @@ int main(int argc, char **argv)
         auto generation_owner = std::make_shared<hs::SelectedGeneration>(std::move(generation));
         if (const auto result = audio.Initialize(settings, prepared, generation_owner); !result)
             throw std::runtime_error("AudioEngine rejected selected Generation catalog");
-        if (audio.Status().loaded_cues != 107)
-            throw std::runtime_error("AudioEngine did not load all 107 authored cues");
-        std::cout << "audio generation consumer loaded_cues=107\n";
+        CheckCatalogCues(audio, catalog_path);
+        std::cout << "audio generation consumer loaded_cues=" << audio.Status().loaded_cues << '\n';
         return 0;
     }
     catch (const std::exception &error)

@@ -1,7 +1,10 @@
 # Runtime-only optional SDK. Never invoked by the low-level or CPU cooker path.
 function(hs_configure_directstorage_sdk target)
+    set_property(SOURCE
+        Source/RendererD3D12/Private/renderer_asset_io.cpp
+        Source/RendererD3D12/Private/renderer_environment.cpp
+        APPEND PROPERTY COMPILE_DEFINITIONS HS_WITH_DIRECTSTORAGE=$<BOOL:${HS_WITH_DIRECTSTORAGE}>)
     if(NOT HS_WITH_DIRECTSTORAGE)
-        target_compile_definitions(${target} PRIVATE HS_WITH_DIRECTSTORAGE=0)
         return()
     endif()
     find_program(HS_DIRECTSTORAGE_POWERSHELL NAMES pwsh REQUIRED)
@@ -17,7 +20,6 @@ function(hs_configure_directstorage_sdk target)
     add_library(hs_directstorage_sdk STATIC IMPORTED GLOBAL)
     set_property(TARGET hs_directstorage_sdk PROPERTY IMPORTED_LOCATION "${sdk}/native/lib/x64/dstorage.lib")
     target_link_libraries(${target} PRIVATE hs_directstorage_sdk)
-    target_compile_definitions(${target} PRIVATE HS_WITH_DIRECTSTORAGE=1)
     set_property(SOURCE Source/RendererD3D12/Private/renderer_asset_io.cpp APPEND PROPERTY
         INCLUDE_DIRECTORIES "${sdk}/native/include")
     foreach(runtime IN ITEMS dstorage.dll dstoragecore.dll)

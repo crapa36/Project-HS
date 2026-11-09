@@ -3,6 +3,13 @@
 Use the smallest tool that answers the current question. Installations and raw
 evidence are isolated under ignored `Build/tooling`; none is a game dependency.
 
+Existing CLI forwarding and exact verification-selection cases are registered as
+`tools.dev-entry` and `tools.verify-selection` on Windows/Ninja. The stdlib-only
+audio authoring cases run as `tools.audio-authoring` when content tools are enabled.
+`Tests/analyze_grass_history.py` and `Tests/analyze_visibility_entity_surface.py`
+remain explicit-input analyses: supply matching native captures; an empty run is
+not a quality check.
+
 ## Desloppify: on-demand cleanup candidates
 
 Local Python 3.13 environment: `Build/tooling/desloppify/.venv`. Installed
@@ -165,6 +172,10 @@ Dry runs query metadata without building or bootstrapping CMake. The plan lists
 every requested name, its resolved target, and the CMake argument array; execution
 passes that array once to the pinned `Tools/cmake.ps1 --build ... --target ...`
 wrapper. Use an MSVC developer environment for native Windows builds.
+When restoring source contents from a copy, restored timestamps can make Ninja
+treat candidate objects as current and run only link actions. After restoring the
+original contents, update `LastWriteTimeUtc` on only the restored source files,
+rerun the default build, and confirm that compile actions ran.
 
 Native names must be configured CMake target aliases. Known Action IDs resolve
 through their ActionResult namespace to `Actions/<namespace>/result.json`, then
@@ -260,6 +271,13 @@ these snapshots are diagnosis, not FPS measurements. Keep symbol paths local.
 Check for actual thread stacks and private engine symbols: exit code zero alone
 did not prove a successful capture. This host rejects `-pd`; explicit `.detach`
 works. Missing optional debugger extensions did not prevent stack capture.
+
+The standalone WinDbg components also need the matching DIA reader to resolve
+private PDBs. A missing reader reports `dia error 0x8007007e` and leaves only
+module offsets. Reuse the installed, Microsoft-signed DIA SDK `msdia140.dll`
+beside the local debugger; do not register it globally. Retained stack offsets
+can be resolved offline against the same EXE/PDB before either is relinked.
+Current component URLs, hashes and signatures are in `Build/tooling/dbgeng/`.
 
 The corrected owned-view GBV snapshots at20/40s put main in the recording-task
 join and workers inside draw recording through SDK layers/NVIDIA modules.

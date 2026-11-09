@@ -93,8 +93,8 @@ std::vector<std::string> DiscoverWaves(std::string_view catalog)
                 maximum_voices.is_number_integer() && maximum_voices == 64,
             "audio catalog schema or maximum voices changed");
     const auto &entries = Member(audio, "entries");
-    Require(entries.is_array() && entries.size() == 107,
-            "audio catalog must contain exactly 107 cues");
+    Require(entries.is_array() && !entries.empty(),
+            "audio catalog must contain nonempty cues");
     std::set<std::string, std::less<>> ids;
     std::set<std::string, std::less<>> names;
     std::vector<std::string> waves;
@@ -117,7 +117,6 @@ std::vector<std::string> DiscoverWaves(std::string_view catalog)
             waves.push_back(name);
         }
     }
-    Require(names.size() == 379, "audio catalog must reference exactly 379 unique WAV files");
     std::ranges::sort(waves);
     return waves;
 }

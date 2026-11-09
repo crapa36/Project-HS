@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <initializer_list>
 #include <limits>
 #include <span>
@@ -21,6 +22,7 @@
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace hs::content
@@ -70,11 +72,6 @@ std::unordered_set<std::string> CollectIds(const Json &entries, std::string_view
 void RequireReference(const std::unordered_set<std::string> &ids,
                       const std::string &reference, std::string_view file,
                       std::string_view path);
-const Json &FindParameterValue(const Json &entry, std::string_view file,
-                               std::string_view path, std::string_view key);
-double ParameterNumber(const Json &entry, std::string_view file, std::string_view path,
-                       std::string_view key);
-
 template <typename Number>
 void RequirePositive(Number value, std::string_view file, std::string_view path)
 {

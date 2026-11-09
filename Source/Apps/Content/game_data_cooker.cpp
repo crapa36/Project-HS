@@ -1,4 +1,4 @@
-#include "content_cooker.hpp"
+#include "game_data_parameters.hpp"
 #include "game_data_numbers.hpp"
 
 #include <algorithm>
@@ -105,33 +105,6 @@ SpawnViewBounds DeriveMaxZoomView(const PresentationCamera &camera)
     return bounds;
 }
 
-template <typename Expected>
-void RequireParameterKeys(const Json &entry, std::string_view file, std::string_view path,
-                          const Expected &expected)
-{
-    const auto &parameters = RequireArray(entry, file, path, "parameters");
-    std::set<std::string, std::less<>> keys;
-    for (const auto key : expected) keys.emplace(key);
-    for (std::size_t index = 0; index < parameters.size(); ++index)
-    {
-        const auto parameter_path = std::string(path) + "/parameters/" + std::to_string(index);
-        const auto key = RequireString(parameters[index], file, parameter_path, "key");
-        RequireString(parameters[index], file, parameter_path, "unit");
-        RequireMember(parameters[index], file, parameter_path, "value");
-        if (!keys.erase(key))
-            ThrowValidationError(file, parameter_path + "/key", "unexpected or duplicate parameter key");
-    }
-    if (!keys.empty())
-        ThrowValidationError(file, std::string(path) + "/parameters", "missing parameter '" + *keys.begin() + "'");
-}
-
-void RequireParameterKeys(const Json &entry, std::string_view file, std::string_view path,
-                          std::initializer_list<std::string_view> expected)
-{
-    RequireParameterKeys<std::initializer_list<std::string_view>>(entry, file, path,
-                                                                  expected);
-}
-
 float CheckedFloatValue(double source, std::string_view file,
                         const std::string &path)
 {
@@ -161,18 +134,18 @@ float CoordinateFloat(const Json &value, std::string_view file, const std::strin
     return CheckedFloatValue(value.get<double>(), file, path);
 }
 
-float Number(const Json &entry, std::string_view file, const std::string &path,
+float Number(const ParameterValues &parameters, std::string_view file, const std::string &path,
              std::string_view key)
 {
-    const auto source = ParameterNumber(entry, file, path, key);
+    const auto source = ParameterNumber(parameters, file, path, key);
     return CheckedFloatValue(source, file,
                              path + "/parameters/" + std::string(key));
 }
 
-float PositiveProjectileSpeed(const Json &entry, std::string_view file,
+float PositiveProjectileSpeed(const ParameterValues &parameters, std::string_view file,
                               const std::string &path)
 {
-    const auto source = ParameterNumber(entry, file, path, "projectile_speed");
+    const auto source = ParameterNumber(parameters, file, path, "projectile_speed");
     try
     {
         return detail::CheckedPositiveFloat(source);
@@ -194,18 +167,18 @@ void RequireProjectileRangeProgress(float speed, float max_leg_range,
 }
 
 template <typename Type>
-Type Integer(const Json &entry, std::string_view file, const std::string &path,
+Type Integer(const ParameterValues &parameters, std::string_view file, const std::string &path,
              std::string_view key)
 {
-    return CheckedInteger<Type>(ParameterNumber(entry, file, path, key), file,
+    return CheckedInteger<Type>(ParameterNumber(parameters, file, path, key), file,
                                 path + "/parameters/" + std::string(key));
 }
 
 template <std::size_t Size>
-std::array<float, Size> Angles(const Json &entry, std::string_view file,
+std::array<float, Size> Angles(const ParameterValues &parameters, std::string_view file,
                                const std::string &path, std::string_view key)
 {
-    const auto &value = FindParameterValue(entry, file, path, key);
+    const auto &value = FindParameterValue(parameters, file, path, key);
     if (!value.is_array() || value.size() != Size)
         ThrowValidationError(file, path + "/parameters/" + std::string(key), "angle array has an unexpected length");
     std::array<float, Size> result{};
@@ -325,25 +298,27 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     if (RequireString(statuses[1], "stats", status_path(1), "id") != "status.bleed" || RequireString(statuses[2], "stats", status_path(2), "id") != "status.burn")
         ThrowValidationError("stats", "$/entries/0/statuses", "status order is part of the cooked ABI");
     data.statuses.first_tick_delay_ticks = data.stats.first_status_tick_delay_ticks;
-    data.statuses.tick_interval_ticks = ToTicks(ParameterNumber(statuses[1], "stats", status_path(1), "tick_interval"), "stats", status_path(1) + "/parameters/tick_interval");
+    const ParameterValues bleed_parameters(statuses[1], "stats", status_path(1));
+    const ParameterValues burn_parameters(statuses[2], "stats", status_path(2));
+    data.statuses.tick_interval_ticks = ToTicks(ParameterNumber(bleed_parameters, "stats", status_path(1), "tick_interval"), "stats", status_path(1) + "/parameters/tick_interval");
     data.status_tick_interval = data.statuses.tick_interval_ticks;
-    data.statuses.bleed.maximum_stacks = Integer<std::uint8_t>(statuses[1], "stats", status_path(1), "maximum_stacks");
+    data.statuses.bleed.maximum_stacks = Integer<std::uint8_t>(bleed_parameters, "stats", status_path(1), "maximum_stacks");
     if (data.statuses.bleed.maximum_stacks == 0 ||
         data.statuses.bleed.maximum_stacks > 5)
         ThrowValidationError("stats", status_path(1) + "/parameters/maximum_stacks",
                              "maximum_stacks must fit the fixed bleed capacity");
-    data.statuses.bleed.duration_ticks = ToTicks(ParameterNumber(statuses[1], "stats", status_path(1), "duration"), "stats", status_path(1) + "/parameters/duration");
-    data.statuses.bleed.tick_interval_ticks = ToTicks(ParameterNumber(statuses[1], "stats", status_path(1), "tick_interval"), "stats", status_path(1) + "/parameters/tick_interval");
-    data.statuses.bleed.attack_power_multiplier_per_tick = Number(statuses[1], "stats", status_path(1), "attack_power_multiplier_per_tick");
+    data.statuses.bleed.duration_ticks = ToTicks(ParameterNumber(bleed_parameters, "stats", status_path(1), "duration"), "stats", status_path(1) + "/parameters/duration");
+    data.statuses.bleed.tick_interval_ticks = data.statuses.tick_interval_ticks;
+    data.statuses.bleed.attack_power_multiplier_per_tick = Number(bleed_parameters, "stats", status_path(1), "attack_power_multiplier_per_tick");
     data.bleed_duration = data.statuses.bleed.duration_ticks;
     data.bleed_tick_coefficient = data.statuses.bleed.attack_power_multiplier_per_tick;
-    data.statuses.burn.maximum_instances = Integer<std::uint8_t>(statuses[2], "stats", status_path(2), "maximum_instances");
+    data.statuses.burn.maximum_instances = Integer<std::uint8_t>(burn_parameters, "stats", status_path(2), "maximum_instances");
     if (data.statuses.burn.maximum_instances != 1)
         ThrowValidationError("stats", status_path(2) + "/parameters/maximum_instances",
                              "single strongest burn requires exactly one instance");
-    data.statuses.burn.duration_ticks = ToTicks(ParameterNumber(statuses[2], "stats", status_path(2), "duration"), "stats", status_path(2) + "/parameters/duration");
-    data.statuses.burn.tick_interval_ticks = ToTicks(ParameterNumber(statuses[2], "stats", status_path(2), "tick_interval"), "stats", status_path(2) + "/parameters/tick_interval");
-    data.statuses.burn.attack_power_multiplier_per_tick = Number(statuses[2], "stats", status_path(2), "attack_power_multiplier_per_tick");
+    data.statuses.burn.duration_ticks = ToTicks(ParameterNumber(burn_parameters, "stats", status_path(2), "duration"), "stats", status_path(2) + "/parameters/duration");
+    data.statuses.burn.tick_interval_ticks = ToTicks(ParameterNumber(burn_parameters, "stats", status_path(2), "tick_interval"), "stats", status_path(2) + "/parameters/tick_interval");
+    data.statuses.burn.attack_power_multiplier_per_tick = Number(burn_parameters, "stats", status_path(2), "attack_power_multiplier_per_tick");
     data.burn_duration = data.statuses.burn.duration_ticks;
     data.burn_tick_coefficient = data.statuses.burn.attack_power_multiplier_per_tick;
     if (data.statuses.bleed.tick_interval_ticks != data.statuses.burn.tick_interval_ticks)
@@ -503,6 +478,10 @@ BuiltGameData BuildGameData(const ContentSources &sources)
         RequireInteger(skill_document, "skills", "$", "upgrade_choices_per_skill"),
         "skills", "$/upgrade_choices_per_skill");
     const auto &skills = skill_document["entries"];
+    std::vector<ParameterValues> skill_parameters;
+    skill_parameters.reserve(skills.size());
+    for (std::size_t index = 0; index < skills.size(); ++index)
+        skill_parameters.emplace_back(skills[index], "skills", "$/entries/" + std::to_string(index));
     constexpr std::array skill_ids{"skill.basic_attack", "skill.piercing_shot", "skill.multishot", "skill.charged_shot", "skill.explosive_arrow", "skill.ricochet_arrow", "skill.arrow_rain", "skill.trap", "skill.retreat_shot"};
     constexpr std::array skill_logics{"basic_projectile_cadence", "piercing_projectile", "uniform_fan_projectiles", "hold_release_linear_charge", "projectile_to_area_explosion", "nearest_unhit_target_ricochet", "targeted_periodic_area", "forward_roll_leave_trap", "forced_retreat_and_projectile"};
     const std::array<std::set<std::string, std::less<>>, 9> skill_keys{{
@@ -520,26 +499,26 @@ BuiltGameData BuildGameData(const ContentSources &sources)
         const auto path = "$/entries/" + std::to_string(index);
         if (RequireString(skills[index], "skills", path, "id") != skill_ids[index] || RequireString(skills[index], "skills", path, "logic_id") != skill_logics[index])
             ThrowValidationError("skills", path, "skill ID/logic order is part of the cooked ABI");
-        RequireParameterKeys(skills[index], "skills", path, skill_keys[index]);
+        RequireParameterKeys(skill_parameters[index], "skills", path, skill_keys[index]);
         auto &s = data.skills[index];
         s.handler = static_cast<AbilityHandlerId>(index);
         s.starting_level = acquisition_level;
         s.maximum_level = maximum_level;
         s.selected_upgrades_per_session = upgrades_per_skill;
-        const auto n = [&](std::string_view key) { return Number(skills[index], "skills", path, key); };
+        const auto n = [&](std::string_view key) { return Number(skill_parameters[index], "skills", path, key); };
         const auto ticks = [&](std::string_view key) { return ToTicks(n(key), "skills", path + "/parameters/" + std::string(key)); };
-        if (index == 0) { s.damage_coefficient = n("damage_multiplier"); s.damage_multiplier = s.damage_coefficient; s.projectile_speed = n("projectile_speed"); s.range = n("range"); s.collision_radius = n("collision_radius"); s.pierce_count = Integer<std::uint8_t>(skills[index], "skills", path, "pierce"); if (Integer<std::uint8_t>(skills[index], "skills", path, "starting_level") != acquisition_level || Integer<std::uint8_t>(skills[index], "skills", path, "maximum_level") != maximum_level || Integer<std::uint8_t>(skills[index], "skills", path, "selected_upgrades_per_session") != upgrades_per_skill) ThrowValidationError("skills", path + "/parameters", "basic attack level limits must match the skills-wide values"); }
-        if (index == 1) { s.cooldown_ticks = ticks("cooldown"); s.damage_coefficient = n("damage_multiplier"); s.damage_multiplier = s.damage_coefficient; s.projectile_speed = n("projectile_speed"); s.range = n("range"); s.collision_radius = n("collision_radius"); s.pierce_count = Integer<std::uint8_t>(skills[index], "skills", path, "pierce"); s.pierce_damage_decay_fraction = n("damage_decay_per_pierce"); s.minimum_damage_fraction = n("minimum_damage_fraction"); s.maximum_hits_per_target = Integer<std::uint8_t>(skills[index], "skills", path, "maximum_hits_per_target"); }
-        if (index == 2) { s.cooldown_ticks = ticks("cooldown"); s.fan_angle_degrees = n("fan_angle"); s.projectile_count = Integer<std::uint8_t>(skills[index], "skills", path, "projectile_count"); s.damage_coefficient = n("damage_multiplier_per_arrow"); s.damage_multiplier_per_arrow = s.damage_coefficient; s.projectile_speed = n("projectile_speed"); s.range = n("range"); s.collision_radius = n("collision_radius"); s.pierce_per_arrow = Integer<std::uint8_t>(skills[index], "skills", path, "pierce_per_arrow"); s.pierce_count = s.pierce_per_arrow; s.maximum_hits_per_target = Integer<std::uint8_t>(skills[index], "skills", path, "maximum_hits_per_target"); }
-        if (index == 3) { s.maximum_charge_time_ticks = ticks("maximum_charge_time"); s.duration_ticks = s.maximum_charge_time_ticks; s.minimum_damage_multiplier = n("minimum_damage_multiplier"); s.maximum_damage_multiplier = n("maximum_damage_multiplier"); s.damage_coefficient = s.maximum_damage_multiplier; s.minimum_range = n("minimum_range"); s.maximum_range = n("maximum_range"); s.range = s.maximum_range; s.minimum_collision_radius = n("minimum_collision_radius"); s.maximum_collision_radius = n("maximum_collision_radius"); s.collision_radius = s.maximum_collision_radius; s.projectile_speed = n("projectile_speed"); s.pierce_count = Integer<std::uint8_t>(skills[index], "skills", path, "pierce"); s.movement_speed_multiplier_while_charging = n("movement_speed_multiplier_while_charging"); s.cooldown_ticks = ticks("cooldown"); }
+        if (index == 0) { s.damage_coefficient = n("damage_multiplier"); s.damage_multiplier = s.damage_coefficient; s.projectile_speed = n("projectile_speed"); s.range = n("range"); s.collision_radius = n("collision_radius"); s.pierce_count = Integer<std::uint8_t>(skill_parameters[index], "skills", path, "pierce"); if (Integer<std::uint8_t>(skill_parameters[index], "skills", path, "starting_level") != acquisition_level || Integer<std::uint8_t>(skill_parameters[index], "skills", path, "maximum_level") != maximum_level || Integer<std::uint8_t>(skill_parameters[index], "skills", path, "selected_upgrades_per_session") != upgrades_per_skill) ThrowValidationError("skills", path + "/parameters", "basic attack level limits must match the skills-wide values"); }
+        if (index == 1) { s.cooldown_ticks = ticks("cooldown"); s.damage_coefficient = n("damage_multiplier"); s.damage_multiplier = s.damage_coefficient; s.projectile_speed = n("projectile_speed"); s.range = n("range"); s.collision_radius = n("collision_radius"); s.pierce_count = Integer<std::uint8_t>(skill_parameters[index], "skills", path, "pierce"); s.pierce_damage_decay_fraction = n("damage_decay_per_pierce"); s.minimum_damage_fraction = n("minimum_damage_fraction"); s.maximum_hits_per_target = Integer<std::uint8_t>(skill_parameters[index], "skills", path, "maximum_hits_per_target"); }
+        if (index == 2) { s.cooldown_ticks = ticks("cooldown"); s.fan_angle_degrees = n("fan_angle"); s.projectile_count = Integer<std::uint8_t>(skill_parameters[index], "skills", path, "projectile_count"); s.damage_coefficient = n("damage_multiplier_per_arrow"); s.damage_multiplier_per_arrow = s.damage_coefficient; s.projectile_speed = n("projectile_speed"); s.range = n("range"); s.collision_radius = n("collision_radius"); s.pierce_per_arrow = Integer<std::uint8_t>(skill_parameters[index], "skills", path, "pierce_per_arrow"); s.pierce_count = s.pierce_per_arrow; s.maximum_hits_per_target = Integer<std::uint8_t>(skill_parameters[index], "skills", path, "maximum_hits_per_target"); }
+        if (index == 3) { s.maximum_charge_time_ticks = ticks("maximum_charge_time"); s.duration_ticks = s.maximum_charge_time_ticks; s.minimum_damage_multiplier = n("minimum_damage_multiplier"); s.maximum_damage_multiplier = n("maximum_damage_multiplier"); s.damage_coefficient = s.maximum_damage_multiplier; s.minimum_range = n("minimum_range"); s.maximum_range = n("maximum_range"); s.range = s.maximum_range; s.minimum_collision_radius = n("minimum_collision_radius"); s.maximum_collision_radius = n("maximum_collision_radius"); s.collision_radius = s.maximum_collision_radius; s.projectile_speed = n("projectile_speed"); s.pierce_count = Integer<std::uint8_t>(skill_parameters[index], "skills", path, "pierce"); s.movement_speed_multiplier_while_charging = n("movement_speed_multiplier_while_charging"); s.cooldown_ticks = ticks("cooldown"); }
         if (index == 4) { s.cooldown_ticks = ticks("cooldown"); s.projectile_speed = n("projectile_speed"); s.range = n("range"); s.collision_radius = n("collision_radius"); s.explosion_radius = n("explosion_radius"); s.area_radius = s.explosion_radius; s.explosion_damage_multiplier = n("explosion_damage_multiplier"); s.damage_coefficient = s.explosion_damage_multiplier; }
-        if (index == 5) { s.cooldown_ticks = ticks("cooldown"); s.damage_coefficient = n("damage_multiplier"); s.damage_multiplier = s.damage_coefficient; s.projectile_speed = n("projectile_speed"); s.collision_radius = n("collision_radius"); s.initial_range = n("initial_range"); s.range = s.initial_range; s.ricochet_search_radius = n("ricochet_search_radius"); s.area_radius = s.ricochet_search_radius; s.maximum_ricochets = Integer<std::uint8_t>(skills[index], "skills", path, "maximum_ricochets"); s.pierce_count = s.maximum_ricochets; }
-        if (index == 6) { s.target_range = n("target_range"); s.range = s.target_range; s.cooldown_ticks = ticks("cooldown"); s.activation_delay_ticks = ticks("activation_delay"); s.area_radius = n("radius"); s.duration_ticks = ticks("duration"); s.tick_interval_ticks = ToAreaTickInterval(n("tick_interval"), "skills", path + "/parameters/tick_interval"); s.damage_coefficient = n("damage_multiplier_per_tick"); s.total_damage_ticks = Integer<std::uint8_t>(skills[index], "skills", path, "total_damage_ticks"); }
+        if (index == 5) { s.cooldown_ticks = ticks("cooldown"); s.damage_coefficient = n("damage_multiplier"); s.damage_multiplier = s.damage_coefficient; s.projectile_speed = n("projectile_speed"); s.collision_radius = n("collision_radius"); s.initial_range = n("initial_range"); s.range = s.initial_range; s.ricochet_search_radius = n("ricochet_search_radius"); s.area_radius = s.ricochet_search_radius; s.maximum_ricochets = Integer<std::uint8_t>(skill_parameters[index], "skills", path, "maximum_ricochets"); s.pierce_count = s.maximum_ricochets; }
+        if (index == 6) { s.target_range = n("target_range"); s.range = s.target_range; s.cooldown_ticks = ticks("cooldown"); s.activation_delay_ticks = ticks("activation_delay"); s.area_radius = n("radius"); s.duration_ticks = ticks("duration"); s.tick_interval_ticks = ToAreaTickInterval(n("tick_interval"), "skills", path + "/parameters/tick_interval"); s.damage_coefficient = n("damage_multiplier_per_tick"); s.total_damage_ticks = Integer<std::uint8_t>(skill_parameters[index], "skills", path, "total_damage_ticks"); }
         if (index == 7) { s.forward_roll_distance = n("forward_roll_distance"); s.range = s.forward_roll_distance; s.forward_roll_duration_ticks = ticks("forward_roll_duration"); s.cooldown_ticks = ticks("cooldown"); s.activation_delay_ticks = ticks("activation_delay"); s.active_duration_ticks = ticks("active_duration"); s.duration_ticks = s.active_duration_ticks; s.detection_radius = n("detection_radius"); s.explosion_radius = n("explosion_radius"); s.area_radius = s.explosion_radius; s.damage_coefficient = n("damage_multiplier"); s.slow_fraction = n("slow_fraction"); s.slow_duration_ticks = ticks("slow_duration"); }
-        if (index == 8) { s.forced_move_duration_ticks = ticks("forced_move_duration"); s.duration_ticks = s.forced_move_duration_ticks; s.forced_move_distance = n("forced_move_distance"); s.damage_coefficient = n("damage_multiplier"); s.damage_multiplier = s.damage_coefficient; s.cooldown_ticks = ticks("cooldown"); s.projectile_speed = n("projectile_speed"); s.collision_radius = n("collision_radius"); s.projectile_range = n("projectile_range"); s.range = s.projectile_range; s.pierce_count = Integer<std::uint8_t>(skills[index], "skills", path, "pierce"); }
+        if (index == 8) { s.forced_move_duration_ticks = ticks("forced_move_duration"); s.duration_ticks = s.forced_move_duration_ticks; s.forced_move_distance = n("forced_move_distance"); s.damage_coefficient = n("damage_multiplier"); s.damage_multiplier = s.damage_coefficient; s.cooldown_ticks = ticks("cooldown"); s.projectile_speed = n("projectile_speed"); s.collision_radius = n("collision_radius"); s.projectile_range = n("projectile_range"); s.range = s.projectile_range; s.pierce_count = Integer<std::uint8_t>(skill_parameters[index], "skills", path, "pierce"); }
     }
     data.skills[static_cast<std::size_t>(SkillKind::BasicAttack)].projectile_speed =
-        PositiveProjectileSpeed(skills[0], "skills", "$/entries/0");
+        PositiveProjectileSpeed(skill_parameters[0], "skills", "$/entries/0");
     // DifferentSkillTracker can emit a projectile for any active skill, including Trap.
     for (std::size_t index = 0; index < data.skills.size(); ++index)
     {
@@ -610,7 +589,20 @@ BuiltGameData BuildGameData(const ContentSources &sources)
                 ThrowValidationError("upgrades", path, "upgrade ordinal or logic_id does not match the typed ABI");
         }
     }
-    const auto U = [&](std::size_t g, std::size_t i) -> const Json & { return upgrade_groups[g]["entries"][i]; };
+    std::array<std::vector<ParameterValues>, 9> upgrade_parameters;
+    for (std::size_t group_index = 0; group_index < upgrade_groups.size(); ++group_index)
+    {
+        const auto &entries = upgrade_groups[group_index]["entries"];
+        auto &prepared = upgrade_parameters[group_index];
+        prepared.reserve(entries.size());
+        for (std::size_t ordinal = 0; ordinal < entries.size(); ++ordinal)
+        {
+            const auto path = "$/groups/" + std::to_string(group_index) + "/entries/" +
+                              std::to_string(ordinal);
+            prepared.emplace_back(entries[ordinal], "upgrades", path);
+        }
+    }
+    const auto U = [&](std::size_t g, std::size_t i) -> const ParameterValues & { return upgrade_parameters[g][i]; };
     const auto upath = [](std::size_t g, std::size_t i) { return "$/groups/" + std::to_string(g) + "/entries/" + std::to_string(i); };
     auto &u = data.upgrades;
     RequireParameterKeys(U(0,0), "upgrades", upath(0,0), {"cadence_interval","delay","damage_multiplier"}); u.basic_attack.third_attack_delayed = {Integer<std::uint32_t>(U(0,0),"upgrades",upath(0,0),"cadence_interval"), ToTicks(Number(U(0,0),"upgrades",upath(0,0),"delay"),"upgrades",upath(0,0)+"/parameters/delay"), Number(U(0,0),"upgrades",upath(0,0),"damage_multiplier")};
@@ -658,6 +650,7 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     for (std::size_t index = 0; index < enemy_entries.size(); ++index)
     {
         const auto path = "$/entries/" + std::to_string(index);
+        const ParameterValues parameters(enemy_entries[index], "enemies", path);
         RequireIdAndLogic(enemy_entries[index], "enemies", path, enemy_ids[index], enemy_logics[index]);
         if (RequireString(enemy_entries[index], "enemies", path, "mesh_asset_id") !=
             enemy_meshes[index])
@@ -669,9 +662,9 @@ BuiltGameData BuildGameData(const ContentSources &sources)
         enemy.collision_radius = enemy_entries[index].contains("collision_radius")
             ? RequiredFloat(enemy_entries[index], "enemies", path, "collision_radius")
             : common_enemy_radius;
-        if (index == 0) { RequireParameterKeys(enemy_entries[index], "enemies", path, {"attack_range","telegraph_duration","base_damage","reattack_interval"}); enemy.damage=Integer<std::int32_t>(enemy_entries[index],"enemies",path,"base_damage"); enemy.attack_range=Number(enemy_entries[index],"enemies",path,"attack_range"); enemy.warning_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"telegraph_duration"),"enemies",path+"/parameters/telegraph_duration"); enemy.attack_cooldown_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"reattack_interval"),"enemies",path+"/parameters/reattack_interval"); }
-        if (index == 1) { RequireParameterKeys(enemy_entries[index], "enemies", path, {"maximum_hold_distance","telegraph_duration","base_damage","projectile_speed","projectile_range","projectile_collision_radius","reattack_interval"}); enemy.damage=Integer<std::int32_t>(enemy_entries[index],"enemies",path,"base_damage"); enemy.attack_range=Number(enemy_entries[index],"enemies",path,"maximum_hold_distance"); enemy.warning_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"telegraph_duration"),"enemies",path+"/parameters/telegraph_duration"); enemy.attack_cooldown_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"reattack_interval"),"enemies",path+"/parameters/reattack_interval"); enemy.projectile_speed=PositiveProjectileSpeed(enemy_entries[index],"enemies",path); enemy.projectile_range=Number(enemy_entries[index],"enemies",path,"projectile_range"); enemy.projectile_collision_radius=Number(enemy_entries[index],"enemies",path,"projectile_collision_radius"); enemy.ranged_projectile_radius=enemy.projectile_collision_radius; }
-        if (index == 2) { RequireParameterKeys(enemy_entries[index], "enemies", path, {"stop_distance","telegraph_duration","explosion_radius","base_damage"}); enemy.damage=Integer<std::int32_t>(enemy_entries[index],"enemies",path,"base_damage"); enemy.attack_range=Number(enemy_entries[index],"enemies",path,"stop_distance"); enemy.suicide_stop_distance=enemy.attack_range; enemy.warning_ticks=ToTicks(Number(enemy_entries[index],"enemies",path,"telegraph_duration"),"enemies",path+"/parameters/telegraph_duration"); enemy.suicide_explosion_radius=Number(enemy_entries[index],"enemies",path,"explosion_radius"); enemy.projectile_range=enemy.suicide_explosion_radius; }
+        if (index == 0) { RequireParameterKeys(parameters, "enemies", path, {"attack_range","telegraph_duration","base_damage","reattack_interval"}); enemy.damage=Integer<std::int32_t>(parameters,"enemies",path,"base_damage"); enemy.attack_range=Number(parameters,"enemies",path,"attack_range"); enemy.warning_ticks=ToTicks(Number(parameters,"enemies",path,"telegraph_duration"),"enemies",path+"/parameters/telegraph_duration"); enemy.attack_cooldown_ticks=ToTicks(Number(parameters,"enemies",path,"reattack_interval"),"enemies",path+"/parameters/reattack_interval"); }
+        if (index == 1) { RequireParameterKeys(parameters, "enemies", path, {"maximum_hold_distance","telegraph_duration","base_damage","projectile_speed","projectile_range","projectile_collision_radius","reattack_interval"}); enemy.damage=Integer<std::int32_t>(parameters,"enemies",path,"base_damage"); enemy.attack_range=Number(parameters,"enemies",path,"maximum_hold_distance"); enemy.warning_ticks=ToTicks(Number(parameters,"enemies",path,"telegraph_duration"),"enemies",path+"/parameters/telegraph_duration"); enemy.attack_cooldown_ticks=ToTicks(Number(parameters,"enemies",path,"reattack_interval"),"enemies",path+"/parameters/reattack_interval"); enemy.projectile_speed=PositiveProjectileSpeed(parameters,"enemies",path); enemy.projectile_range=Number(parameters,"enemies",path,"projectile_range"); enemy.projectile_collision_radius=Number(parameters,"enemies",path,"projectile_collision_radius"); enemy.ranged_projectile_radius=enemy.projectile_collision_radius; }
+        if (index == 2) { RequireParameterKeys(parameters, "enemies", path, {"stop_distance","telegraph_duration","explosion_radius","base_damage"}); enemy.damage=Integer<std::int32_t>(parameters,"enemies",path,"base_damage"); enemy.attack_range=Number(parameters,"enemies",path,"stop_distance"); enemy.suicide_stop_distance=enemy.attack_range; enemy.warning_ticks=ToTicks(Number(parameters,"enemies",path,"telegraph_duration"),"enemies",path+"/parameters/telegraph_duration"); enemy.suicide_explosion_radius=Number(parameters,"enemies",path,"explosion_radius"); enemy.projectile_range=enemy.suicide_explosion_radius; }
     }
     const auto &ranged_enemy = data.enemies[1];
     RequireProjectileRangeProgress(ranged_enemy.projectile_speed,
@@ -695,7 +688,11 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     const auto &healing = relic_document["healing_pickup"];
     data.relic_drop.healing_pickup_probability = CheckedFloatValue(RequireNumber(healing, "relics", "$/healing_pickup", "normal_enemy_drop_probability_percent") / 100.0, "relics", "$/healing_pickup/normal_enemy_drop_probability_percent"); data.relic_drop.healing_pickup_maximum_hp_heal_fraction=RequiredFloat(healing, "relics", "$/healing_pickup", "maximum_hp_heal_fraction"); data.relic_drop.healing_pickup_independent_from_other_rewards=healing["independent_from_other_rewards"].get<bool>(); data.relic_drop.healing_pickup_can_coexist_with_xp_and_relic_box=healing["can_coexist_with_xp_and_relic_box"].get<bool>(); data.relic_chest_base_chance=data.relic_drop.normal_enemy_base_probability; data.relic_chest_miss_increment=data.relic_drop.normal_enemy_probability_increment_per_kill;
     const auto &relics = relic_document["entries"];
-    const auto relic_number = [&](std::size_t index,std::string_view key){return Number(relics[index],"relics","$/entries/"+std::to_string(index),key);}; const auto relic_ticks=[&](std::size_t index,std::string_view key){return ToTicks(relic_number(index,key),"relics","$/entries/"+std::to_string(index)+"/parameters/"+std::string(key));}; const auto relic_count=[&](std::size_t index,std::string_view key){return CheckedInteger<std::uint32_t>(relic_number(index,key),"relics","$/entries/"+std::to_string(index)+"/parameters/"+std::string(key));};
+    std::vector<ParameterValues> relic_parameters;
+    relic_parameters.reserve(relics.size());
+    for (std::size_t index = 0; index < relics.size(); ++index)
+        relic_parameters.emplace_back(relics[index], "relics", "$/entries/" + std::to_string(index));
+    const auto relic_number = [&](std::size_t index,std::string_view key){return Number(relic_parameters[index],"relics","$/entries/"+std::to_string(index),key);}; const auto relic_ticks=[&](std::size_t index,std::string_view key){return ToTicks(relic_number(index,key),"relics","$/entries/"+std::to_string(index)+"/parameters/"+std::string(key));}; const auto relic_count=[&](std::size_t index,std::string_view key){return CheckedInteger<std::uint32_t>(relic_number(index,key),"relics","$/entries/"+std::to_string(index)+"/parameters/"+std::string(key));};
     data.relics.bleed_kill_heal={relic_number(0,"maximum_hp_heal_fraction"),relic_ticks(0,"internal_cooldown")}; data.relics.burn_propagation={relic_number(1,"search_radius"),relic_number(1,"copied_burn_strength"),relic_count(1,"maximum_targets")}; data.relics.kill_cooldown_surge={relic_count(2,"kills_per_trigger"),relic_ticks(2,"all_active_cooldown_reduction")}; data.relics.bleed_burn_explosion={relic_number(3,"radius"),relic_number(3,"damage_multiplier"),relic_ticks(3,"per_target_cooldown")}; data.relics.radial_basic_attack={relic_count(4,"cadence_interval"),relic_count(4,"direction_count"),relic_number(4,"damage_multiplier")}; data.relics.basic_kill_tracker={relic_number(5,"search_radius"),relic_number(5,"damage_multiplier"),relic_count(5,"maximum_triggers_per_original_attack")}; data.relics.movement_echo={relic_number(6,"required_cumulative_distance"),relic_ticks(6,"position_history_age"),relic_number(6,"damage_multiplier")}; data.relics.alternating_skills={relic_ticks(7,"window"),relic_number(7,"cooldown_refund_fraction")}; data.relics.different_skill_tracker={relic_ticks(8,"window"),relic_number(8,"damage_multiplier"),relic_ticks(8,"per_target_cooldown")}; data.relics.damage_knockback={relic_number(9,"radius"),relic_number(9,"push_distance"),relic_number(9,"slow_fraction"),relic_ticks(9,"slow_duration"),relic_ticks(9,"cooldown")}; data.relics.once_revive={relic_number(10,"revive_hp_fraction"),relic_ticks(10,"invulnerability_duration"),relic_count(10,"maximum_triggers_per_session")}; data.relics.combat_hit_chain={relic_count(11,"direct_hits_per_trigger"),relic_number(11,"search_radius"),relic_count(11,"maximum_targets"),relic_number(11,"damage_multiplier")}; data.relics.projectile_cadence_reward={relic_count(12,"hits_per_trigger"),relic_ticks(12,"cooldown_reduction")}; data.relics.pre_damage_guard={relic_number(13,"damage_reduction_fraction"),relic_ticks(13,"cooldown")}; data.relics.slow_synergy={relic_number(14,"damage_multiplier"),relic_ticks(14,"per_target_cooldown")}; data.relics.area_resonance={relic_number(15,"damage_multiplier"),relic_ticks(15,"cooldown")}; data.relics.boss_pressure={relic_number(16,"damage_multiplier"),relic_ticks(16,"per_target_cooldown")}; data.relics.hit_streak_reward={relic_count(17,"direct_hits_per_trigger"),relic_number(17,"damage_multiplier")}; data.relics.pickup_reward={relic_number(18,"attack_power_fraction"),relic_ticks(18,"duration")}; data.relics.low_health_survival={relic_number(19,"health_threshold_fraction"),relic_number(19,"damage_reduction_fraction"),relic_ticks(19,"cooldown")};
 
     const auto &spawn = sources.documents.at("spawn_schedule"); const auto &intervals=spawn["continuous_intervals"]; const auto &compositions=spawn["compositions"]; const auto rate_at = [&](std::int64_t seconds) {
@@ -852,11 +849,12 @@ BuiltGameData BuildGameData(const ContentSources &sources)
         for (std::size_t pattern_index = 0; pattern_index < patterns.size(); ++pattern_index)
         {
             const auto path = pattern_path(pattern_index);
+            const ParameterValues parameters(patterns[pattern_index], "bosses", path);
             const auto id = RequireString(patterns[pattern_index], "bosses", path, "id");
             const auto logic = RequireString(patterns[pattern_index], "bosses", path, "logic_id");
             auto &out = data.bosses[boss_index].patterns[pattern_index];
-            const auto n = [&](std::string_view key) { return Number(patterns[pattern_index], "bosses", path, key); };
-            const auto i = [&](std::string_view key) { return Integer<std::uint8_t>(patterns[pattern_index], "bosses", path, key); };
+            const auto n = [&](std::string_view key) { return Number(parameters, "bosses", path, key); };
+            const auto i = [&](std::string_view key) { return Integer<std::uint8_t>(parameters, "bosses", path, key); };
             const auto d = [&](std::string_view key) { return ToTicks(n(key), "bosses", path + "/parameters/" + std::string(key)); };
             out.phase = static_cast<std::uint8_t>(id.find("phase2") != std::string::npos ? 2 : 1);
             const auto expected_logic = id.find("shockwave") != std::string::npos ? "expanding_shockwave_with_safe_gaps" :
@@ -869,25 +867,25 @@ BuiltGameData BuildGameData(const ContentSources &sources)
             if (id.find("charge") != std::string::npos && id.find("double") == std::string::npos)
             {
                 if (logic != "line_charge") ThrowValidationError("bosses", path + "/logic_id", "unexpected charge logic");
-                RequireParameterKeys(patterns[pattern_index], "bosses", path, {"telegraph_duration", "distance", "speed", "damage"});
+                RequireParameterKeys(parameters, "bosses", path, {"telegraph_duration", "distance", "speed", "damage"});
                 out.logic = BossPatternLogic::LineCharge; out.distance = n("distance"); out.speed = n("speed");
-                out.damage = Integer<std::int32_t>(patterns[pattern_index], "bosses", path, "damage");
+                out.damage = Integer<std::int32_t>(parameters, "bosses", path, "damage");
             }
             else if (id.find("shockwave") != std::string::npos)
             {
-                RequireParameterKeys(patterns[pattern_index], "bosses", path, {"telegraph_duration", "start_radius", "end_radius", "safe_gap_count", "safe_gap_angle", "duration", "tick_interval", "half_width", "damage"});
+                RequireParameterKeys(parameters, "bosses", path, {"telegraph_duration", "start_radius", "end_radius", "safe_gap_count", "safe_gap_angle", "duration", "tick_interval", "half_width", "damage"});
                 out.logic = BossPatternLogic::ExpandingShockwaveWithSafeGaps; out.start_radius=n("start_radius"); out.end_radius=n("end_radius");
                 out.safe_gap_count=i("safe_gap_count"); out.safe_gap_angle_degrees=n("safe_gap_angle"); out.shockwave_duration_ticks=d("duration"); out.tick_interval_ticks=d("tick_interval");
-                out.shockwave_half_width=n("half_width"); out.damage=Integer<std::int32_t>(patterns[pattern_index], "bosses", path, "damage");
+                out.shockwave_half_width=n("half_width"); out.damage=Integer<std::int32_t>(parameters, "bosses", path, "damage");
                 if (out.safe_gap_count == 0 || out.shockwave_half_width <= 0.0f)
                     ThrowValidationError("bosses", path + "/parameters",
                                          "shockwave gaps and half width must be positive");
             }
             else if (logic == "fan_projectiles")
             {
-                RequireParameterKeys(patterns[pattern_index], "bosses", path, {"telegraph_duration", "fan_angle", "projectile_count", "projectile_speed", "damage"});
+                RequireParameterKeys(parameters, "bosses", path, {"telegraph_duration", "fan_angle", "projectile_count", "projectile_speed", "damage"});
                 out.logic=BossPatternLogic::FanProjectiles; out.fan_angle_degrees=n("fan_angle"); out.projectile_count=i("projectile_count");
-                out.projectile_speed=PositiveProjectileSpeed(patterns[pattern_index], "bosses", path); out.damage=Integer<std::int32_t>(patterns[pattern_index], "bosses", path, "damage");
+                out.projectile_speed=PositiveProjectileSpeed(parameters, "bosses", path); out.damage=Integer<std::int32_t>(parameters, "bosses", path, "damage");
                 RequireProjectileRangeProgress(out.projectile_speed,
                                                data.boss_common.projectile_range,
                                                "bosses",
@@ -896,22 +894,22 @@ BuiltGameData BuildGameData(const ContentSources &sources)
             else if (logic == "predicted_position_ground_areas")
             {
                 const bool phase2 = out.phase == 2;
-                RequireParameterKeys(patterns[pattern_index], "bosses", path,
+                RequireParameterKeys(parameters, "bosses", path,
                     phase2 ? std::initializer_list<std::string_view>{"area_count", "radius", "telegraph_duration", "duration", "tick_interval", "damage_per_tick", "placement_radius"}
                            : std::initializer_list<std::string_view>{"area_count", "radius", "telegraph_duration", "duration", "tick_interval", "damage_per_tick", "placement_radius", "prediction_lead"});
                 out.logic=BossPatternLogic::PredictedPositionGroundAreas; out.area_count=i("area_count"); out.radius=n("radius"); out.duration_ticks=d("duration");
-                out.tick_interval_ticks=d("tick_interval"); out.damage_per_tick=Integer<std::int32_t>(patterns[pattern_index], "bosses", path, "damage_per_tick"); out.ground_placement_radius=n("placement_radius");
+                out.tick_interval_ticks=d("tick_interval"); out.damage_per_tick=Integer<std::int32_t>(parameters, "bosses", path, "damage_per_tick"); out.ground_placement_radius=n("placement_radius");
                 if (!phase2) out.prediction_lead_ticks=d("prediction_lead");
             }
             else if (logic == "double_retargeted_charge")
             {
-                RequireParameterKeys(patterns[pattern_index], "bosses", path, {"telegraph_duration", "charge_count", "interval", "distance", "speed", "damage"});
-                out.logic=BossPatternLogic::DoubleRetargetedCharge; out.charge_count=i("charge_count"); out.interval_ticks=d("interval"); out.distance=n("distance"); out.speed=n("speed"); out.damage=Integer<std::int32_t>(patterns[pattern_index], "bosses", path, "damage");
+                RequireParameterKeys(parameters, "bosses", path, {"telegraph_duration", "charge_count", "interval", "distance", "speed", "damage"});
+                out.logic=BossPatternLogic::DoubleRetargetedCharge; out.charge_count=i("charge_count"); out.interval_ticks=d("interval"); out.distance=n("distance"); out.speed=n("speed"); out.damage=Integer<std::int32_t>(parameters, "bosses", path, "damage");
             }
             else if (logic == "double_offset_fan_projectiles")
             {
-                RequireParameterKeys(patterns[pattern_index], "bosses", path, {"telegraph_duration", "volley_count", "interval", "projectiles_per_volley", "second_volley_angle_offset", "projectile_speed", "damage"});
-                out.logic=BossPatternLogic::DoubleOffsetFanProjectiles; out.volley_count=i("volley_count"); out.interval_ticks=d("interval"); out.projectiles_per_volley=i("projectiles_per_volley"); out.second_volley_angle_offset_degrees=n("second_volley_angle_offset"); out.projectile_speed=PositiveProjectileSpeed(patterns[pattern_index], "bosses", path); out.damage=Integer<std::int32_t>(patterns[pattern_index], "bosses", path, "damage");
+                RequireParameterKeys(parameters, "bosses", path, {"telegraph_duration", "volley_count", "interval", "projectiles_per_volley", "second_volley_angle_offset", "projectile_speed", "damage"});
+                out.logic=BossPatternLogic::DoubleOffsetFanProjectiles; out.volley_count=i("volley_count"); out.interval_ticks=d("interval"); out.projectiles_per_volley=i("projectiles_per_volley"); out.second_volley_angle_offset_degrees=n("second_volley_angle_offset"); out.projectile_speed=PositiveProjectileSpeed(parameters, "bosses", path); out.damage=Integer<std::int32_t>(parameters, "bosses", path, "damage");
                 RequireProjectileRangeProgress(out.projectile_speed,
                                                data.boss_common.projectile_range,
                                                "bosses",

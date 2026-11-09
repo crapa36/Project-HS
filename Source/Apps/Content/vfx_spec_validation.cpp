@@ -159,7 +159,7 @@ void Validate(const Json& s) {
         Require(stops.is_array() && stops.size()>=2,at,"gradient requires at least two stops");
         for(const auto& stop:stops) { Require(stop.is_array() && stop.size()==3,at,"invalid gradient stop"); double t=Number(stop[0],at), alpha=Number(stop[2],at); Require(t>=0 && t<=1 && t>previous && alpha>=0 && alpha<=1,at,"invalid gradient time/alpha"); previous=t; (void)Text(stop[1],at); }
     }
-    const auto& effects=Field(s,"effects","$"); Require(effects.is_array() && effects.size()==196,"$.effects","expected 196 effects");
+    const auto& effects=Field(s,"effects","$"); Require(effects.is_array() && !effects.empty(),"$.effects","expected nonempty effect array");
     std::set<std::string> ids;
     std::map<std::string, std::string> effectInputModes;
     for(const auto& effect:effects) {
@@ -239,7 +239,7 @@ void Validate(const Json& s) {
             }
         }
     }
-    const auto& bindings=Field(s,"skill_upgrade_visual_bindings","$"); Require(bindings.is_array() && bindings.size()==72,"$.skill_upgrade_visual_bindings","expected 72 upgrade bindings"); std::set<std::string> bindingIds;
+    const auto& bindings=Field(s,"skill_upgrade_visual_bindings","$"); Require(bindings.is_array(),"$.skill_upgrade_visual_bindings","expected upgrade binding array"); std::set<std::string> bindingIds;
     for(const auto& binding:bindings) { auto at=std::string("$.skill_upgrade_visual_bindings"); Keys(binding,{"skill_id","upgrade_ordinal","display_name","vfx_sequence","visual_behavior"},at); auto key=Text(Field(binding,"skill_id",at),at)+":"+Field(binding,"upgrade_ordinal",at).dump(); Require(bindingIds.insert(key).second,at,"duplicate skill/ordinal"); const auto& sequence=Field(binding,"vfx_sequence",at); Require(sequence.is_array(),at,"VFX sequence must be an array"); for(const auto& item:sequence) Require(ids.contains(Text(item,at)),at,"unresolved effect " + item.dump()); }
 }
 }

@@ -326,6 +326,7 @@ Result LoadSelectedGeneration(const fs::path &pointer_path,
             has_previous_edge = true;
         }
         loaded.product_dependencies = std::move(dependencies);
+        loaded.pointer_snapshot_ = std::move(pointer_bytes);
         generation = std::move(loaded);
         return Result::Success();
     }

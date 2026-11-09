@@ -15,14 +15,15 @@ graphics = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(graphics)
 STAGES = ("adapter", "render", "wait", "streaming", "scene_prepare", "ui", "prepare_render_data",
           "graph_build", "graph_prepare", "descriptors", "graph_plan", "graph_record", "graph_submit",
-          "post_submit", "present", "diagnostics", "wrapper")
+          "post_submit", "present", "diagnostics", "wrapper", "previous_capture_log")
 # Legacy subsets are read only when their columns are present in historical captures.
 SUBSTAGES = {"upload_constants": "prepare_render_data", "ray_geometry_register": "graph_build", "ray_omm_prepare_register": "graph_build",
              "ray_scene_register": "graph_build", "graph_prepare_validation": "graph_prepare",
              "graph_prepare_info_key": "graph_prepare", "graph_prepare_compile": "graph_prepare",
              "graph_prepare_transient": "graph_prepare"}
 PHASES = ("main_menu", "playing", "paused", "card_selection", "stat_allocation", "relic_selection", "victory", "defeat", "quit_requested")
-STAGE_LABELS = {"prepare_render_data": "Frame.PrepareRenderData", "upload_constants": "Frame.UploadConstants"}
+STAGE_LABELS = {"prepare_render_data": "Frame.PrepareRenderData", "upload_constants": "Frame.UploadConstants",
+                "previous_capture_log": "Runtime.PreviousCaptureLog (diagnostic recording)"}
 
 
 def number(value):
@@ -115,6 +116,7 @@ def frame_scope():
             "cpu_stages": {key: Stats() for key in STAGES},
             "cpu_substages": {key: Stats() for key in SUBSTAGES},
             "cpu_unattributed": {parent: Stats() for parent in dict.fromkeys(SUBSTAGES.values())},
+            "render_thread_cpu_execution": Stats(), "render_thread_cpu_unavailable_frames": 0,
             "streamline_present": {"observations": 0, "frames": 0, "seconds": 0.0, "excluded": 0, "invalid": 0},
             "slot_wait": Stats(), "phases": Counter(),
             "cached_fields": defaultdict(Stats), "diagnostic_identity_invalid": 0, "tick_min": None, "tick_max": None}
@@ -187,6 +189,10 @@ def frame_report(data):
             "cpu_stage_subsets_wall_ms": {key: {"parent_stage": SUBSTAGES[key], **value.result()}
                                           for key, value in data["cpu_substages"].items() if value.count or value.rejected},
             "cpu_stage_unattributed_wall_ms": {key: value.result() for key, value in data["cpu_unattributed"].items() if value.count or value.rejected},
+            "render_thread_cpu_execution": {
+                "execution_ms": data["render_thread_cpu_execution"].result(),
+                "unavailable_frames": data["render_thread_cpu_unavailable_frames"],
+                "scope": "current render thread only; excludes worker CPU; Windows CPU accounting may quantize short intervals; separate from elapsed stages"},
             "streamline_reported_present": presentation_report(data["streamline_present"]),
             "frame_slot_wait_ms": data["slot_wait"].result(),
             "cached_frame_metrics": {key: value.result() for key, value in data["cached_fields"].items()},
@@ -314,7 +320,8 @@ def utilization(directory, bounds, issues):
     sources = []
     for path in source_paths:
         source = {"directory": str(path.resolve()), "supplemental": path != directory,
-                  "sampled_wall_seconds": 0.0, "accepted_intervals": 0, "overlapping_intervals_excluded": 0, "metadata": {}}
+                  "sampled_wall_seconds": 0.0, "accepted_intervals": 0, "overlapping_intervals_excluded": 0,
+                  "out_of_range_intervals_excluded": 0, "metadata": {}}
         for filename in ("pdh-worker.json", "sampling.json", "auxiliary-worker.json"):
             if (path / filename).exists():
                 try:
@@ -328,8 +335,10 @@ def utilization(directory, bounds, issues):
         try:
             for rows, wall in counter_intervals(csv_rows(path / "gpu-engines.csv"), bounds):
                 target = [row for row in rows if int(row["pid"]) == pid and row.get("target_process") == "1"
-                          and row.get("status") in ("0", "1") and number(row.get("utilization_percent")) is not None
-                          and number(row["utilization_percent"]) >= 0]
+                          and row.get("status") in ("0", "1") and number(row.get("utilization_percent")) is not None]
+                if any(not 0 <= number(row["utilization_percent"]) <= 100 for row in target):
+                    sources[source_index]["out_of_range_intervals_excluded"] += 1
+                    continue
                 if target:
                     end = number(target[0]["qpc"]) / number(target[0]["qpc_frequency"])
                     yield end, source_index, end - wall, target, wall
@@ -352,6 +361,9 @@ def utilization(directory, bounds, issues):
         for key, value in per_engine.items(): engines[key].add(value, wall)
         busiest.add(max(per_engine.values()), wall)
         source["sampled_wall_seconds"] += wall; source["accepted_intervals"] += 1
+    for source in sources:
+        if source["out_of_range_intervals_excluded"]:
+            issues.append(f"GPU segment {source['directory']} excluded {source['out_of_range_intervals_excluded']} intervals with engine counters outside 0..100%; these intervals remain N/A")
     if not busiest.count: issues.append("No valid aligned target-PID GPU engine samples; GPU utilization is N/A")
     windows = bound_windows(bounds)
     window = sum(end - begin for begin, end in windows) if bounds is not None else None
@@ -440,6 +452,11 @@ def analyze(directory):
             if row.get("foreground") in ("0", "1"): seen_foregrounds.add(int(row["foreground"]))
             for scope in current_scopes:
                 target = frame_data[scope]; target["frames"] += 1
+                render_thread_cpu_us = number(row.get("render_thread_cpu_us"))
+                if row.get("render_thread_cpu_valid") == "1" and render_thread_cpu_us is not None and render_thread_cpu_us >= 0:
+                    target["render_thread_cpu_execution"].add(render_thread_cpu_us / 1000)
+                else:
+                    target["render_thread_cpu_unavailable_frames"] += 1
                 tick = number(row.get("tick"))
                 if tick is not None:
                     target["tick_min"] = int(tick) if target["tick_min"] is None else min(target["tick_min"], int(tick))
@@ -447,6 +464,8 @@ def analyze(directory):
                 phase = int(row["session_phase"]); target["phases"][PHASES[phase] if 0 <= phase < len(PHASES) else f"unknown:{phase}"] += 1
                 for stage in STAGES:
                     column = stage + "_us"
+                    if stage == "previous_capture_log" and column not in row:
+                        continue  # Historical captures predate this outer-loop timing.
                     value = number(row.get(column, row.get("constants_upload_us") if stage == "prepare_render_data" else None)); target["cpu_stages"][stage].add(value / 1000 if value is not None else None)
                 for stage in SUBSTAGES:
                     if stage + "_us" in row:
@@ -695,7 +714,8 @@ def write_outputs(directory, result):
     overall, playing = summary["overall"], summary["playing"]
     report = [f"Capture analysis: {summary['analysis_status']}", "", f"Runtime/own-frame GPU coverage complete: {summary['capture_complete']}. CPU frames {summary['cpu_frame_count']}; GPU completed frames {summary['gpu_frame_count']}.", "",
               f"Playing contiguous same-phase/config FPS: {fmt(playing['fps_contiguous_same_phase_config']['fps'])}; Playing frames: {playing['frames']}.",
-              f"Overall contiguous same-phase/config FPS: {fmt(overall['fps_contiguous_same_phase_config']['fps'])}; raw adjacent QPC throughput: {fmt(overall['raw_adjacent_frame_throughput']['fps'])}.", "",
+              f"Overall contiguous same-phase/config FPS: {fmt(overall['fps_contiguous_same_phase_config']['fps'])}; raw adjacent QPC throughput: {fmt(overall['raw_adjacent_frame_throughput']['fps'])}.",
+              f"Render-thread CPU execution: mean {fmt(overall['render_thread_cpu_execution']['execution_ms']['mean'])} ms, max {fmt(overall['render_thread_cpu_execution']['execution_ms']['max'])} ms; valid samples {overall['render_thread_cpu_execution']['execution_ms']['count']}, unavailable {overall['render_thread_cpu_execution']['unavailable_frames']} (current thread only; quantized; not additive to elapsed wall stages).", "",
               f"Playing GPU critical path mean: {fmt(summary['playing_gpu_critical_path_ms']['mean'])} ms; overall {fmt(summary['gpu_critical_path_ms']['mean'])} ms. This is not GPU busy percentage or an FPS estimate.", ""]
     union = summary["timestamped_gpu_pass_interval_union"].get("playing")
     lines = ["Timestamped GPU pass interval union (Playing only)", "",
@@ -891,7 +911,9 @@ def self_test():
         ).split(",")
         frames = [{**dict.fromkeys(old_columns, 0), **{stage + "_us": 1000 for stage in STAGES}, "frame": i, "config_revision": 1 if i <= 2 else 2,
                    "session_phase": 1, "foreground": 1 if i <= 2 else 0, "frame_qpc": 1000000 + (i - 1) * 20000, "qpc_frequency": 1000000,
-                   "render_us": 10000, "graph_record_us": 2000, "renderer_diagnostics_valid": 1} for i in (1, 2, 3, 4)]
+                   "render_us": 10000, "graph_record_us": 2000, "renderer_diagnostics_valid": 1,
+                   "render_thread_cpu_valid": 0 if i == 3 else 1,
+                   "render_thread_cpu_us": {1: 2000, 2: 0, 3: 0, 4: -1}[i]} for i in (1, 2, 3, 4)]
         write("performance.csv", frames)
         gpu = []
         for identity in (1, 2, 3, 4):
@@ -922,10 +944,21 @@ def self_test():
         summary, options, gpu_times, cpu_times = analyze(directory)
         assert summary["capture_complete"] and summary["gpu_frame_count"] == 4
         assert summary["analysis_status"] == "complete"
-        legacy_frames = [{key: value for key, value in row.items() if key != "prepare_render_data_us"} for row in frames]
+        execution = summary["overall"]["render_thread_cpu_execution"]
+        assert execution["execution_ms"]["count"] == 2 and execution["execution_ms"]["mean"] == 1
+        assert execution["unavailable_frames"] == 2
+        assert summary["playing"]["cpu_stage_wall_ms"]["previous_capture_log"]["mean"] == 1
+        legacy_frames = [{key: value for key, value in row.items()
+                          if key not in ("prepare_render_data_us", "previous_capture_log_us",
+                                         "render_thread_cpu_valid", "render_thread_cpu_us")} for row in frames]
         for row in legacy_frames: row["constants_upload_us"] = 1000
         write("performance.csv", legacy_frames)
-        assert analyze(directory)[0]["playing"]["cpu_stage_wall_ms"]["prepare_render_data"]["mean"] == 1
+        legacy = analyze(directory)[0]
+        assert legacy["playing"]["cpu_stage_wall_ms"]["prepare_render_data"]["mean"] == 1
+        assert not legacy["playing"]["cpu_stage_wall_ms"]["previous_capture_log"]["available"]
+        assert not legacy["overall"]["render_thread_cpu_execution"]["execution_ms"]["available"]
+        assert legacy["overall"]["render_thread_cpu_execution"]["unavailable_frames"] == 4
+        assert legacy["analysis_status"] == "complete"
         write("performance.csv", frames)
         current_manifest = [row for row in manifest if row["key"] in graphics.CURRENT_OPTION_KEYS]
         write("graphics_settings.csv", current_manifest)
@@ -1041,6 +1074,24 @@ def self_test():
         weighted_gpu = analyze(directory)[0]["utilization"]["process_gpu"]
         assert math.isclose(weighted_gpu["sampled_wall_seconds"], .06)
         assert math.isclose(weighted_gpu["busiest_engine_percent"]["weighted_mean"], 110 / 3)
+        boundary = [{**row, "utilization_percent": 100 if row["sample"] == 3 else 0} for row in weighted]
+        write("utilization/gpu-engines.csv", boundary)
+        boundary_gpu = analyze(directory)[0]["utilization"]["process_gpu"]
+        assert math.isclose(boundary_gpu["sampled_wall_seconds"], .06)
+        assert boundary_gpu["busiest_engine_percent"]["min"] == 0
+        assert boundary_gpu["busiest_engine_percent"]["max"] == 100
+        assert boundary_gpu["sources"][0]["out_of_range_intervals_excluded"] == 0
+        for invalid in (-1, 100.001, 559.579):
+            invalid_rows = [{**row, "utilization_percent": invalid if row["sample"] == 3 else row["utilization_percent"]}
+                            for row in weighted]
+            invalid_rows.append({**weighted[-1], "engine": 99, "utilization_percent": 70})
+            write("utilization/gpu-engines.csv", invalid_rows)
+            invalid_summary = analyze(directory)[0]
+            invalid_gpu = invalid_summary["utilization"]["process_gpu"]
+            assert math.isclose(invalid_gpu["sampled_wall_seconds"], .01)
+            assert invalid_gpu["busiest_engine_percent"]["weighted_mean"] == 20
+            assert invalid_gpu["sources"][0]["out_of_range_intervals_excluded"] == 1
+            assert any("outside 0..100%" in issue for issue in invalid_summary["issues"])
         # Matching integer IDs must never attach late PDH initialization to an early CPU sample.
         write("utilization/gpu-engines.csv", [{**row,"sample":row["sample"]-76,
               "qpc":row["qpc"]+30000000} for row in gpu_counters])

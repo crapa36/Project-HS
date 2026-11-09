@@ -22,10 +22,13 @@ struct SelectedGeneration
     std::unordered_map<std::string, std::string> product_digests;
     std::unordered_map<std::string, std::vector<std::string>> product_dependencies;
 
+    [[nodiscard]] std::string_view PointerSnapshot() const noexcept { return pointer_snapshot_; }
+
     [[nodiscard]] Result Require(std::string_view logical_id,
                                  std::filesystem::path &path) const;
 
 private:
+    std::string pointer_snapshot_;
     // Copies share the read lease; the final owner releases it.
     std::shared_ptr<GenerationFileLock> reader_lease_;
     friend Result LoadSelectedGeneration(const std::filesystem::path &, SelectedGeneration &);

@@ -5,6 +5,7 @@
 
 #include <hs/core/cooked_format.hpp>
 #include <hs/render_data/material_descriptor.hpp>
+#include <hs/render_data/geometry_descriptor.hpp>
 #include <hs/render_data/material_schema.hpp>
 #include <hs/render_data/material_ir.hpp>
 #include <hs/render_data/render_asset_format.hpp>
@@ -765,6 +766,8 @@ void Produce(std::string_view name, const fs::path &source_root,
         const auto cooked_hierarchy = hs::geometry_content::CookGeometryHierarchy(
             packages.front().vertices, geometry_flags, "render/hierarchy/" + std::string(name),
             hierarchy_mapping, hierarchy_options, optical_profiles);
+        const auto hierarchy_bytes = rd::EncodeGeometryHierarchy(cooked_hierarchy.hierarchy);
+        const rd::AdmittedGeometryHierarchy admitted_hierarchy(hierarchy_bytes);
         std::vector<std::string> hierarchy_dependencies;
         for (std::size_t index = 0; index < cooked_hierarchy.pages.size(); ++index)
         {
@@ -773,8 +776,8 @@ void Produce(std::string_view name, const fs::path &source_root,
             const std::vector<std::string> dependencies{packages.front().mesh_id};
             const auto bytes = rd::BuildGeometryPage(hs::MakeAssetId(page_id), dependencies,
                 cooked_hierarchy.pages[index]);
-            const auto payload = rd::DecodeGeometryPagePayload(bytes, hs::MakeAssetId(page_id), geometry_flags);
-            rd::ValidateGeometryHierarchyPage(cooked_hierarchy.hierarchy, static_cast<std::uint32_t>(index), payload);
+            const auto payload = rd::PrepareGeometryPagePayload(bytes, hs::MakeAssetId(page_id), geometry_flags);
+            admitted_hierarchy.ValidatePage(static_cast<std::uint32_t>(index), payload);
             const auto filename = fs::path(page_id).filename().string();
             const auto output = stage / filename;
             ap::WriteBytes(output, bytes);
@@ -782,7 +785,6 @@ void Produce(std::string_view name, const fs::path &source_root,
             product.dependencies = dependencies;
             products.push_back(std::move(product));
         }
-        const auto hierarchy_bytes = rd::EncodeGeometryHierarchy(cooked_hierarchy.hierarchy);
         const auto hierarchy_filename = fs::path(packages.front().hierarchy_id).filename().string();
         const auto hierarchy_output = stage / hierarchy_filename;
         ap::WriteBytes(hierarchy_output, hierarchy_bytes);

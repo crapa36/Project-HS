@@ -46,26 +46,3 @@ function Select-HsExactTests($Metadata, [string[]]$Names) {
     }
     return $selected.ToArray()
 }
-
-function Get-HsNinjaQuery([string]$Ninja, [string]$BuildRoot, [string]$Target, [hashtable]$Cache = @{}) {
-    $ErrorActionPreference = 'Continue'
-    if ($Cache.ContainsKey($Target)) { return $Cache[$Target] }
-    $query = @(& $Ninja -C $BuildRoot -t query $Target 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        throw "Ninja dependency query failed for $Target`: $([string]::Join(' ', $query))"
-    }
-    $dependencies = @()
-    $inInputs = $false
-    $rule = ''
-    foreach ($lineObject in $query) {
-        $line = [string]$lineObject
-        if ($line -match '^  input: (.+)$') { $inInputs = $true; $rule = $matches[1]; continue }
-        if ($line -match '^  outputs:') { $inInputs = $false; continue }
-        if ($inInputs -and $line.StartsWith('    ')) {
-            $dependencies += $line.Substring(4).TrimStart('|', ' ')
-        }
-    }
-    $result = [pscustomobject]@{ rule = $rule; dependencies = @($dependencies | Sort-Object -Unique) }
-    $Cache[$Target] = $result
-    return $result
-}

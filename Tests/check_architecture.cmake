@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 4.4)
 
-function(hs_check_module module forbidden_include_regex)
+function(hs_check_module module)
+    set(forbidden_include_regex "${ARGV1}")
     file(GLOB_RECURSE module_files
         "${SOURCE_ROOT}/Source/${module}/*.h"
         "${SOURCE_ROOT}/Source/${module}/*.hpp"
@@ -9,7 +10,7 @@ function(hs_check_module module forbidden_include_regex)
 
     foreach(module_file IN LISTS module_files)
         file(READ "${module_file}" contents)
-        if(contents MATCHES "(^|[\r\n])[ \t]*#[ \t]*include[ \t]*[<\"]hs/(${forbidden_include_regex})/")
+        if(forbidden_include_regex AND contents MATCHES "(^|[\r\n])[ \t]*#[ \t]*include[ \t]*[<\"]hs/(${forbidden_include_regex})/")
             message(FATAL_ERROR "${module} has a forbidden module include: ${module_file}")
         endif()
         if(contents MATCHES "(^|[\r\n])[ \t]*#[ \t]*include[^\r\n]*(Source/)?(Core|Jobs|GameDomain|GameRules|Gameplay|Presentation|AssetManifest|RenderData|RendererD3D12|Runtime)/Private")
@@ -27,6 +28,8 @@ hs_check_module(Presentation "jobs|game_rules|gameplay|asset_manifest|renderer|r
 hs_check_module(AssetManifest "jobs|game_domain|game_rules|gameplay|presentation|render_data|renderer|runtime")
 hs_check_module(RenderData "jobs|game_domain|game_rules|gameplay|presentation|asset_manifest|renderer|runtime")
 hs_check_module(RendererD3D12 "game_domain|game_rules|gameplay|presentation|asset_manifest|runtime")
+hs_check_module(Runtime)
+hs_check_module(Apps)
 
 # Link checks consume the generated, configuration-specific File API graph.
 # CMakeLists requests codemodel 2.9 for each configure/generate invocation.

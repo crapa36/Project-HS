@@ -57,9 +57,9 @@ def sources(root):
     catalog.parent.mkdir(parents=True)
     entries = []
     index = 0
-    for cue in range(107):
+    for cue in range(2):
         names = []
-        for _ in range(4 if cue < 58 else 3):
+        for _ in range(2 if cue == 0 else 1):
             name = f'wave_{index:03}.wav'
             (audio / name).write_bytes(wave())
             names.append(name)
@@ -535,10 +535,14 @@ add_custom_target(fixture ALL DEPENDS "${{CMAKE_CURRENT_BINARY_DIR}}/consumer.st
         assert 'no work to do' in build_now().lower()
         assert receipt_count() == before_producer_change + 1
         time.sleep(1.1)
+        before_wave_change = pointer_path.read_bytes(), consumer.stat().st_mtime_ns
         (audio / 'wave_000.wav').write_bytes(wave(1))
         build_now()
         verify()
         assert json.loads(action_path.read_text())['product_set_id'] != action['product_set_id']
+        assert pointer_path.read_bytes() != before_wave_change[0], 'changed content did not reach the generation'
+        assert consumer.stat().st_mtime_ns != before_wave_change[1], 'changed generation did not rerun its consumer'
+        assert 'no work to do' in build_now().lower()
         previous_result = action_path.read_bytes()
         previous_pointer = pointer_path.read_bytes()
         (audio / 'wave_000.wav').write_bytes(b'truncated WAV')

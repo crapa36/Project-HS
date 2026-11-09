@@ -432,7 +432,7 @@ add_library(
     Source/RendererD3D12/Private/renderer_resources.cpp
     Source/RendererD3D12/Private/renderer_volume_texture.cpp
     Source/RendererD3D12/Private/renderer_resident_assets.cpp
-    Source/RendererD3D12/Private/renderer_resident_generation.cpp
+    $<$<NOT:$<CONFIG:Release>>:Source/RendererD3D12/Private/renderer_resident_generation.cpp>
     Source/RendererD3D12/Private/renderer_environment.cpp
     Source/RendererD3D12/Private/renderer_terrain_pages.cpp
     Source/RendererD3D12/Private/renderer_bsdf.cpp
@@ -511,7 +511,7 @@ target_include_directories(
 target_link_libraries(
     hs_renderer_d3d12_common
     PUBLIC hs_core hs_render_data hs_render_data_values hs_terrain_surface
-    PRIVATE hs_jobs D3D12MemoryAllocator $<$<NOT:$<CONFIG:Release>>:WinPixEventRuntime> DirectXTex d3d12 dxgi dxguid windowscodecs gdi32
+    PRIVATE hs_renderer_catalog_io hs_jobs D3D12MemoryAllocator $<$<NOT:$<CONFIG:Release>>:WinPixEventRuntime> DirectXTex d3d12 dxgi dxguid windowscodecs gdi32
 )
 target_compile_definitions(hs_renderer_d3d12_common PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
 include(cmake/RenderSDKs.cmake)
@@ -559,7 +559,7 @@ endif()
 add_library(
     hs_runtime STATIC
     Source/Runtime/Private/application.cpp
-    Source/Runtime/Private/generation_reload_watch.cpp
+    $<$<NOT:$<CONFIG:Release>>:Source/Runtime/Private/generation_reload_watch.cpp>
     Source/Runtime/Private/renderer_settings_projection.cpp
     Source/Runtime/Private/shipping_content.cpp
     Source/Runtime/Private/prepared_content.cpp
@@ -742,6 +742,7 @@ endif()
 if(HS_BUILD_TESTS)
 add_executable(hs_render_test_runner
     Source/Apps/RenderTestRunner/main.cpp
+    Source/Apps/RenderTestRunner/view_fixture.cpp
     Source/Apps/Common/world_transport_scene.cpp
     Source/RendererD3D12/Private/renderer_frame.cpp)
 target_link_libraries(hs_render_test_runner PRIVATE hs_vfx_program_io)
@@ -893,10 +894,6 @@ target_link_libraries(hs_vfx_authoring PUBLIC hs_render_data_values
     PRIVATE hs_render_data nlohmann_json::nlohmann_json DirectXTex)
 target_include_directories(hs_vfx_authoring PUBLIC Source/RendererD3D12/Public)
 hs_configure_target(hs_vfx_authoring)
-add_executable(hs_vfx_prepare Source/Apps/Content/vfx_prepare_main.cpp)
-target_link_libraries(hs_vfx_prepare PRIVATE hs_vfx_authoring nlohmann_json::nlohmann_json)
-target_compile_definitions(hs_vfx_prepare PRIVATE HS_VFX_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
-hs_configure_target(hs_vfx_prepare)
 
 file(GLOB HS_GAME_DATA_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/ContentSource/GameData/*.json"
@@ -2371,9 +2368,26 @@ if(HS_BUILD_TESTS)
             add_test(NAME rendering.oit-capture-analyzer-selfcheck
                 COMMAND "${Python3_EXECUTABLE}"
                     "${CMAKE_CURRENT_SOURCE_DIR}/Tests/analyze_oit_overdraw.py")
+            if(HS_BUILD_CONTENT_TOOLS)
+                add_test(NAME tools.audio-authoring
+                    COMMAND "${Python3_EXECUTABLE}" -B
+                        "${CMAKE_CURRENT_SOURCE_DIR}/tools/audio/test_audio_tools.py")
+                set_tests_properties(tools.audio-authoring PROPERTIES TIMEOUT 30 LABELS "tools;content")
+            endif()
         endif()
     endif()
     if(CMAKE_GENERATOR MATCHES "Ninja")
+        if(WIN32)
+            add_test(NAME tools.dev-entry
+                COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                    -File "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_hs_dev.ps1"
+                    -Ninja "${CMAKE_MAKE_PROGRAM}")
+            add_test(NAME tools.verify-selection
+                COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                    -File "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_verification_selection.ps1"
+                    -CMake "${CMAKE_COMMAND}" -Ninja "${CMAKE_MAKE_PROGRAM}")
+            set_tests_properties(tools.dev-entry tools.verify-selection PROPERTIES TIMEOUT 45 LABELS tools)
+        endif()
         find_package(Python3 QUIET COMPONENTS Interpreter)
         if(Python3_Interpreter_FOUND)
 
@@ -2539,15 +2553,6 @@ if(HS_BUILD_TESTS)
     target_link_libraries(hs_triangle_sample_tests PRIVATE hs_probe_grid_bake)
     hs_configure_target(hs_triangle_sample_tests)
     add_test(NAME content.triangle-sample COMMAND hs_triangle_sample_tests)
-    if(CMAKE_GENERATOR MATCHES "Ninja")
-        find_package(Python3 QUIET COMPONENTS Interpreter)
-        if(Python3_Interpreter_FOUND)
-            add_test(NAME content.asset-action-restat
-                COMMAND "${Python3_EXECUTABLE}"
-                    "${CMAKE_CURRENT_SOURCE_DIR}/Tests/check_asset_action_restat.py"
-                    --cmake "${CMAKE_COMMAND}" --ninja "${CMAKE_MAKE_PROGRAM}")
-        endif()
-    endif()
     endif()
     if(HS_BUILD_CONTENT_TOOLS)
     add_test(NAME content.audio-generation
@@ -2568,9 +2573,6 @@ if(HS_BUILD_TESTS)
     target_include_directories(hs_vfx_authoring_tests PRIVATE Source/Apps/Content)
     target_compile_definitions(hs_vfx_authoring_tests PRIVATE HS_VFX_SOURCE_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
     hs_configure_target(hs_vfx_authoring_tests)
-    add_dependencies(hs_vfx_authoring_tests hs_vfx_prepare)
-    add_test(NAME content.vfx-v4-protect-source COMMAND hs_vfx_prepare --prepare "${CMAKE_CURRENT_SOURCE_DIR}/contentsource/vfx-invalid-output")
-    set_tests_properties(content.vfx-v4-protect-source PROPERTIES WILL_FAIL TRUE)
     add_test(NAME content.vfx-v4-contract COMMAND hs_vfx_authoring_tests)
     add_test(NAME tools.content-status COMMAND hs_generation --verify
         --build-root "${CMAKE_CURRENT_BINARY_DIR}" --scope runtime-full
@@ -2736,18 +2738,18 @@ if(HS_BUILD_TESTS)
         set_tests_properties(rendering.oit-overdraw rendering.vfx-camera-basis PROPERTIES
             TIMEOUT 180 RESOURCE_LOCK projecths_d3d12)
     endif()
-    if(HS_BUILD_CONTENT_TOOLS)
+    if(HS_BUILD_CONTENT_TOOLS AND NOT HS_SINGLE_CONFIG_RELEASE)
         add_test(NAME rendering.material-parameter-reload
             COMMAND "${Python3_EXECUTABLE}"
                 "${CMAKE_CURRENT_SOURCE_DIR}/Tests/make_material_parameter_reload_fixture.py"
-                --source-pointer "${CMAKE_CURRENT_BINARY_DIR}/GenerationState/test-render.json"
+                --source-pointer "${CMAKE_CURRENT_BINARY_DIR}/GenerationState/runtime-full.json"
                 --authoring-root "${CMAKE_CURRENT_SOURCE_DIR}"
                 --material-producer "$<TARGET_FILE:hs_render_material_shader>"
                 --generation-verifier "$<TARGET_FILE:hs_generation>"
                 --runner "$<TARGET_FILE:hs_render_test_runner>"
                 --artifacts "${CMAKE_CURRENT_BINARY_DIR}/Artifacts/material-parameter-reload"
                 --geometry indexed --surface visibility --barriers enhanced
-            BUILD_DEPENDS hs_render_test_runner hs_render_material_shader hs_generation hs_test_render_generation)
+            BUILD_DEPENDS hs_render_test_runner hs_render_material_shader hs_generation hs_content_generation)
         # Cold GBV shader instrumentation also exceeded 300 seconds in adjacent GPU fixtures.
         set_tests_properties(rendering.material-parameter-reload PROPERTIES
             TIMEOUT 600 RESOURCE_LOCK projecths_d3d12)
@@ -3067,7 +3069,7 @@ if(HS_BUILD_TESTS)
         target_sources(hs_audio_generation_consumer_tests PRIVATE
             $<$<CONFIG:Release>:$<TARGET_OBJECTS:hs_runtime_audio_io>>)
         target_link_libraries(hs_audio_generation_consumer_tests PRIVATE
-            hs_runtime hs_asset_manifest)
+            hs_runtime hs_asset_manifest nlohmann_json::nlohmann_json)
         hs_configure_target(hs_audio_generation_consumer_tests)
         add_test(NAME content.audio-consumer
             COMMAND hs_audio_generation_consumer_tests

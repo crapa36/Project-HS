@@ -58,15 +58,6 @@ std::string SectionFile(std::size_t index, std::size_t plane)
 {
     return "arena_surface_section_" + std::to_string(index * 3 + plane) + ".rpkg";
 }
-std::string TileId(std::size_t index)
-{
-    return "render/terrain/arena_surface_tile_" + std::to_string(index) + ".rpkg";
-}
-std::string TileFile(std::size_t index)
-{
-    return "arena_surface_tile_" + std::to_string(index) + ".rpkg";
-}
-
 struct TerrainBc7Encoder
 {
     Microsoft::WRL::ComPtr<ID3D11Device> device;
@@ -164,41 +155,25 @@ bool Current(const fs::path &build, const ap::ActionSpec &spec)
         const auto metadata = rd::ReadTerrainSurfacePackage(
             std::as_bytes(std::span(bytes.data(), bytes.size())), hs::MakeAssetId(kMetadata));
         if (metadata.layout_version != rd::kTerrainSurfaceLayoutVersion || metadata.sections.empty() ||
-            metadata.sections.size() != metadata.section_products.size() ||
-            snapshot.ProductCount() != metadata.sections.size() * 4 + 1) return false;
+            metadata.section_products.size() != metadata.sections.size() * 3 ||
+            snapshot.ProductCount() != metadata.sections.size() * 3 + 1) return false;
         std::vector<std::string> dependencies;
         for (std::size_t i = 0; i < metadata.sections.size(); ++i)
         {
-          const auto leaf_id=TileId(i);
-          if(metadata.section_products[i]!=leaf_id) return false;
-          const auto leaf_bytes=snapshot.ReadProductBytes(leaf_id,ignored);
-          const auto leaf=rd::ReadTerrainSurfacePackage(
-              std::as_bytes(std::span(leaf_bytes.data(),leaf_bytes.size())),hs::MakeAssetId(leaf_id));
-          if(leaf.layout_version!=rd::kTerrainSurfaceLeafLayoutVersion || leaf.sections.size()!=1 ||
-              leaf.sections[0]!=metadata.sections[i] || leaf.section_products.size()!=3 ||
-              leaf.source_identity!=metadata.source_identity || leaf.description.width!=metadata.description.width ||
-              leaf.description.height!=metadata.description.height || leaf.description.array_size!=3 ||
-              leaf.description.mip_count!=metadata.description.mip_count || leaf.description.format!=metadata.description.format)
-              return false;
-          std::vector<std::string> leaf_dependencies;
-          for (std::size_t plane = 0; plane < 3; ++plane)
-        {
-            const auto id = SectionId(i, plane);
-            if (leaf.section_products[plane] != id ||
-                snapshot.ProductMetadata(id).value("dependencies", std::vector<std::string>{}) != dependencies)
-                return false;
-            leaf_dependencies.push_back(id);
-            const auto plane_bytes = snapshot.ReadProductBytes(id, ignored);
-            const auto plane_package = rd::ReadTexturePackage(
-                std::as_bytes(std::span(plane_bytes.data(), plane_bytes.size())), hs::MakeAssetId(id));
-            const auto &shape = plane_package.description;
-            if (shape.width != metadata.description.width || shape.height != metadata.description.height ||
-                shape.mip_count != metadata.description.mip_count || shape.format != metadata.description.format ||
-                shape.array_size != 1 || plane_package.subresources.size() != shape.mip_count) return false;
-        }
-          std::ranges::sort(leaf_dependencies);
-          if(snapshot.ProductMetadata(leaf_id).value("dependencies",std::vector<std::string>{})!=leaf_dependencies)
-              return false;
+            for (std::size_t plane = 0; plane < 3; ++plane)
+            {
+                const auto id = SectionId(i, plane);
+                if (metadata.section_products[i * 3 + plane] != id ||
+                    snapshot.ProductMetadata(id).value("dependencies", std::vector<std::string>{}) != dependencies)
+                    return false;
+                const auto plane_bytes = snapshot.ReadProductBytes(id, ignored);
+                const auto plane_package = rd::ReadTexturePackage(
+                    std::as_bytes(std::span(plane_bytes.data(), plane_bytes.size())), hs::MakeAssetId(id));
+                const auto &shape = plane_package.description;
+                if (shape.width != metadata.description.width || shape.height != metadata.description.height ||
+                    shape.mip_count != metadata.description.mip_count || shape.format != metadata.description.format ||
+                    shape.array_size != 1 || plane_package.subresources.size() != shape.mip_count) return false;
+            }
         }
         dependencies = metadata.section_products;
         std::ranges::sort(dependencies);
@@ -301,7 +276,7 @@ int main(int argc, char **argv)
             config.product_digests = generation.product_digests;
 
             std::vector<rd::TerrainSurfaceSection> sections;
-            std::vector<std::string> section_ids, leaf_ids, dependencies;
+            std::vector<std::string> section_ids, dependencies;
             std::vector<bool> written;
             std::vector<ap::Product> products;
             rd::TextureDescription description{};
@@ -321,10 +296,7 @@ int main(int argc, char **argv)
                     source_identity = identity;
                     written.resize(sections.size());
                     for (std::size_t i = 0; i < sections.size(); ++i)
-                    {
-                        leaf_ids.push_back(TileId(i));
                         for (std::size_t plane = 0; plane < 3; ++plane) section_ids.push_back(SectionId(i, plane));
-                    }
                     begun = true;
                     return hs::Result::Success();
                 },
@@ -346,28 +318,17 @@ int main(int argc, char **argv)
                         product.dependencies = dependencies;
                         products.push_back(std::move(product));
                     }
-                    auto leaf_description=description;leaf_description.array_size=3;
-                    const auto plane_ids=std::span(section_ids).subspan(size_t(index)*3,3);
-                    const auto leaf=rd::BuildTerrainSurfacePackage(hs::MakeAssetId(leaf_ids[index]),plane_ids,
-                        std::span(sections).subspan(index,1),leaf_description,source_identity);
-                    const auto filename=TileFile(index);
-                    const auto path=stage/filename;
-                    ap::WriteBytes(path,leaf);
-                    auto product=ap::HashProduct(leaf_ids[index],filename,path);
-                    product.dependencies.assign(plane_ids.begin(),plane_ids.end());
-                    std::ranges::sort(product.dependencies);
-                    products.push_back(std::move(product));
                     written[index] = true;
                     return hs::Result::Success();
                 }));
             Require(begun && std::ranges::all_of(written, [](bool value) { return value; }),
                 "Native terrain bake did not complete every section");
-            const auto metadata = rd::BuildTerrainSurfaceIndex(
-                hs::MakeAssetId(kMetadata), leaf_ids, sections, description, source_identity);
+            const auto metadata = rd::BuildTerrainSurfacePackage(
+                hs::MakeAssetId(kMetadata), section_ids, sections, description, source_identity);
             const auto metadata_path = stage / kMetadataFile;
             ap::WriteBytes(metadata_path, metadata);
             auto product = ap::HashProduct(std::string(kMetadata), std::string(kMetadataFile), metadata_path);
-            product.dependencies = leaf_ids;
+            product.dependencies = section_ids;
             std::ranges::sort(product.dependencies);
             products.push_back(std::move(product));
             ap::Publish(build, spec, stage, std::move(products));

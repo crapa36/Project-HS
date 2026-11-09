@@ -82,9 +82,10 @@ int main()
         fs::create_directories(manifest.parent_path());
         Write(fixture.root / "a.bin", "a");
         Write(fixture.root / "b.bin", "b");
-        Write(pointer, Json{{"schema_version", 1}, {"generation_id", id},
-                            {"scope", "test"},
-                            {"manifest_locator", "Generations/" + id + "/generation.json"}}.dump());
+        const auto pointer_bytes = Json{{"schema_version", 1}, {"generation_id", id},
+                                       {"scope", "test"},
+                                       {"manifest_locator", "Generations/" + id + "/generation.json"}}.dump();
+        Write(pointer, pointer_bytes);
         const auto product = [](const std::string &name) {
             return Json{{"logical_id", name}, {"action_id", "fixture"},
                         {"locator", name + ".bin"}, {"size", 1},
@@ -102,7 +103,8 @@ int main()
         hs::SelectedGeneration missing_manifest;
         const auto missing = hs::LoadSelectedGeneration(pointer, missing_manifest);
         Check(!missing.Succeeded(), "unchanged pointer with a missing manifest was retried as success");
-        Check(missing_manifest.id.empty(), "failed manifest acquisition changed the selected Generation");
+        Check(missing_manifest.id.empty() && missing_manifest.PointerSnapshot().empty(),
+              "failed manifest acquisition changed the selected Generation");
         Check(!fs::exists(fixture.root / ".generation-mutation.lock"),
               "readonly-style selection created a root mutation lock");
         Write(manifest, valid.dump());
@@ -114,6 +116,8 @@ int main()
         hs::SelectedGeneration loaded;
         const auto baseline = hs::LoadSelectedGeneration(pointer, loaded);
         Check(baseline.Succeeded(), std::string(baseline.Message()));
+        Check(loaded.PointerSnapshot() == pointer_bytes,
+              "selected Generation did not retain its admitted pointer bytes");
         Check(loaded.product_dependencies.at("a") == std::vector<std::string>{"b"} &&
                   loaded.product_dependencies.at("b").empty(),
               "selected Generation did not retain its validated direct dependencies");
@@ -124,6 +128,7 @@ int main()
         const auto corrupted = hs::VerifySelectedGenerationProducts(loaded);
         Check(!corrupted.Succeeded(), "same-size corrupted Generation product accepted");
         Check(loaded.id == saved.id && loaded.scope == saved.scope &&
+                  loaded.PointerSnapshot() == saved.PointerSnapshot() &&
                   loaded.product_paths == saved.product_paths &&
                   loaded.product_digests == saved.product_digests &&
                   loaded.product_dependencies == saved.product_dependencies,
@@ -134,6 +139,7 @@ int main()
             const auto result = hs::LoadSelectedGeneration(pointer, loaded);
             Check(!result.Succeeded(), "accepted " + reason);
             Check(loaded.id == saved.id && loaded.scope == saved.scope &&
+                      loaded.PointerSnapshot() == saved.PointerSnapshot() &&
                       loaded.product_paths == saved.product_paths &&
                       loaded.product_digests == saved.product_digests &&
                       loaded.product_dependencies == saved.product_dependencies,

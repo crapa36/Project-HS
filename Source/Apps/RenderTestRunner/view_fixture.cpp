@@ -1,0 +1,1120 @@
+#include "view_fixture.hpp"
+
+#include <hs/render_data/render_package.hpp>
+#include <hs/render_data/render_snapshot_storage.hpp>
+#include <hs/render_data/terrain_source_constants.hpp>
+#include <Windows.h>
+#include <wincodec.h>
+#include <wrl/client.h>
+
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <limits>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace hs::render_test
+{
+inline constexpr ViewId kOwnedViewProbePreview{0x50525641u};
+inline constexpr ViewId kOwnedViewProbeCapture{0x43415042u};
+
+namespace owned_view_probe_detail
+{
+inline Result Failure(std::string message)
+{
+    return Result::Failure(ErrorCode::TaskFailed, "hs_render_owned_view_probe", std::move(message));
+}
+inline bool SameIdentity(const FrameIdentity &a, const FrameIdentity &b)
+{
+    return a.actual_tick == b.actual_tick && a.render_frame_id == b.render_frame_id &&
+        a.view_id == b.view_id && a.presentation_id == b.presentation_id &&
+        a.provider_token == b.provider_token && a.provider_token_known == b.provider_token_known;
+}
+inline bool SameView(const RenderViewInput &a, const RenderViewInput &b)
+{
+    return a.id == b.id && a.role == b.role && a.camera.position == b.camera.position &&
+        a.camera.target == b.camera.target && a.camera.up.x == b.camera.up.x &&
+        a.camera.up.y == b.camera.up.y && a.camera.up.z == b.camera.up.z &&
+        a.camera.vertical_fov_degrees == b.camera.vertical_fov_degrees &&
+        a.near_plane == b.near_plane && a.far_plane == b.far_plane &&
+        a.scene_origin == b.scene_origin && a.view_origin == b.view_origin &&
+        a.output_extent == b.output_extent && a.render_capacity == b.render_capacity &&
+        a.render_active == b.render_active && a.camera_cut == b.camera_cut;
+}
+inline bool SameStamp(const RenderViewFrameResult &a, const RenderViewFrameResult &b)
+{
+    return SameIdentity(a.identity, b.identity) && a.submission_id == b.submission_id &&
+        a.rendered_frame == b.rendered_frame && a.history_generation == b.history_generation &&
+        SameView(a.rendered_view, b.rendered_view) &&
+        a.unjittered_view_projection == b.unjittered_view_projection;
+}
+inline bool SameRejectedResultEvidence(const RendererFrameResult &a, const RendererFrameResult &b)
+{
+    return a.frame == b.frame && SameIdentity(a.identity, b.identity) &&
+        a.view_history_generation == b.view_history_generation && SameView(a.rendered_view, b.rendered_view) &&
+        a.unjittered_view_projection == b.unjittered_view_projection &&
+        a.views.size() == b.views.size() && std::ranges::equal(a.views, b.views, SameStamp) &&
+        !a.vfx_world_step_submitted && a.vfx_world_tick == 0 && a.vfx_world_session_id == 0 &&
+        a.presented_ui_packet_generation == 0;
+}
+using Matrix = std::array<double, 16>;
+inline Matrix StampMatrix(const RenderViewFrameResult &stamp)
+{
+    Matrix matrix{};
+    std::ranges::transform(stamp.unjittered_view_projection, matrix.begin(),
+        [](float value) { return static_cast<double>(value); });
+    return matrix;
+}
+inline Matrix ReadMatrix(const nlohmann::ordered_json &inputs, const char *name)
+{
+    return inputs.at(name).get<Matrix>();
+}
+inline bool SameMatrix(const Matrix &a, const Matrix &b, double tolerance = 1.0e-4)
+{
+    for (std::size_t i = 0; i < a.size(); ++i)
+        if (std::abs(a[i] - b[i]) > tolerance) return false;
+    return true;
+}
+inline Result CaptureSurfaceReadback(D3D12Renderer &renderer, ViewId view_id,
+    const std::filesystem::path &path, std::uint64_t expected_frame,
+    nlohmann::ordered_json &metadata)
+{
+    if (auto captured = renderer.Capture({.view_id = view_id, .path = path,
+            .kind = CaptureKind::SurfaceDiagnostics}); !captured) return captured;
+    std::ifstream input(path);
+    if (!input) return Failure("Native surface readback metadata was not written.");
+    input >> metadata;
+    const auto &temporal = metadata.at("temporal_inputs");
+    if (temporal.is_null() || temporal.at("view_id").get<std::uint32_t>() != view_id.value ||
+        temporal.at("frame").get<std::uint64_t>() != expected_frame ||
+        metadata.value("foreground_depth_pixels", std::uint64_t{}) == 0)
+        return Failure("Surface readback does not identify the expected rendered view/frame or foreground pixels.");
+    return Result::Success();
+}
+
+inline Result VerifyTerrainSubmission(const nlohmann::ordered_json &metadata,
+    const StaticRenderScene &scene, const RenderInstance *dynamic_meadow)
+{
+    using Json = nlohmann::ordered_json;
+    const auto fail = [](std::string message) {
+        return Failure("Terrain submission readback " + std::move(message));
+    };
+    const auto finite_close = [](float actual, double expected) {
+        return std::isfinite(actual) && std::isfinite(expected) &&
+            std::abs(static_cast<double>(actual) - expected) <= 5.0e-5;
+    };
+    const auto read_float = [](const Json &row, const char *key) {
+        return row.at(key).get<float>();
+    };
+    const auto read_vec2 = [](const Json &row, const char *key) {
+        return row.at(key).get<std::array<float, 2>>();
+    };
+    const auto read_vec3 = [](const Json &row, const char *key) {
+        return row.at(key).get<std::array<float, 3>>();
+    };
+    const auto close_vec2 = [&](const std::array<float, 2> &actual, double x, double y) {
+        return finite_close(actual[0], x) && finite_close(actual[1], y);
+    };
+    const auto close_vec3 = [&](const std::array<float, 3> &actual, Float3 expected) {
+        return finite_close(actual[0], expected.x) && finite_close(actual[1], expected.y) &&
+            finite_close(actual[2], expected.z);
+    };
+    std::vector<const RenderInstance *> sources;
+    for (std::size_t index = 0; index < scene.instances.size(); ++index)
+    {
+        const auto &instance = scene.instances[index];
+        if (instance.mesh == RenderMesh::Ground || instance.mesh == RenderMesh::DirtPatch ||
+            (instance.mesh == RenderMesh::MeadowSurface && instance.environment_variant == 0))
+            sources.push_back(&instance);
+    }
+    const auto &submission = metadata.at("terrain_submission");
+    if (submission.is_null() || submission.at("section_stride").get<std::uint32_t>() != 56u ||
+        submission.at("frame_slot").get<std::uint32_t>() >= 3u ||
+        !submission.at("static_scene_available").get<bool>() ||
+        !submission.at("dynamic_scene_available").get<bool>())
+        return fail("has invalid slot, stride, or scene availability.");
+
+    const auto &sections = submission.at("sections");
+    const auto &static_rows = submission.at("static_instances");
+    const auto &dynamic_rows = submission.at("dynamic_instances");
+    const std::size_t static_count = sources.size();
+    const std::size_t section_count = static_count + (dynamic_meadow ? 1u : 0u);
+    if (sections.size() != section_count || static_rows.size() != static_count ||
+        dynamic_rows.size() != (dynamic_meadow ? 1u : 0u))
+        return fail("row counts do not match the expected static and dynamic terrain instances.");
+
+    int page_mode = -1;
+    std::uint64_t expected_page_slice{};
+    const auto check_section = [&](const Json &row, const RenderInstance &source,
+                                   bool dynamic) -> bool {
+        const bool meadow = source.mesh == RenderMesh::MeadowSurface;
+        const double section_scale = meadow ? 24.0 : 1.0;
+        const double cosine = std::cos(static_cast<double>(source.yaw));
+        const double sine = std::sin(static_cast<double>(source.yaw));
+        const auto center = read_vec2(row, "center");
+        const auto span = read_vec2(row, "span");
+        const auto rotation = read_vec2(row, "rotation");
+        const auto height = read_vec2(row, "height_transform");
+        if (!close_vec2(center, source.position.x, source.position.z) ||
+            !close_vec2(span, section_scale * source.scale.x, section_scale * source.scale.z) ||
+            !close_vec2(rotation, cosine, sine) ||
+            row.at("mesh").get<std::uint32_t>() != static_cast<std::uint32_t>(source.mesh) ||
+            row.at("seed").get<std::uint32_t>() != source.environment_seed ||
+            !close_vec2(height, source.position.y, source.scale.y))
+            return false;
+
+        const auto page_slice = row.at("page_slice").get<std::uint32_t>();
+        const auto page_edge = row.at("page_edge").get<std::uint32_t>();
+        const auto tile_count = row.at("tile_count").get<std::array<std::uint32_t, 2>>();
+        if (dynamic || page_edge == 0u)
+        {
+            if (page_slice != UINT_MAX || page_edge != 0u || tile_count != std::array<std::uint32_t, 2>{0u, 0u})
+                return false;
+            if (!dynamic)
+            {
+                if (page_mode == 1) return false;
+                page_mode = 0;
+            }
+            return true;
+        }
+        if (page_edge != 4096u || !tile_count[0] || !tile_count[1] ||
+            page_slice != expected_page_slice || page_mode == 0)
+            return false;
+        page_mode = 1;
+        expected_page_slice += std::uint64_t(tile_count[0]) * tile_count[1] * 3u;
+        return true;
+    };
+    for (std::size_t index = 0; index < static_count; ++index)
+        if (!check_section(sections.at(index), *sources[index], false))
+            return fail("static section does not match its source or page layout.");
+    if (dynamic_meadow && !check_section(sections.at(static_count), *dynamic_meadow, true))
+        return fail("dynamic section does not match its Meadow source or fallback layout.");
+
+    std::vector<bool> seen(static_count);
+    std::vector<std::uint32_t> static_slots;
+    static_slots.reserve(static_rows.size());
+    const auto check_instance = [&](const Json &row, const RenderInstance &source,
+                                    std::size_t section_index) -> bool {
+        const auto generation = row.at("generation").get<std::uint32_t>();
+        const auto slot = row.at("slot").get<std::uint32_t>();
+        auto expected_position = source.position;
+        if (source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch)
+            expected_position.y += source.scale.y * 0.5f;
+        return generation > 0u && slot != UINT_MAX &&
+            row.at("mesh").get<std::uint32_t>() == static_cast<std::uint32_t>(source.mesh) &&
+            row.at("section_index").get<std::uint32_t>() == section_index &&
+            close_vec3(read_vec3(row, "position"), expected_position) &&
+            finite_close(read_float(row, "yaw"), source.yaw) &&
+            close_vec3(read_vec3(row, "scale"), source.scale);
+    };
+    for (const auto &row : static_rows)
+    {
+        const auto section_index = row.at("section_index").get<std::uint32_t>();
+        const auto slot = row.at("slot").get<std::uint32_t>();
+        if (section_index >= static_count || seen[section_index] ||
+            std::ranges::find(static_slots, slot) != static_slots.end() ||
+            !check_instance(row, *sources[section_index], section_index))
+            return fail("static instance slots do not map one-to-one to source sections.");
+        seen[section_index] = true;
+        static_slots.push_back(slot);
+    }
+    if (!std::ranges::all_of(seen, [](bool value) { return value; }))
+        return fail("static instance section indices are incomplete.");
+    if (dynamic_meadow && !check_instance(dynamic_rows.at(0), *dynamic_meadow, static_count))
+        return fail("dynamic instance does not match the appended Meadow section.");
+    return Result::Success();
+}
+
+struct UiProbePixels { UINT width{}, height{}; std::vector<std::uint8_t> rgba; };
+inline Result CaptureUiProbePixels(D3D12Renderer &renderer, const std::filesystem::path &path,
+                                   UiProbePixels &out, ViewId view_id = kMainRenderViewId)
+{
+    if (auto captured = renderer.Capture({.view_id = view_id, .path = path}); !captured) return captured;
+    const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(apartment) && apartment != RPC_E_CHANGED_MODE) return Failure("UI probe COM initialization failed.");
+    struct Apartment { HRESULT result; ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); } } cleanup{apartment};
+    Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
+    Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
+    Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
+    Microsoft::WRL::ComPtr<IWICFormatConverter> converter;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory2, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) ||
+        FAILED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder)) ||
+        FAILED(decoder->GetFrame(0, &frame)) || FAILED(factory->CreateFormatConverter(&converter)) ||
+        FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA,
+            WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom)) ||
+        FAILED(converter->GetSize(&out.width, &out.height)) || !out.width || !out.height ||
+        out.width > UINT_MAX / 4u || std::uint64_t(out.width) * out.height * 4u > UINT_MAX)
+        return Failure("UI probe PNG decode setup failed.");
+    out.rgba.resize(std::size_t(out.width) * out.height * 4u);
+    if (FAILED(converter->CopyPixels(nullptr, out.width * 4u, static_cast<UINT>(out.rgba.size()), out.rgba.data())))
+        return Failure("UI probe PNG readback failed.");
+    return Result::Success();
+}
+} // namespace owned_view_probe_detail
+
+// Opt-in integration probe. The caller owns the ordinary internal renderer
+// configuration and snapshot leases. This helper never requests a native SDK
+// provider or manufactures a provider token. It performs exactly three frame
+// packages with skipped-view history and readbacks, then one auxiliary-only overwrite.
+Result RunOwnedViewProbe(D3D12Renderer &renderer,
+    const RenderSnapshotPair &snapshots, const std::filesystem::path &artifacts,
+    AssetId archer_asset_id, OwnedViewProbeEvidence &evidence)
+{
+    using namespace owned_view_probe_detail;
+    evidence = {};
+    if (!snapshots.has_current)
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_render_owned_view_probe",
+            "Owned-view probe requires the caller's current leased snapshot pair.");
+    const auto provider = renderer.GetReconstructionStatus().effective_provider.value;
+    if (provider != "internal_taau" && provider != "native_taa" && provider != "off")
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_render_owned_view_probe",
+            "Owned-view probe requires ordinary internal reconstruction configuration.");
+    const auto main = renderer.MainViewInput(snapshots.current.camera);
+    auto preview = main;
+    preview.id = kOwnedViewProbePreview; preview.role = RenderViewRole::Preview;
+    // Keep a smaller preview and a Main-sized capture to exercise slot upload growth.
+    const auto half = [](ViewExtent e) { return ViewExtent{std::max(1u, e.width / 2u), std::max(1u, e.height / 2u)}; };
+    preview.output_extent = half(main.output_extent);
+    preview.render_capacity = half(main.render_capacity);
+    preview.render_active = half(main.render_active);
+    preview.camera.position.x -= 3.0; preview.camera.target.x -= 1.0;
+    preview.view_origin = preview.camera.position;
+    auto capture = preview;
+    capture.id = kOwnedViewProbeCapture; capture.role = RenderViewRole::Capture;
+    capture.output_extent = main.output_extent;
+    capture.render_capacity = main.render_capacity;
+    capture.render_active = main.render_active;
+    capture.camera = main.camera;
+    capture.camera.position.x += 4.0; capture.camera.target.x += 2.0;
+    capture.view_origin = capture.camera.position;
+    std::array<RenderViewInput, 3> views{main, preview, capture};
+    // Start in one large global basis; moving that basis mid-probe would be a real camera cut.
+    for (auto &view : views)
+    {
+        view.scene_origin.x = 1.0e9;
+        view.camera.position.x += 1.0e9;
+        view.camera.target.x += 1.0e9;
+        view.view_origin.x += 1.0e9;
+    }
+    VfxVolumeInput hero{};
+    hero.identity.effect_id = 0x564f4c31u;
+    hero.identity.effect_handle = 1;
+    hero.identity.source_id = 1;
+    hero.identity.owner_id = 0x564f4c32u;
+    hero.world_to_local = hero.local_to_world = {1, 0, 0, 0, 0, 1, 0, 0,
+        0, 0, 1, 0, 0, 0, 0, 1};
+    hero.bounds_min = {-1, -1, -1}; hero.bounds_max = {1, 1, 1};
+    hero.shape = VfxVolumeShape::BoundedCrown;
+    hero.noise = VfxVolumeNoise::None;
+    hero.steps = 18;
+    hero.authored_scale = 1;
+    hero.alpha = .25f;
+    hero.scattering_albedo = {.5f, .5f, .5f};
+    hero.hdr = 1;
+    const std::array<VfxDecalInput, 2> decals{{
+        {.stable_id = 0x44454341u, .position = {-2, 0, 0}, .radius = 8,
+         .linear_rgb = {0.7f, 0.3f, 0.1f}, .hdr = 1, .alpha = 0.7f, .normalized_age = 0.2f,
+         .kind = VfxDecalKind::Fracture, .stable_seed = 31, .voronoi_cells = 64, .edge_glow = 0.3f},
+        {.stable_id = 0x44454342u, .position = {2, 0, 0}, .radius = 8,
+         .linear_rgb = {0.2f, 0.6f, 0.3f}, .hdr = 1, .alpha = 0.7f, .normalized_age = 0.2f,
+         .kind = VfxDecalKind::Organic, .stable_seed = 47, .voronoi_cells = 64, .edge_glow = 0.3f}
+    }};
+    const std::array<float, 3> distortion_gap_pool{0.5f, 1.25f, 2.0f};
+    const VfxLineSpawnCommand effect_line{.sequence = 0x4c494e45u,
+        .start = {-.5f, 0, -2}, .end = {.5f, 0, -2}, .color = {1, .5f, .1f, 1},
+        .width = .1f, .lifetime = .2f, .uv_repeat = 1};
+    const auto annulus = [](std::uint64_t id, Float3 position) {
+        VfxDistortionInput command{};
+        command.stable_id = id;
+        command.position = position;
+        command.radius = 1.0f; // Keep both commands within the ordinary projected-area budget.
+        command.strength = 0.2f;
+        command.normalized_age = 0.2f;
+        command.alpha = 0.7f;
+        command.shape = VfxDistortionShape::GappedAnnulus;
+        command.inner_radius = 0.25f;
+        command.gap_half_width_degrees = 5.0f;
+        return command;
+    };
+    std::array<VfxDistortionInput, 2> package0_distortions{
+        annulus(0x44495331u, {-2, 0, 0}), annulus(0x44495332u, {2, 0, 0})};
+    package0_distortions[0].gap_angles_degrees = {0.75f};
+    package0_distortions[1].frame_gap_first = 1;
+    package0_distortions[1].frame_gap_count = 1;
+    std::array<VfxDistortionInput, 2> package2_distortions{
+        annulus(0x44495333u, {-2, 0, 0}), annulus(0x44495334u, {2, 0, 0})};
+    for (auto &command : package2_distortions)
+    {
+        command.frame_gap_first = 0;
+        command.frame_gap_count = 2;
+    }
+    const std::array<float, 3> ground_gap_pool{0.5f, 1.25f, 2.0f};
+    const auto ground_annulus = [](std::uint64_t id, Float3 position) {
+        VfxGroundSpawnInput input{};
+        input.effect_handle = 1; input.stable_id = id; input.hdr = 1;
+        input.command.renderer = VfxRenderer::Ground;
+        input.command.primitive = VfxPrimitive::ExactRing;
+        input.command.position = position; input.command.start_size_min = 2;
+        input.geometry.shape = VfxGroundShape::RingGapsBorder;
+        input.geometry.inner_radius = 0.5f; input.geometry.outer_radius = 2;
+        input.geometry.edge_width = 0.1f; input.geometry.gap_half_angle_radians = 0.1f;
+        return input;
+    };
+    std::array<VfxGroundSpawnInput, 2> package0_ground{
+        ground_annulus(0x47524e31u, {-2, 0, 0}), ground_annulus(0x47524e32u, {2, 0, 0})};
+    package0_ground[0].geometry.gap_angles_radians = {0.75f};
+    package0_ground[1].geometry.frame_gap_first = 1;
+    package0_ground[1].geometry.frame_gap_count = 1;
+    std::array<VfxGroundSpawnInput, 2> package2_ground{
+        ground_annulus(0x47524e33u, {-2, 0, 0}), ground_annulus(0x47524e34u, {2, 0, 0})};
+    for (auto &command : package2_ground) command.geometry.frame_gap_count = 2;
+    const std::array<VfxRibbonOutputInput, 2> ribbon_outputs{{
+        {.profile = VfxOutputProfile::RibbonAdd, .motion = VfxMotionKind::CurvedLinkTravelingHead,
+         .color = {1, .3f, .1f, 1}, .width_head = .12f, .width_tail = .04f, .hdr = 1},
+        {.profile = VfxOutputProfile::RibbonOit, .motion = VfxMotionKind::SoftWiderSheath,
+         .color = {.2f, .5f, 1, .5f}, .width_head = .2f, .width_tail = .08f, .hdr = 1}
+    }};
+    VfxRibbonSourceInput owning_ribbon;
+    owning_ribbon.owner_id = 0x52494242u;
+    owning_ribbon.effect_handle = 1; owning_ribbon.source_id = 1;
+    owning_ribbon.position = {.5f, 1, 0}; owning_ribbon.previous_position = {-.5f, 1, 0};
+    owning_ribbon.analytic = true; owning_ribbon.control = {0, 1.25f, 0};
+    owning_ribbon.segments = 8; owning_ribbon.normalized_age = .4f;
+    owning_ribbon.outputs.assign(ribbon_outputs.begin(), ribbon_outputs.end());
+    auto pooled_ribbon = owning_ribbon;
+    pooled_ribbon.outputs.clear(); pooled_ribbon.frame_output_count = 2;
+    std::vector<RenderInstance> moving_instances(snapshots.current.instances.begin(), snapshots.current.instances.end());
+    if (!snapshots.current.static_scene)
+        return Failure("Owned-view terrain probe requires its admitted static scene.");
+    const auto static_meadow = std::ranges::find_if(snapshots.current.static_scene->instances,
+        [](const RenderInstance &instance) {
+            return instance.mesh == RenderMesh::MeadowSurface && instance.environment_variant == 0;
+        });
+    if (static_meadow == snapshots.current.static_scene->instances.end())
+        return Failure("Owned-view terrain probe requires the static MeadowSurface variant 0 source.");
+    auto dynamic_meadow = *static_meadow;
+    dynamic_meadow.stable_id = 0x4d4541444f570001ull;
+    if (std::ranges::find(moving_instances, dynamic_meadow.stable_id,
+            &RenderInstance::stable_id) != moving_instances.end())
+        return Failure("Owned-view dynamic MeadowSurface stable ID already exists in the packet scene.");
+    dynamic_meadow.position.x = 100.0f;
+    dynamic_meadow.position.z = 100.0f;
+    dynamic_meadow.position.y = 4.0f;
+    dynamic_meadow.scale.y = 1.0f;
+    moving_instances.push_back(dynamic_meadow);
+    const auto archer = std::ranges::find(moving_instances, RenderMesh::Archer, &RenderInstance::mesh);
+    const auto clips = renderer.GetCharacterAnimationClips();
+    if (archer == moving_instances.end() || clips.size() < 2 || !archer_asset_id.value)
+        return Failure("Owned-view deformation probe requires an Archer and two actual cooked named clips.");
+    archer->asset_id = archer_asset_id;
+    const auto moving_archer_id = archer->stable_id;
+    archer->animation_clip_id = clips[0].id;
+    archer->animation_time_seconds = clips[0].duration_seconds * 0.2;
+    auto second_archer = *archer;
+    second_archer.stable_id = 0x41524348u;
+    if (std::ranges::find(moving_instances, second_archer.stable_id,
+            &RenderInstance::stable_id) != moving_instances.end())
+        return Failure("Owned-view epoch target stable ID already exists in the admitted scene.");
+    second_archer.position.x += 3;
+    second_archer.animation_clip_id = clips[1].id;
+    second_archer.animation_time_seconds = clips[1].duration_seconds * 0.6;
+    evidence.motion_epoch_target_id = second_archer.stable_id;
+    evidence.motion_epoch_before = second_archer.motion_epoch;
+    evidence.motion_epoch_after = second_archer.motion_epoch + 1u;
+    evidence.archer_clip_ids = {clips[0].id.value, clips[1].id.value};
+    moving_instances.push_back(second_archer);
+    auto package_snapshots = snapshots;
+    package_snapshots.current.instances = moving_instances;
+    std::error_code error;
+    std::filesystem::create_directories(artifacts, error);
+    if (error) return Failure("Cannot create owned-view capture directory: " + error.message());
+    evidence.submissions_before = renderer.GetDiagnostics().total_rendered_frames;
+    RendererFrameResult result;
+    nlohmann::ordered_json preview_before_skip;
+    nlohmann::ordered_json capture_origin_reset;
+    const auto active_dynamic_meadow = [&]() -> const RenderInstance * {
+        const auto found = std::ranges::find(moving_instances, 0x4d4541444f570001ull,
+            &RenderInstance::stable_id);
+        return found == moving_instances.end() ? nullptr : &*found;
+    };
+    for (std::size_t package = 0; package < evidence.frames.size(); ++package)
+    {
+        if (package == 1)
+        {
+            // Only Capture changes its basis; skipped Preview retains its own history.
+            views[2].camera.position.x += 2.0;
+            views[2].camera.target.x += 0.25;
+            views[2].view_origin.x += 64.0;
+            views[2].camera_cut = true;
+            auto terrain = std::ranges::find(moving_instances, 0x4d4541444f570001ull,
+                &RenderInstance::stable_id);
+            if (terrain == moving_instances.end())
+                return Failure("Dynamic MeadowSurface was not retained for the middle package.");
+            terrain->position.y = 6.0f;
+            terrain->scale.y = 2.0f;
+            ++terrain->revisions.transform;
+        }
+        else if (package == 2)
+        {
+            hero.density = .75f;
+            ++hero.density_revision;
+            views[2].camera_cut = false;
+            // Reappear Preview with a small camera movement. Its previous GPU
+            // projection must come from package 0, not Main or the rebased B.
+            views[1].camera.position.x += 0.5;
+            views[1].camera.target.x += 0.5;
+            views[1].view_origin.x += 0.5;
+            auto changed_epoch = std::ranges::find(moving_instances, 0x41524348u,
+                &RenderInstance::stable_id);
+            if (changed_epoch == moving_instances.end())
+                return Failure("Owned-view epoch discontinuity target was not retained in the packet scene.");
+            changed_epoch->position.x += 0.75f;
+            ++changed_epoch->revisions.transform;
+            ++changed_epoch->motion_epoch;
+            std::erase_if(moving_instances, [](const RenderInstance &instance) {
+                return instance.stable_id == 0x4d4541444f570001ull;
+            });
+        }
+        if (package && !moving_instances.empty())
+        {
+            auto moving_archer = std::ranges::find(moving_instances, moving_archer_id,
+                &RenderInstance::stable_id);
+            if (moving_archer == moving_instances.end())
+                return Failure("Owned-view motion target was not retained in the packet scene.");
+            moving_archer->position.x += 0.25f;
+            ++moving_archer->revisions.transform;
+        }
+        package_snapshots.current.instances = moving_instances;
+        const auto admitted = package == 1 ? std::span<const VfxDecalInput>{} : std::span<const VfxDecalInput>{decals};
+        const std::span<const VfxDistortionInput> admitted_distortions = package == 0
+            ? std::span<const VfxDistortionInput>{package0_distortions}
+            : package == 2 ? std::span<const VfxDistortionInput>{package2_distortions}
+                           : std::span<const VfxDistortionInput>{};
+        const std::vector<RenderViewInput> submitted_views = package == 0
+            ? std::vector<RenderViewInput>{views[0], views[2], views[1]}
+            : package == 1 ? std::vector<RenderViewInput>{views[0], views[2]}
+                           : std::vector<RenderViewInput>{views[0], views[2], views[1]};
+        const RenderVfxWorldBatch world{
+            .session = package_snapshots.current.header.session_id,
+            .stateful_target = package_snapshots.current.header.tick == 0 ? 0 : package_snapshots.current.header.tick - 1,
+            .sequence = package == 1 ? 0u : package == 0 ? 1u : 2u};
+        const ParticleSpawnCommand particle_birth{
+            .sequence = 0x50415254u,
+            .tick = world.stateful_target,
+            .position = {0, 0, -2},
+            .shape = ParticleShape::Point,
+            .velocity_mode = ParticleVelocity::Direction,
+            .facing = ParticleFacing::Camera,
+            .renderer = VfxRenderer::Sprite,
+            .primitive = VfxPrimitive::Soft,
+            .direction = {0, 0, 1},
+            .lifetime_min = 3600.0f,
+            .lifetime_max = 3600.0f,
+            .start_color = {1, 0.25f, 0.1f, 1},
+            .end_color = {1, 0.25f, 0.1f, 0},
+            .start_size_min = 0.25f,
+            .start_size_max = 0.25f,
+            .count = 1,
+            .seed = 0x51a7u};
+        const RenderPackage input{.views = submitted_views, .snapshots = package_snapshots,
+            .vfx = {.particle_spawns = package == 0 ? std::span(&particle_birth, 1) :
+                    std::span<const ParticleSpawnCommand>{},
+                .effect_lines = world.sequence ? std::span(&effect_line, 1) : std::span<const VfxLineSpawnCommand>{},
+                .ground = package == 1 ? std::span<const VfxGroundSpawnInput>{} :
+                    package == 0 ? std::span<const VfxGroundSpawnInput>{package0_ground} :
+                                   std::span<const VfxGroundSpawnInput>{package2_ground},
+                .ribbons = {package == 0 ? std::span(&owning_ribbon, 1) : std::span(&pooled_ribbon, 1),
+                               1, ribbon_outputs},
+                .distortions = admitted_distortions, .decals = admitted,
+                .volumes = std::span(&hero, 1),
+                .world_batch = world, .distortion_gap_angles = distortion_gap_pool,
+                .ground_gap_angles = ground_gap_pool},
+            .devtools = {.delta_seconds = 1.0f / 60.0f},
+            .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
+        if (auto rendered = renderer.Render(input, result); !rendered) return rendered;
+        if ((world.sequence == 0 && result.vfx_world_step_submitted) ||
+            (world.sequence != 0 && (!result.vfx_world_step_submitted ||
+                result.vfx_world_tick != world.stateful_target || result.vfx_world_session_id != world.session ||
+                result.vfx_world_batch_sequence != world.sequence)))
+            return Failure("World receipt must identify its frozen producer batch independently of snapshot tick and view order.");
+        evidence.admitted_decals[package] = result.typed_vfx_decal_count;
+        evidence.admitted_distortions[package] = result.typed_vfx_distortion_count;
+        evidence.admitted_ribbons[package] = result.typed_vfx_ribbon_count;
+        evidence.admitted_ground[package] = result.typed_vfx_ground_count;
+        evidence.admitted_volumes[package] = result.typed_vfx_volume_count;
+        if (result.typed_vfx_volume_count != 1)
+            return Failure("Each multi-view package must register its prepared hero volume on Main.");
+        if (result.typed_vfx_ground_count != (package == 1 ? 0u : 2u))
+            return Failure("Ground owning/pooled gap package did not retain its commands or clear the empty package.");
+        if (result.typed_vfx_ribbon_count != ribbon_outputs.size())
+            return Failure("Owning/pooled ribbon packet did not retain both analytic outputs.");
+        if (result.typed_vfx_decal_count != admitted.size())
+            return Failure("Decal Surface probe did not admit both authored command kinds or clear the empty package.");
+        const auto expected_distortions = package == 1 ? 0u : 2u;
+        if (result.typed_vfx_distortion_count != expected_distortions)
+            return Failure("Distortion gap-pool package " + std::to_string(package) +
+                " admitted " + std::to_string(result.typed_vfx_distortion_count) +
+                " commands; expected " + std::to_string(expected_distortions) + ".");
+        if (result.views.size() != submitted_views.size() || result.identity.view_id != kMainRenderViewId)
+            return Failure("Frame package did not return its actual keyed submissions and Main result.");
+        for (std::size_t view = 0; view < submitted_views.size(); ++view)
+            if (result.views[view].identity.view_id != submitted_views[view].id)
+                return Failure("Main must render first while auxiliary views retain their packet order.");
+        const auto package_id = result.identity.render_frame_id;
+        if (!package_id || (package && package_id != evidence.frames[package - 1][0].identity.render_frame_id + 1u))
+            return Failure("Rejected preflight or sequential reuse changed the actual render-package identity.");
+        for (std::size_t view = 0; view < submitted_views.size(); ++view)
+        {
+            const auto found = std::ranges::find_if(result.views, [&](const auto &stamp) {
+                return stamp.identity.view_id == submitted_views[view].id;
+            });
+            if (found == result.views.end() ||
+                std::ranges::count(result.views, submitted_views[view].id, [](const auto &stamp) { return stamp.identity.view_id; }) != 1 ||
+                found->identity.render_frame_id != package_id || found->identity.actual_tick != snapshots.current.header.tick ||
+                !found->submission_id || !found->rendered_frame || !found->history_generation ||
+                !SameView(found->rendered_view, submitted_views[view]) ||
+                !std::ranges::all_of(found->unjittered_view_projection, [](float v) { return std::isfinite(v); }) ||
+                (view != 0 && found->identity.presentation_id != 0))
+                return Failure("Returned view identity, camera, history, matrix or presentation ownership disagrees with its actual submission.");
+            const auto ordinal = found->identity.view_id == kMainRenderViewId ? 0u :
+                found->identity.view_id == kOwnedViewProbePreview ? 1u : 2u;
+            evidence.frames[package][ordinal] = *found;
+            const bool has_previous = package != 0 && !(package == 1 && ordinal == 1);
+            if (has_previous)
+            {
+                const auto previous_package = package == 2 && ordinal == 1 ? 0u : package - 1u;
+                const auto &old = evidence.frames[previous_package][ordinal];
+                const auto increment = package == 1 && ordinal == 2 ? 1u : 0u;
+                if (found->submission_id <= old.submission_id || found->rendered_frame != old.rendered_frame + 1u ||
+                    found->history_generation != old.history_generation + increment)
+                    return Failure("A successful view render must advance its own sequence; only Capture's explicit cut advances history generation.");
+                const bool same_matrix = found->unjittered_view_projection == old.unjittered_view_projection;
+                if (package == 1 && ordinal == 2 && same_matrix)
+                    return Failure("Capture's large origin/camera discontinuity did not change its projected basis.");
+                if (package == 2 && ordinal == 1 && same_matrix)
+                    return Failure("Reappearing Preview camera movement did not update its current projection.");
+            }
+        }
+        const auto &main_stamp = evidence.frames[package][0];
+        if (result.frame != main_stamp.rendered_frame || result.view_history_generation != main_stamp.history_generation ||
+            result.unjittered_view_projection != main_stamp.unjittered_view_projection)
+            return Failure("Auxiliary rendering changed the public primary Main frame result.");
+        if (package == 0)
+        {
+            const auto before = renderer.GetDiagnostics().total_rendered_frames;
+            const auto accepted = result;
+            auto duplicate = views; duplicate[2].id = duplicate[1].id;
+            auto duplicate_input = input;
+            duplicate_input.views = duplicate;
+            const auto rejected_duplicate = renderer.Render(duplicate_input, result);
+            evidence.duplicate_rejected = !rejected_duplicate && rejected_duplicate.Code() == ErrorCode::InvalidArgument;
+            const bool duplicate_preserved = SameRejectedResultEvidence(result, accepted) &&
+                renderer.GetDiagnostics().total_rendered_frames == before;
+            auto nonfinite = views; nonfinite[2].view_origin.x = std::numeric_limits<double>::quiet_NaN();
+            auto nonfinite_input = input;
+            nonfinite_input.views = nonfinite;
+            const auto rejected_nonfinite = renderer.Render(nonfinite_input, result);
+            evidence.nonfinite_origin_rejected = !rejected_nonfinite && rejected_nonfinite.Code() == ErrorCode::InvalidArgument;
+            const bool nonfinite_preserved = SameRejectedResultEvidence(result, accepted) &&
+                renderer.GetDiagnostics().total_rendered_frames == before;
+            VfxFlashSpawnInput flash{};
+            flash.size = flash.lifetime = flash.hdr = 1.0f;
+            flash.interpolate_owner_position = true;
+            flash.previous_position.x = std::numeric_limits<float>::quiet_NaN();
+            auto bad_flash_input = input;
+            bad_flash_input.vfx = {.world_batch = input.vfx.world_batch};
+            bad_flash_input.vfx.flashes = std::span(&flash, 1);
+            const auto rejected_flash = renderer.Render(bad_flash_input, result);
+            evidence.nonfinite_flash_history_rejected = !rejected_flash &&
+                rejected_flash.Code() == ErrorCode::InvalidArgument;
+            auto bad_world_input = input;
+            ++bad_world_input.vfx.world_batch.session;
+            const auto rejected_world = renderer.Render(bad_world_input, result);
+            if (rejected_world || rejected_world.Code() != ErrorCode::InvalidArgument ||
+                !SameRejectedResultEvidence(result, accepted) || renderer.GetDiagnostics().total_rendered_frames != before)
+                return Failure("A VFX batch from another session must be rejected before any native submission.");
+            auto invalid_delta = input;
+            invalid_delta.devtools.delta_seconds = std::numeric_limits<float>::quiet_NaN();
+            const auto rejected_delta = renderer.Render(invalid_delta, result);
+            if (rejected_delta || rejected_delta.Code() != ErrorCode::InvalidArgument ||
+                !SameRejectedResultEvidence(result, accepted) || renderer.GetDiagnostics().total_rendered_frames != before)
+                return Failure("Invalid tool frame timing must be rejected before any native submission.");
+            for (const auto fraction : {std::numeric_limits<float>::quiet_NaN(), -0.1f, 1.1f})
+            {
+                auto invalid_sample = input;
+                invalid_sample.display_sample->interpolation = fraction;
+                const auto rejected_sample = renderer.Render(invalid_sample, result);
+                if (rejected_sample || rejected_sample.Code() != ErrorCode::InvalidArgument ||
+                    !SameRejectedResultEvidence(result, accepted) || renderer.GetDiagnostics().total_rendered_frames != before)
+                    return Failure("Invalid display samples must be rejected before native work or output publication.");
+            }
+            VfxLightInput bad_light{};
+            bad_light.radius = 1.0f;
+            bad_light.intensity = std::numeric_limits<float>::quiet_NaN();
+            VfxDecalInput bad_decal{};
+            bad_decal.radius = 1.0f;
+            bad_decal.alpha = std::numeric_limits<float>::quiet_NaN();
+            ParticleSpawnCommand bad_ballistic{};
+            bad_ballistic.authored_ballistic = true;
+            bad_ballistic.renderer = VfxRenderer::Mesh;
+            bad_ballistic.mesh_index = 1;
+            bad_ballistic.lifetime_min = bad_ballistic.lifetime_max = bad_ballistic.authored_hdr = 1.0f;
+            bad_ballistic.authored_drag = std::numeric_limits<float>::quiet_NaN();
+            ParticleSpawnCommand bad_selector{};
+            bad_selector.mesh_index = 8;
+            std::array<RenderPackage, 19> invalid_payloads;
+            for (auto &invalid : invalid_payloads)
+            {
+                invalid = input;
+                invalid.vfx = {.world_batch = input.vfx.world_batch};
+            }
+            invalid_payloads[0].vfx.lights = std::span(&bad_light, 1);
+            invalid_payloads[1].vfx.decals = std::span(&bad_decal, 1);
+            invalid_payloads[2].vfx.particle_spawns = std::span(&bad_ballistic, 1);
+            invalid_payloads[3].vfx.particle_spawns = std::span(&bad_selector, 1);
+            auto missing_gap_pool = annulus(0x494e5641u, {-2, 0, 0});
+            missing_gap_pool.frame_gap_count = 1;
+            auto out_of_range_gap_pool = annulus(0x494e5642u, {-2, 0, 0});
+            out_of_range_gap_pool.frame_gap_first = 2;
+            out_of_range_gap_pool.frame_gap_count = 2;
+            auto mixed_gap_storage = annulus(0x494e5643u, {-2, 0, 0});
+            mixed_gap_storage.gap_angles_degrees = {0.5f};
+            mixed_gap_storage.frame_gap_count = 1;
+            auto nonfinite_gap_pool = annulus(0x494e5644u, {-2, 0, 0});
+            nonfinite_gap_pool.frame_gap_count = 1;
+            const std::array<float, 1> nan_gap_pool{std::numeric_limits<float>::quiet_NaN()};
+            invalid_payloads[4].vfx.distortions = std::span(&missing_gap_pool, 1);
+            invalid_payloads[5].vfx.distortions = std::span(&out_of_range_gap_pool, 1);
+            invalid_payloads[5].vfx.distortion_gap_angles = distortion_gap_pool;
+            invalid_payloads[6].vfx.distortions = std::span(&mixed_gap_storage, 1);
+            invalid_payloads[6].vfx.distortion_gap_angles = distortion_gap_pool;
+            invalid_payloads[7].vfx.distortions = std::span(&nonfinite_gap_pool, 1);
+            invalid_payloads[7].vfx.distortion_gap_angles = nan_gap_pool;
+            std::array<VfxRibbonSourceInput, 4> bad_ribbons{pooled_ribbon, pooled_ribbon,
+                pooled_ribbon, pooled_ribbon};
+            bad_ribbons[1].frame_output_first = 1;
+            bad_ribbons[2].outputs = {ribbon_outputs[0]};
+            auto bad_ribbon_outputs = ribbon_outputs;
+            bad_ribbon_outputs[0].width_head = std::numeric_limits<float>::quiet_NaN();
+            for (std::size_t i = 0; i < bad_ribbons.size(); ++i)
+                invalid_payloads[8 + i].vfx.ribbons = {std::span(&bad_ribbons[i], 1), 1,
+                    i == 0 ? std::span<const VfxRibbonOutputInput>{} :
+                    i == 3 ? std::span<const VfxRibbonOutputInput>{bad_ribbon_outputs} :
+                             std::span<const VfxRibbonOutputInput>{ribbon_outputs}};
+            std::array<VfxGroundSpawnInput, 4> bad_ground{package2_ground[0], package2_ground[0],
+                package2_ground[0], package2_ground[0]};
+            bad_ground[1].geometry.frame_gap_first = 2;
+            bad_ground[2].geometry.gap_angles_radians = {0.5f};
+            for (std::size_t i = 0; i < bad_ground.size(); ++i)
+            {
+                bad_ground[i].geometry.frame_gap_count = 2;
+                invalid_payloads[12 + i].vfx.ground = std::span(&bad_ground[i], 1);
+                invalid_payloads[12 + i].vfx.ground_gap_angles =
+                    i == 0 ? std::span<const float>{} :
+                    i == 3 ? std::span<const float>{nan_gap_pool} : std::span<const float>{ground_gap_pool};
+            }
+            bad_ground[3].geometry.frame_gap_count = 1;
+            auto invalid_hero = hero;
+            invalid_hero.steps = 17;
+            invalid_payloads[17].vfx.volumes = std::span(&invalid_hero, 1);
+            invalid_payloads[16].vfx.effect_lines = std::span(&effect_line, 1);
+            invalid_payloads[16].vfx.world_batch = RenderVfxWorldBatch{
+                .session = snapshots.current.header.session_id,
+                .stateful_target = world.stateful_target};
+            const std::array duplicate_instances{second_archer, second_archer};
+            invalid_payloads[18].snapshots.current.instances = duplicate_instances;
+            for (std::size_t invalid_index = 0; invalid_index < invalid_payloads.size(); ++invalid_index)
+            {
+                const auto &invalid = invalid_payloads[invalid_index];
+                const auto rejected = renderer.Render(invalid, result);
+                if (rejected || rejected.Code() != ErrorCode::InvalidArgument ||
+                    !SameRejectedResultEvidence(result, accepted) || renderer.GetDiagnostics().total_rendered_frames != before)
+                    return Failure("Frame admission must reject malformed payloads, duplicate instances and invalid frame-pool storage before any view submission.");
+                if (invalid_index >= 4 && invalid_index < 8)
+                    evidence.invalid_distortion_gap_rejected[invalid_index - 4] = true;
+                else if (invalid_index >= 8 && invalid_index < 12)
+                    evidence.invalid_ribbon_pool_rejected[invalid_index - 8] = true;
+                else if (invalid_index >= 12 && invalid_index < 16)
+                    evidence.invalid_ground_gap_rejected[invalid_index - 12] = true;
+            }
+            evidence.submissions_after_bad_preflight = renderer.GetDiagnostics().total_rendered_frames;
+            evidence.rejected_outputs_unchanged = duplicate_preserved && nonfinite_preserved && SameRejectedResultEvidence(result, accepted) &&
+                evidence.submissions_after_bad_preflight == before;
+            if (!evidence.duplicate_rejected || !evidence.nonfinite_origin_rejected ||
+                !evidence.nonfinite_flash_history_rejected || !evidence.rejected_outputs_unchanged ||
+                !std::ranges::all_of(evidence.invalid_distortion_gap_rejected,
+                    [](bool rejected) { return rejected; }) ||
+                !std::ranges::all_of(evidence.invalid_ribbon_pool_rejected,
+                    [](bool rejected) { return rejected; }) ||
+                !std::ranges::all_of(evidence.invalid_ground_gap_rejected,
+                    [](bool rejected) { return rejected; }))
+                return Failure("Duplicate/nonfinite view or flash preflight was accepted or mutated submission/result evidence.");
+        }
+        if (package == 0)
+        {
+            if (auto captured = CaptureSurfaceReadback(renderer, kOwnedViewProbePreview,
+                    artifacts / "owned-view-preview-before-skip.json",
+                    evidence.frames[0][1].rendered_frame, preview_before_skip); !captured) return captured;
+            if (auto terrain = VerifyTerrainSubmission(preview_before_skip,
+                    *snapshots.current.static_scene, active_dynamic_meadow()); !terrain) return terrain;
+            if (!preview_before_skip.value("decal_surface_active", false))
+                return Failure("Preview capture did not use its submitted decal Surface exports.");
+            evidence.motion_readbacks["preview_before_skip"] = preview_before_skip;
+        }
+        else if (package == 1)
+        {
+            if (auto captured = CaptureSurfaceReadback(renderer, kOwnedViewProbeCapture,
+                    artifacts / "owned-view-capture-origin-reset.json",
+                    evidence.frames[1][2].rendered_frame, capture_origin_reset); !captured) return captured;
+            if (auto terrain = VerifyTerrainSubmission(capture_origin_reset,
+                    *snapshots.current.static_scene, active_dynamic_meadow()); !terrain) return terrain;
+            if (capture_origin_reset.value("decal_surface_active", true))
+                return Failure("Empty Capture frame retained a stale decal Surface export.");
+            const auto &inputs = capture_origin_reset.at("temporal_inputs");
+            const auto current = ReadMatrix(inputs, "current_vp");
+            const auto previous_instance = ReadMatrix(inputs,
+                "previous_instance_unjittered_view_projection");
+            if (inputs.at("options").at(1).get<double>() > 0.5 ||
+                !SameMatrix(previous_instance, current))
+                return Failure("Capture camera_cut must invalidate instance history and use the current projection after rebasing.");
+            evidence.motion_readbacks["capture_origin_reset"] = capture_origin_reset;
+        }
+        else if (package == 2)
+        {
+            nlohmann::ordered_json preview_after_skip;
+            if (auto captured = CaptureSurfaceReadback(renderer, kOwnedViewProbePreview,
+                    artifacts / "owned-view-preview-after-skip.json",
+                    evidence.frames[2][1].rendered_frame, preview_after_skip); !captured) return captured;
+            if (auto terrain = VerifyTerrainSubmission(preview_after_skip,
+                    *snapshots.current.static_scene, nullptr); !terrain) return terrain;
+            if (!preview_after_skip.value("decal_surface_active", false))
+                return Failure("Reappearing Preview capture did not use its new decal Surface exports.");
+            const auto previous = ReadMatrix(preview_after_skip.at("temporal_inputs"),
+                "previous_instance_unjittered_view_projection");
+            const auto old_preview_current = ReadMatrix(preview_before_skip.at("temporal_inputs"), "current_vp");
+            const auto current_preview = ReadMatrix(preview_after_skip.at("temporal_inputs"), "current_vp");
+            const auto unrelated_capture_current = ReadMatrix(capture_origin_reset.at("temporal_inputs"), "current_vp");
+            if (!SameMatrix(previous, old_preview_current) ||
+                !SameMatrix(old_preview_current, StampMatrix(evidence.frames[0][1])) ||
+                SameMatrix(previous, unrelated_capture_current) ||
+                SameMatrix(previous, current_preview) ||
+                preview_after_skip.value("nonzero_motion_pixels", std::uint64_t{}) == 0)
+                return Failure("Reappearing Preview did not retain its own old-basis projection and real nonzero motion after another view's origin reset.");
+            const auto terrain_bound = [](const nlohmann::ordered_json &metadata) {
+                return metadata.at("temporal_inputs").at("particle_terrain").at("upper_bound").get<float>();
+            };
+            const auto terrain_origin_y = [](const nlohmann::ordered_json &metadata) {
+                return metadata.at("temporal_inputs").at("particle_terrain").at("origin_y").get<float>();
+            };
+            const auto section_count = [](const nlohmann::ordered_json &metadata) {
+                return metadata.at("temporal_inputs").at("particle_terrain").at("section_count").get<std::uint32_t>();
+            };
+            const auto terrain0 = terrain_bound(preview_before_skip);
+            const auto terrain1 = terrain_bound(capture_origin_reset);
+            const auto terrain2 = terrain_bound(preview_after_skip);
+            constexpr float terrain_bound_tolerance = 1.0e-4f;
+            if (section_count(preview_before_skip) == 0 ||
+                section_count(preview_before_skip) != section_count(capture_origin_reset) ||
+                section_count(preview_before_skip) != section_count(preview_after_skip) + 1u ||
+                std::abs(terrain_origin_y(preview_before_skip)) > terrain_bound_tolerance ||
+                std::abs(terrain_origin_y(capture_origin_reset)) > terrain_bound_tolerance ||
+                std::abs(terrain_origin_y(preview_after_skip)) > terrain_bound_tolerance ||
+                std::abs(terrain0 - (4.0f + render_data::kMeadowGroundHeightBound)) > terrain_bound_tolerance ||
+                std::abs(terrain1 - (6.0f + 2.0f * render_data::kMeadowGroundHeightBound)) > terrain_bound_tolerance ||
+                !(terrain2 < terrain0 && terrain2 < terrain1))
+                return Failure("Owned-view terrain CBV did not track dynamic MeadowSurface growth, transform changes, and removal back to the static bound.");
+            evidence.motion_readbacks["preview_after_skip"] = std::move(preview_after_skip);
+        }
+    }
+    evidence.final_frame = std::move(result);
+    // The three submission banks still hold Main after package 2. Reuse its bank
+    // with a real auxiliary submission before testing stale diagnostic rejection.
+    const RenderVfxWorldBatch held_world{.session = package_snapshots.current.header.session_id,
+        .stateful_target = package_snapshots.current.header.tick == 0 ? 0 : package_snapshots.current.header.tick - 1};
+    const RenderPackage overwrite{.views = std::span(&views[1], 1), .snapshots = package_snapshots,
+        .vfx = {.ground = package2_ground,
+            .ribbons = {std::span(&pooled_ribbon, 1), 1, ribbon_outputs},
+            .distortions = package2_distortions, .decals = decals,
+            .world_batch = held_world, .distortion_gap_angles = distortion_gap_pool,
+            .ground_gap_angles = ground_gap_pool},
+        .devtools = {.delta_seconds = 1.0f / 60.0f},
+        .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
+    RendererFrameResult overwrite_result;
+    if (auto submitted = renderer.Render(overwrite, overwrite_result); !submitted) return submitted;
+    if (overwrite_result.views.size() != 1 || overwrite_result.views[0].identity.view_id != kOwnedViewProbePreview ||
+        overwrite_result.views[0].submission_id <= evidence.frames[2][1].submission_id ||
+        overwrite_result.vfx_world_step_submitted)
+        return Failure("Auxiliary overwrite did not submit independently while holding the existing world batch.");
+    evidence.overwrite_submission_id = overwrite_result.views[0].submission_id;
+    evidence.submissions_after = renderer.GetDiagnostics().total_rendered_frames;
+    if (evidence.submissions_after != evidence.submissions_before + 9u)
+        return Failure("Owned-view probe did not produce eight scene-view submissions plus one auxiliary overwrite.");
+    const auto stale_capture = renderer.Capture({.path = artifacts / "stale-main-geometry.json",
+        .kind = CaptureKind::GeometryDiagnostics});
+    evidence.stale_diagnostics_rejected = !stale_capture && stale_capture.Code() == ErrorCode::InvalidState;
+    if (!evidence.stale_diagnostics_rejected)
+        return Failure("Main geometry capture must reject shared frame buffers overwritten by an auxiliary view.");
+    evidence.captures = {artifacts / "owned-view-preview-a.png", artifacts / "owned-view-capture-b.png"};
+    std::array<UiProbePixels, 2> view_images;
+    const std::array capture_views{kOwnedViewProbePreview, kOwnedViewProbeCapture};
+    const std::array capture_extents{overwrite_result.views[0].rendered_view.output_extent,
+                                    evidence.frames[2][2].rendered_view.output_extent};
+    for (std::size_t index = 0; index < view_images.size(); ++index)
+    {
+        if (auto captured = CaptureUiProbePixels(renderer, evidence.captures[index], view_images[index], capture_views[index]);
+            !captured) return captured;
+        if (view_images[index].width != capture_extents[index].width ||
+            view_images[index].height != capture_extents[index].height)
+            return Failure("Color capture did not preserve the requested view's output extent.");
+    }
+    evidence.hdr_capture = artifacts / "owned-view-capture-b.hdr";
+    if (auto captured = renderer.Capture({.view_id = kOwnedViewProbeCapture,
+            .path = evidence.hdr_capture, .kind = CaptureKind::HdrColor}); !captured) return captured;
+    const auto live_particle_draws = renderer.LastParticleCount();
+    // The capture includes the one long-lived package birth plus one short-lived
+    // converted effect-line particle in each nonempty world batch (packages 0 and 2).
+    if (live_particle_draws != 3)
+        return Failure("The package particle birth and two effect-line particles must survive the owned-view sequence; captured " +
+            std::to_string(live_particle_draws) + " live draw instances, expected 3.");
+
+    // Exercise the real UI atlas, frame banks and target replacement with an
+    // opaque background so pixel comparisons are independent of scene motion.
+    auto ui = std::make_shared<UiDrawContent>();
+    UiModel panel; panel.kind = UiModel::Kind::Panel; panel.anchor_pixels = {0, 0};
+    panel.size_pixels = {1920, 1080}; panel.color_rgba = 0xff000000u;
+    UiModel bar; bar.kind = UiModel::Kind::Bar; bar.anchor_pixels = {100, 750};
+    bar.size_pixels = {400, 80}; bar.color_rgba = 0xff0000ffu;
+    UiModel text; text.kind = UiModel::Kind::Text; text.anchor_pixels = {100, 200};
+    text.size_pixels = {1100, 220}; text.font_pixels = 96; text.color_rgba = 0xffffffffu;
+    constexpr char label[] = "UI test \xed\x95\x9c\xea\xb8\x80";
+    std::copy(std::begin(label), std::end(label), text.utf8_text.begin());
+    ui->models = {panel, bar, text};
+    std::array<UiProbePixels, 8> ui_images;
+    for (std::size_t step = 0; step < ui_images.size(); ++step)
+    {
+        auto next = std::make_shared<UiDrawContent>(*ui);
+        if (step == 1) next->models[1].value = 0.5f;
+        if (step == 2) next->models[1].value = 0.0f;
+        if (step >= 4) next->models[2].color_rgba = 0xff00ff00u;
+        if (step >= 5) next->models[2].anchor_pixels.x += 100.0f;
+        if (step == 6)
+            if (auto resized = renderer.Resize(main.output_extent.width + 64u, main.output_extent.height); !resized) return resized;
+        auto ui_view = renderer.MainViewInput(snapshots.current.camera);
+        const RenderPackage ui_package{.views = std::span(&ui_view, 1), .snapshots = snapshots,
+            .vfx = {.world_batch = {.session = snapshots.current.header.session_id,
+                .stateful_target = snapshots.current.header.tick}},
+            .devtools = {.delta_seconds = 0.0f}, .ui_draw_content = next,
+            .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
+        RendererFrameResult ui_result;
+        if (auto rendered = renderer.Render(ui_package, ui_result); !rendered) return rendered;
+        if (auto captured = CaptureUiProbePixels(renderer, artifacts / ("ui-cache-" + std::to_string(step) + ".png"), ui_images[step]); !captured) return captured;
+    }
+    const auto sample = [](const UiProbePixels &image, float x, float y) {
+        const float scale = std::min(float(image.width) / 1920.0f, float(image.height) / 1080.0f);
+        const auto px = static_cast<UINT>((image.width - 1920.0f * scale) * 0.5f + x * scale);
+        const auto py = static_cast<UINT>((image.height - 1080.0f * scale) * 0.5f + y * scale);
+        const auto i = (std::size_t(py) * image.width + px) * 4;
+        return std::array{image.rgba[i], image.rgba[i + 1], image.rgba[i + 2]};
+    };
+    const auto full = sample(ui_images[0], 400, 790);
+    const auto half_fill = sample(ui_images[1], 400, 790);
+    const auto zero = sample(ui_images[2], 150, 790);
+    if (full[0] <= half_fill[0] + 30 || sample(ui_images[1], 150, 790)[0] <= zero[0] + 30 ||
+        sample(ui_images[3], 400, 790) != full)
+        return Failure("UI bar-only, empty and restored fills did not reach the presented pixels.");
+    // The UI keeps a 16:9 canvas; resized windows can expose moving scene
+    // pixels in the letterbox. Compare only the opaque panel interior.
+    const auto panel_text_region = [](const UiProbePixels &image) {
+        const float scale = std::min(float(image.width) / 1920.0f, float(image.height) / 1080.0f);
+        const float left = (image.width - 1920.0f * scale) * 0.5f;
+        const float top = (image.height - 1080.0f * scale) * 0.5f;
+        return std::array{static_cast<UINT>(std::ceil(left)) + 2u,
+            static_cast<UINT>(std::ceil(top)) + 2u,
+            static_cast<UINT>(std::floor(left + 1920.0f * scale)) - 2u,
+            image.height / 2u};
+    };
+    const auto text_difference = [&](const UiProbePixels &a, const UiProbePixels &b) {
+        if (a.width != b.width || a.height != b.height) return (std::numeric_limits<std::size_t>::max)();
+        const auto region = panel_text_region(a);
+        std::size_t changed{};
+        for (UINT y = region[1]; y < region[3]; ++y)
+            for (UINT x = region[0]; x < region[2]; ++x)
+            {
+                const auto i = (std::size_t(y) * a.width + x) * 4;
+                if (a.rgba[i] != b.rgba[i] || a.rgba[i + 1] != b.rgba[i + 1] || a.rgba[i + 2] != b.rgba[i + 2]) ++changed;
+            }
+        return changed;
+    };
+    std::size_t resized_text_pixels{};
+    const auto &resized = ui_images[6];
+    const auto resized_region = panel_text_region(resized);
+    for (UINT y = resized_region[1]; y < resized_region[3]; ++y)
+        for (UINT x = resized_region[0]; x < resized_region[2]; ++x)
+        {
+            const auto i = (std::size_t(y) * resized.width + x) * 4;
+            if (resized.rgba[i + 1] > 30 && resized.rgba[i + 1] > resized.rgba[i] + 15)
+                ++resized_text_pixels;
+        }
+    if (text_difference(ui_images[3], ui_images[4]) < 5 || text_difference(ui_images[4], ui_images[5]) < 5 ||
+        text_difference(ui_images[6], ui_images[7]) != 0 || resized_text_pixels < 5 ||
+        sample(ui_images[6], 400, 790)[0] <= 30)
+        return Failure("UI text color/move or resized atlas replay did not produce the expected presented pixels.");
+    evidence.ui_cache_pixels_valid = true;
+    if (auto restored = renderer.Resize(main.output_extent.width, main.output_extent.height); !restored) return restored;
+    auto restored_view = renderer.MainViewInput(snapshots.current.camera);
+    const RenderPackage restored_package{.views = std::span(&restored_view, 1), .snapshots = snapshots,
+        .vfx = {.world_batch = {.session = snapshots.current.header.session_id,
+            .stateful_target = snapshots.current.header.tick}},
+        .devtools = {.delta_seconds = 0.0f}, .ui_draw_content = ui,
+        .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
+    if (auto rendered = renderer.Render(restored_package, evidence.final_frame); !rendered) return rendered;
+
+    const auto original_static_scene = snapshots.current.static_scene;
+    auto expanded_storage = std::make_unique<StaticRenderSceneStorage>(*original_static_scene);
+    expanded_storage->scene_asset_id = MakeAssetId("fixture/owned-view/terrain-expanded");
+    expanded_storage->layout_abi = 0;
+    expanded_storage->eligible_layout_digest.fill(std::byte{});
+    expanded_storage->eligible_static_members.clear();
+    constexpr std::uint64_t expanded_ground_id = 0x5445525241494e01ull;
+    if (std::ranges::find(expanded_storage->instances, expanded_ground_id,
+            &RenderInstance::stable_id) != expanded_storage->instances.end())
+        return Failure("Expanded owned-view terrain stable ID already exists in the source scene.");
+    RenderInstance expanded_ground{};
+    expanded_ground.mesh = RenderMesh::Ground;
+    expanded_ground.stable_id = expanded_ground_id;
+    expanded_ground.position = {-120.0f, 0.75f, 130.0f};
+    expanded_ground.scale = {2.0f, 0.25f, 3.0f};
+    expanded_ground.yaw = 0.23f;
+    expanded_ground.environment_seed = 73u;
+    PopulateRenderInstanceRevisions(expanded_ground);
+    expanded_storage->instances.push_back(expanded_ground);
+    const auto expanded_static_scene = FreezeStaticRenderScene(std::move(expanded_storage));
+
+    auto postlude_snapshots = snapshots;
+    std::vector<RenderInstance> postlude_instances = moving_instances;
+    const auto render_terrain_postlude = [&](std::shared_ptr<const StaticRenderScene> scene,
+        std::string_view key, const RenderInstance *expected_dynamic) -> Result {
+        postlude_snapshots.current.static_scene = std::move(scene);
+        postlude_snapshots.current.instances = postlude_instances;
+        const RenderPackage package{.views = std::span<const RenderViewInput>(views),
+            .snapshots = postlude_snapshots,
+            .vfx = {.world_batch = {.session = snapshots.current.header.session_id,
+                .stateful_target = snapshots.current.header.tick}},
+            .devtools = {.delta_seconds = 0.0f},
+            .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
+        RendererFrameResult postlude_result;
+        if (auto rendered = renderer.Render(package, postlude_result); !rendered) return rendered;
+        if (postlude_result.views.size() != 3u)
+            return Failure("Terrain postlude did not return all three view stamps.");
+        std::array<bool, 3> bank_seen{};
+        for (const auto &stamp : postlude_result.views)
+        {
+            std::string capture_key(key);
+            if (stamp.identity.view_id == kMainRenderViewId)
+                capture_key += "-main";
+            else if (stamp.identity.view_id == kOwnedViewProbeCapture)
+                capture_key += "-capture";
+            else if (stamp.identity.view_id != kOwnedViewProbePreview)
+                return Failure("Terrain postlude returned an unexpected view stamp.");
+            const auto path = artifacts / (capture_key + ".json");
+            nlohmann::ordered_json metadata;
+            if (auto captured = CaptureSurfaceReadback(renderer, stamp.identity.view_id, path,
+                    stamp.rendered_frame, metadata); !captured) return captured;
+            if (auto verified = VerifyTerrainSubmission(metadata,
+                    *postlude_snapshots.current.static_scene, expected_dynamic); !verified) return verified;
+            const auto frame_slot = metadata.at("terrain_submission").at("frame_slot").get<std::uint32_t>();
+            bank_seen[frame_slot] = true;
+            evidence.motion_readbacks[capture_key] = std::move(metadata);
+        }
+        if (!std::ranges::all_of(bank_seen, [](bool seen) { return seen; }))
+            return Failure("Terrain postlude captures did not cover all three frame slots.");
+        return Result::Success();
+    };
+
+    const auto terrain_submissions_before = renderer.GetDiagnostics().total_rendered_frames;
+    postlude_instances = moving_instances;
+    postlude_instances.push_back(dynamic_meadow);
+    if (auto rendered = render_terrain_postlude(expanded_static_scene,
+            "owned-view-terrain-expanded", &postlude_instances.back()); !rendered) return rendered;
+
+    auto changed_dynamic_meadow = dynamic_meadow;
+    changed_dynamic_meadow.position = {97.0f, 3.0f, 101.0f};
+    changed_dynamic_meadow.scale.x *= 0.75f;
+    changed_dynamic_meadow.scale.y = 1.5f;
+    changed_dynamic_meadow.scale.z *= 1.25f;
+    changed_dynamic_meadow.yaw = 0.37f;
+    ++changed_dynamic_meadow.environment_seed;
+    ++changed_dynamic_meadow.revisions.transform;
+    ++changed_dynamic_meadow.revisions.material;
+    postlude_instances = moving_instances;
+    postlude_instances.push_back(changed_dynamic_meadow);
+    if (auto rendered = render_terrain_postlude(original_static_scene,
+            "owned-view-terrain-restored", &postlude_instances.back()); !rendered) return rendered;
+
+    postlude_instances = moving_instances;
+    if (auto rendered = render_terrain_postlude(original_static_scene,
+            "owned-view-terrain-static-only", nullptr); !rendered) return rendered;
+    if (renderer.GetDiagnostics().total_rendered_frames != terrain_submissions_before + 9u)
+        return Failure("Terrain postlude did not produce exactly nine additional view submissions.");
+    return Result::Success();
+}
+
+nlohmann::ordered_json OwnedViewProbeReceipt(const OwnedViewProbeEvidence &evidence)
+{
+    using Json = nlohmann::ordered_json;
+    Json packages = Json::array();
+    for (const auto &package : evidence.frames)
+    {
+        Json views = Json::array();
+        for (const auto &stamp : package)
+        {
+            const auto &v = stamp.rendered_view;
+            views.push_back({{"submitted", stamp.submission_id != 0},
+                {"view_id", stamp.identity.view_id.value},
+                {"role", v.role == RenderViewRole::Main ? "main" : v.role == RenderViewRole::Preview ? "preview" : "capture"},
+                {"actual_tick", stamp.identity.actual_tick}, {"render_package_id", stamp.identity.render_frame_id},
+                {"submission_id", stamp.submission_id}, {"view_render_sequence", stamp.rendered_frame},
+                {"presentation_id", stamp.identity.presentation_id}, {"provider_token_known", stamp.identity.provider_token_known},
+                {"provider_token", stamp.identity.provider_token_known ? Json(stamp.identity.provider_token) : Json(nullptr)},
+                {"history_generation", stamp.history_generation}, {"camera_cut", v.camera_cut},
+                {"scene_origin", {v.scene_origin.x, v.scene_origin.y, v.scene_origin.z}},
+                {"view_origin", {v.view_origin.x, v.view_origin.y, v.view_origin.z}},
+                {"camera_position", {v.camera.position.x, v.camera.position.y, v.camera.position.z}},
+                {"camera_target", {v.camera.target.x, v.camera.target.y, v.camera.target.z}},
+                {"output_extent", {v.output_extent.width, v.output_extent.height}},
+                {"unjittered_view_projection", stamp.unjittered_view_projection}});
+        }
+        packages.push_back(std::move(views));
+    }
+    return {{"packages", std::move(packages)}, {"overwrite_submission_id", evidence.overwrite_submission_id},
+        {"admitted_decals", evidence.admitted_decals},
+        {"admitted_distortions", evidence.admitted_distortions},
+        {"admitted_ribbons", evidence.admitted_ribbons},
+        {"admitted_ground", evidence.admitted_ground},
+        {"admitted_volumes", evidence.admitted_volumes},
+        {"invalid_distortion_gap_rejected", evidence.invalid_distortion_gap_rejected},
+        {"invalid_ribbon_pool_rejected", evidence.invalid_ribbon_pool_rejected},
+        {"invalid_ground_gap_rejected", evidence.invalid_ground_gap_rejected},
+        {"archer_clip_ids", evidence.archer_clip_ids},
+        {"motion_epoch_break", {{"stable_id", evidence.motion_epoch_target_id},
+            {"before", evidence.motion_epoch_before}, {"after", evidence.motion_epoch_after}}},
+        {"motion_readbacks", evidence.motion_readbacks},
+        {"submissions_before", evidence.submissions_before},
+        {"submissions_after_bad_preflight", evidence.submissions_after_bad_preflight},
+        {"submissions_after", evidence.submissions_after}, {"duplicate_rejected", evidence.duplicate_rejected},
+        {"nonfinite_origin_rejected", evidence.nonfinite_origin_rejected},
+        {"nonfinite_flash_history_rejected", evidence.nonfinite_flash_history_rejected},
+        {"rejected_outputs_unchanged", evidence.rejected_outputs_unchanged},
+        {"stale_diagnostics_rejected", evidence.stale_diagnostics_rejected},
+        {"ui_cache_pixels_valid", evidence.ui_cache_pixels_valid},
+        {"captures", {evidence.captures[0].filename().string(), evidence.captures[1].filename().string()}},
+        {"hdr_capture", evidence.hdr_capture.filename().string()}};
+}
+} // namespace hs::render_test
