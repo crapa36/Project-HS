@@ -114,6 +114,16 @@ counts/ratios while damage, uses, hit events and required summary values remain.
 
 ## Presentation and rendering
 
+Renderer catalogue semantics are admitted once by the RenderData decoder or the
+loose development-catalogue factory. Their metadata is immutable and retained by
+an owning handle; native initialization/resident preparation checks that the bound
+views and actual pack size still match that owner. Raw tool inputs use the same
+semantic validator from the existing RenderData-owned `hs_renderer_catalog_io` leaf;
+RendererD3D12 links that leaf without acquiring Runtime or content-tool dependencies.
+Actual file reads still verify bytes, ranges and digests before
+decode/upload; payload and GPU lifetime admission remain separate.
+
+
 Presentation projects stable GameDomain contracts. It does not execute rules or reach into Gameplay implementation state.
 
 Character authoring binds each FBX material slot to a material identity. Cooking
@@ -165,8 +175,11 @@ still refresh on publication, and previous/current remain independently owned.
 Raw writes clear storage and raw copies always copy. Mutation and copy/move failure
 boundaries invalidate reuse; no hash or pointer identity validates the arrays.
 Animation updates share the existing actual-dynamic invalidation used by projection.
-Renderer prepares HLOD member mappings and proxy bindings once per retained scene
-and refreshes only residency-dependent fields each frame.
+Renderer shares one decoded AdmittedSceneHlod owner across native view storage;
+allocation sizing does not repeat immutable metadata validation. HLOD member
+mappings and proxy bindings prepare once per retained scene and refresh only
+residency-dependent fields each frame. New page payloads, dynamic bindings and
+completion/reuse boundaries remain checked.
 The offline scene cooker may start parent proxies from an existing authored LOD2
 with matching materials, flags and selector coverage. It certifies the original
 to that representation once per source, then carries an outward-rounded scaled
@@ -258,7 +271,11 @@ PresentationCatalog and SimulationRules are typed tables. Their developer file
 decoders are the separate hs_presentation_io and hs_game_rules_io libraries.
 Release Runtime decodes the content-linker's bounded binary sections into typed
 owners; generated C++ retains the small image manifest. Developer Runtime retains
-the selected-Generation loaders. Simulation's canonical byte
+the selected-Generation loaders. An admitted Generation retains its exact pointer
+snapshot; the development reload watch starts settled on that input and prepares
+only a changed pointer. This preserves pointer-change races and new-candidate
+validation without loading the active manifest again during the first frame.
+Simulation's canonical byte
 writer and decoder share one typed member inventory, preserving ABI padding
 normalization and the existing independent gameplay hash.
 The Release ProjectHS entry point links the compiled shipping content;
@@ -694,8 +711,12 @@ and rejected output, still publishing zero indirect arguments; shadow preparatio
 omits their caster/receiver work and retains retirement of previous caster records.
 Packet-owned instance lookup and sorted attachment IDs serve Fresnel and skin
 demand across views, without scanning every effect for every instance.
-Mirrored shader prefixes
-share the4720-byte FrameConstants layout, and upload offsets follow its alignment.
+CPU preparation reads ordinary host FrameConstants and the package-owned Archer
+palettes, never the write-combined frame upload. Cluster preparation receives the
+same host values. Constants are copied once after graph setup and before Execute;
+the waited submission slot still owns the GPU bytes through completion.
+Mirrored shader prefixes share the FrameConstants wire layout checked by host
+size/offset assertions, and upload offsets follow its alignment.
 Each view records its successful sample time independently of retired GPU resources.
 CPU scene payload revisions and current GPU owners commit together at successful
 graph execution, before fallible service completion. Per-view display samples and
