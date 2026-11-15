@@ -45,11 +45,20 @@ simulation_rules.hsbin
 presentation_catalog.hsbin
 ```
 
+Game content is fixed from startup until process exit. Content edits apply on the
+next run. Keep build caches and offline snapshots in the tooling layer; runtime
+reload, version switching and rollback state are outside the game's requirements.
+Native queue completion, allocation ownership and actual file backing lifetimes
+remain separate execution contracts.
+
 ## Verification
 
 Use the narrowest existing check that answers the risk introduced by the change.
 
 구조 간소화와 최적화를 우선하고, 관련 수정을 모은 뒤 빌드와 필요한 기존 검사를 묶어서 실행한다.
+일반 구현·기능 확인은 Debug를 기본으로 하며, 작은 수정마다 Debug와 Release를 모두 빌드하지 않는다.
+Release는 개발 전용 코드 분리·조건부 컴파일·빌드 의존성 등 구성 경계가 바뀐 경우 관련 최소 타깃만 확인하거나, 작업 묶음 완료·배포 전 최종 확인 시 실행한다.
+유효한 Release 확인 이후 구성 경계가 바뀌지 않은 작은 수정은 다음 최종 확인까지 묶어 처리한다.
 기본 `Build/msvc-debug`·`Build/msvc-release`를 덮어쓰며 사용하고 별도 날짜별·실험별 빌드 트리는 만들지 않는다.
 불가피한 임시 빌드는 고정 임시 경로를 재사용하고 사용 후 즉시 삭제한다. 완료된 대용량 중간 생성물도 즉시 정리한다.
 변경 위험을 직접 잡지 못하는 중복 테스트·상태 검사·진단 코드는 추가하지 말고 정리한다.
@@ -68,10 +77,13 @@ Use the narrowest existing check that answers the risk introduced by the change.
 
 For localized changes, prefer the relevant build/test target before broader workflows.
 
-Keep only tests that detect a distinct product contract. Extend an existing case
-table before adding a new test file or executable; separate runners require a real
-isolation or dependency boundary. Do not add source-spelling assertions, disconnected
-algorithm copies, or permanent before/after tools for a completed optimization.
+Keep only indispensable checks for save-data preservation, authoritative gameplay,
+input/event loss or duplication, memory bounds, and actual asynchronous resource
+lifetime. Remove cosmetic, getter/setter, source-spelling, duplicate and one-off
+tests together with their exclusive helpers, APIs and build dependencies. Add no
+test code unless a concrete critical failure cannot be covered by a retained case;
+extend that case instead of creating another file or executable. Do not retain
+disconnected algorithm copies or permanent before/after tools for an optimization.
 
 Use:
 

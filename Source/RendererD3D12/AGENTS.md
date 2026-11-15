@@ -8,6 +8,6 @@ Do not hide or suppress D3D12 validation, GPU validation, resource-state, resour
 
 Actual renderer changes use the existing render smoke/integration validation when the D3D12 runtime and GPU environment are available.
 
-Use the existing GPU-validation configuration when investigating synchronization, barriers, resource state, or resource lifetime. Shader hot-reload validation uses the Debug validation path.
+Use the existing GPU-validation configuration when investigating synchronization, barriers, resource state, or resource lifetime.
 
 Report unavailable prerequisites exactly; do not claim an unexecuted check.

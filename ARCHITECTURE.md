@@ -25,6 +25,12 @@ RenderData's native-free value target also feeds Presentation. Its package codec
 remain a separate conditional target. Runtime composes Core, Jobs, Gameplay,
 Presentation, and RendererD3D12. Apps are executable entry points and composition targets.
 
+Environment texture/histogram and mesh cooking use separate producer executables.
+The mesh producer has no DirectXTex, D3D11 or COM requirement. Both retain the same
+input-snapshot and publication helpers; ActionKey includes the actual producer
+executable identity, so mesh-only implementation changes do not invalidate texture
+recipes through a shared executable.
+
 CombatSim consumes Gameplay's scoped public tick view for targeting. Its combat and
 progression loops do not depend on Presentation or construct render snapshots.
 
@@ -62,6 +68,13 @@ failure publication keeps the first error and its fixed-size message.
 - The unconditional `hs_render_data_values` target depends only on Core. It does
   not pull package codecs, content tools, DXC or native renderer prerequisites into
   low-level builds. Presentation links this value target, not `hs_render_data`.
+- RenderData's generic package framing, material schema/sidecar, and texture package
+  codecs are bounded static leaves: `hs_render_data_package` depends on Core and
+  RenderData values; material and texture leaves depend on the package leaf.
+  `hs_render_data` aggregates these leaves with the remaining runtime codecs.
+  The material compiler and material shader producer link the material leaf, while
+  the texture package producer links the texture leaf, preserving their existing
+  Core, asset pipeline, DirectXTex/DXC, JSON, and bcrypt requirements.
 - RenderData's `hs_terrain_surface` codec leaf links `hs_render_data` and only its
   actual consumers; terrain codec edits do not relink unrelated content producers.
 - `hs_runtime_contracts` is a header usage-requirements target for native-free
@@ -69,9 +82,12 @@ failure publication keeps the first error and its fixed-size message.
   value headers and depends on Core/GameDomain/RenderData values; it neither builds
   nor links the native Runtime/renderer backend, IO, DXC or content products.
   Runtime, content consumers and low-level VFX fixtures inherit it directly.
-- `hs_renderer_catalog_io` is RenderData's admitted renderer metadata wire codec.
-  It depends only on RenderData/Core, while native allocation and upload remain
-  RendererD3D12 responsibilities. `hs_audio_image_io` similarly owns Runtime's
+- `hs_renderer_catalog_io` is RenderData's admitted renderer metadata wire codec
+  and owns character descriptor admission/compiler code. It depends only on
+  RenderData/Core and only targets that consume these codecs link it, so unrelated
+  texture/material producers do not relink when character descriptor code changes.
+  Native allocation and upload remain RendererD3D12 responsibilities.
+  `hs_audio_image_io` similarly owns Runtime's
   native-free audio metadata decode without initializing an audio device.
 - Runtime's `PreparedContent` retains the opened image and decoded simulation,
   presentation, audio, VFX and renderer catalog owners for their consumers.
@@ -93,8 +109,8 @@ Structural changes must preserve phase order, fixed-step behavior, seeds, `/fp:s
 Enemy and projectile hot/cold groups are the single authoritative actor storage.
 Private status, attribution and history remain in Gameplay. GameDomain's scoped
 TickReadView borrows those owners through semantic accessors, immutable spans and
-cached small facts; it owns no actor/history mirror. Mutation is rejected while a
-scope is active. Presentation consumes the view synchronously and owns the render
+cached small facts; it owns no actor/history mirror. The simulation owner finishes
+mutation before creating a view. Presentation consumes it synchronously and owns the render
 packet it publishes across threads. Full read-model copies are development exports.
 The `hs_gameplay_development` leaf target owns the explicit copy function and is
 linked by tests; ordinary Gameplay and Runtime do not contain the export body.
@@ -114,6 +130,10 @@ counts/ratios while damage, uses, hit events and required summary values remain.
 
 ## Presentation and rendering
 
+Content remains fixed for the lifetime of a running game. Offline content edits
+take effect at the next launch. Build-cache and snapshot ownership do not define
+native allocation, queue-completion or file-backing lifetimes.
+
 Renderer catalogue semantics are admitted once by the RenderData decoder or the
 loose development-catalogue factory. Their metadata is immutable and retained by
 an owning handle; native initialization/resident preparation checks that the bound
@@ -129,19 +149,51 @@ Presentation projects stable GameDomain contracts. It does not execute rules or 
 Character authoring binds each FBX material slot to a material identity. Cooking
 reads that material's published capabilities and program set to select the
 opaque/masked or translucent domain; character names do not select a pass.
-The admitted GPU binding table stores the two domain ordinals and preparation
-publishes per-asset domain counts for candidate collection. Common Hero pass
+The admitted GPU binding table stores set headers and per-slot domain ordinals.
+Each64-byte geometry record carries its template's material-set index. Vertex
+evaluation resolves the slot once and passes the flat ordinal pair to pixel
+shading and visibility reconstruction; no fixed actor-range constant table or
+mesh-to-material switch selects a domain. Visibility resolve passes the classified
+provoking-vertex pair into triangle reconstruction rather than resolving it again.
+Ordinary alpha transparency is a
+surface domain, independent of solid-transmission optical capability. Preparation
+publishes opaque/translucent domains on each draw template; one bounded frame
+list drives coverage, ordinary optical phases, OIT fallback and diagnostics.
+LOD cuts share their source coverage. Actual per-view bounds determine exclusion;
+unknown bounds retain the draw. Shadow feedback uses the same admitted material
+domain and qualified yaw/scale/skin/wind surface bounds. Static forward receiver
+bounds remain in the immutable scene batch; dynamic receivers follow the current
+pose, independently of caster eligibility. Object names or the presence of another
+object do not choose an alternate transmission topology. Common Hero pass
 shaders are compiled once; material packages reference those shared programs
 and retain their own parameter layouts and capabilities. Procedural water keeps
-its explicit solid-transmission closure and participates in transparent work.
+its explicit solid-transmission closure as a bound material program and uses the
+same ordered optical kernel as other transmission surfaces.
 
 RenderData owns RenderInstance, immutable scene/snapshot values, RenderSnapshotPair,
 VFX frame inputs and RenderPackage. Presentation owns RenderSnapshotExchange;
 Core retains the generic SPSC queue. Renderer consumes the standalone pair value,
 so it has no dependency on Presentation's exchange or producer lifecycle.
+The pair always contains a current snapshot value, including an empty scene.
+Only the exchange's ReadPair records whether any publication has arrived.
+Runtime selects the non-null immutable UI owner before package assembly; the
+renderer uses that owner without a raw-UI fallback. Screen-overlay intensity is
+owned by applied renderer settings rather than repeated in each frame package.
 Raw presentation events end at Runtime's VFX/audio translation. The renderer
-frame contains prepared VFX inputs; each view is rendered inside that explicit
-package, with no snapshot-to-package compatibility recursion.
+frame contains prepared VFX inputs. The normal Render entry consumes the package's
+camera and existing Main owner directly. Tool RenderViews takes samples for
+explicitly configured Preview/Capture owners; output size, capacity and role are
+not inferred from frame samples. Both entries use the same native view renderer,
+with tool-only per-view results and no snapshot-to-package compatibility recursion.
+Camera and scene inputs use arena-local Float3 metres. The renderer derives the
+camera-relative reconstruction basis from the actual eye; callers do not submit
+scene/view origins or request world rebasing. Per-view previous submission,
+camera/skin/grass histories and conservative culling arithmetic remain independent.
+Lighting owns two per-slot buffers: stable light records and a grid header followed
+by complete local-light membership masks. Directional lights retain their prefix
+and separate shading loop. With no local lights, only records/header upload is
+registered; shaders do not read unused cell masks. Retained layouts distinguish
+that topology, and both buffers follow the existing submission completion owner.
 Development previews are package producers in Runtime and the existing native
 fixtures. They own synthetic scene/pose spans and choose their camera and VFX
 inputs before Render; the renderer does not replace the supplied scene. ImGui
@@ -193,17 +245,28 @@ The SPB2 baked lighting package carries world-space cosine-convolved SH9 for
 independent regular-grid nodes, visibility masks for each cell's 4x4x4 receiver
 subcells, and raw/GGX cubes for a separate set of reflection boxes. Offline
 native cubes capture sky, emission and directly lit static surfaces before
-exposure. This supports one static surface bounce. Repeated diffuse transfer
-and dynamic indirect lighting are outside the solver. Runtime blends up to eight
+exposure. The offline solver feeds each completed diffuse grid into the next
+capture until its absolute/relative convergence policy is met within the bounded
+iteration budget, then captures reflections against the converged grid. Dynamic
+indirect lighting remains outside the solver. Runtime blends up to eight
 reachable SH corners and uses a baked list of all overlapping reflection boxes.
 Outside the diffuse grid it uses the global environment. Empty interior
 visibility masks contribute zero local irradiance. Direct lights, dynamic
 shadows and screen-space reflections remain independent.
+Admitted baked grids keep all 27 float32 SH channels in seven Float4 rows per
+node, followed by five cell-metadata rows per cell in one buffer. Runtime and
+offline sampling share normalized reachable-corner interpolation in float32.
+The published grid owner pins the buffer until all GPU readers complete.
 The offline probe baker owns native capture, convolution and signed first-hit
 readback. The runtime adapter admits the baked package, uploads, publishes and
 retires its read-only resources. Both consume a shared static scene/material
 revision contract and the same common native rendering code. Saved dynamic-GI
 settings migrate to Probe at the settings read boundary.
+Capture bindings and native leases are compiled only into the offline baker.
+The shared graph layout keeps an opaque owner with the same representation in
+both compositions; only the baker allocates its capture payload. The sampled
+runtime uses the frame's descriptor base directly and carries only the revision
+and publication inputs it consumes.
 
 Static lighting compatibility uses authored scene/material inputs and local
 material mutations since Generation admission. View quality and capture quality
@@ -223,6 +286,8 @@ material/texture/geometry inputs used by the existing page evaluator. TSF1 metad
 retains ordered section records and a source identity; each section's three planes
 use an ordinary TexturePackage, keeping the existing package size limits. Runtime
 admits matching pages, uploads them, publishes and retires their native resources.
+Registered planes retain their admitted tile layout for that pinned generation;
+scene changes compare against it without rereading the archive or source identity.
 Missing, incompatible or unaffordable pages select the original terrain evaluator;
 runtime does not create page-bake PSOs or execute the page-production shaders.
 Those two shader products remain in the producer input only. Build provenance is
@@ -271,10 +336,8 @@ PresentationCatalog and SimulationRules are typed tables. Their developer file
 decoders are the separate hs_presentation_io and hs_game_rules_io libraries.
 Release Runtime decodes the content-linker's bounded binary sections into typed
 owners; generated C++ retains the small image manifest. Developer Runtime retains
-the selected-Generation loaders. An admitted Generation retains its exact pointer
-snapshot; the development reload watch starts settled on that input and prepares
-only a changed pointer. This preserves pointer-change races and new-candidate
-validation without loading the active manifest again during the first frame.
+the selected-Generation loaders. The admitted startup Generation retains its exact
+pointer snapshot and backing; later pointer edits take effect after restart.
 Simulation's canonical byte
 writer and decoder share one typed member inventory, preserving ABI padding
 normalization and the existing independent gameplay hash.
@@ -288,9 +351,8 @@ It retains the admitted Generation/package dependencies until the capture data
 loader itself can consume a narrower set; dropping an unused color PSO alone
 does not change package dependency ownership.
 The base Runtime target does not force that image's
-full cook into unrelated consumers. CPU runtime integration tests use their
-selected Generation; a separate shipping test target owns binary-table/image
-and packed-font checks. Both remain part of full verification.
+full cook into unrelated consumers. Runtime integration tests use their selected
+Generation; shipping content tests retain image and pack ownership checks.
 Single-config Release can build with HS_BUILD_CONTENT_TOOLS=OFF using an existing
 Shipping/content.generated.cpp and Content/content.hsp in the build directory.
 This path has no content-producer or Generation-verification dependency. Missing
@@ -374,6 +436,13 @@ Performance capture samples simultaneous retained, raw, prepared, frozen-native 
 frame-scratch logical capacities at selected preparation boundaries. Those samples
   are neither process RSS nor a whole-VFX admission limit. Cosmetic growth limits
   do not certify mandatory warning capacity, profile cardinality or GPU residency.
+Flash and Mote image recipes own immutable display appearance. Retained and visible
+births borrow that appearance and carry their own scheduling, geometry, age, seed
+and motion state. Runtime pins the image through all retained births and Render;
+tools keep their supplied appearance owner alive through the same consumption.
+Native upload packs the existing particle ABI from both parts. No per-birth shared
+owner or duplicate material registry is used.
+
 Runtime prepares cosmetic event-profile masks once per VFX image generation from
 source/output ownership and authority. Ground, EntitySurface, PointRate, replacement
 contexts and unidentified contributors stay required. Retained profile admission
@@ -416,35 +485,37 @@ Only admitted pages generate depth clears, including pages with no caster draws.
   DrawRecords; VS resolves base plus instance and carries that record to PS clipping.
   Group templates live in existing 32-byte segment metadata, while per-caster GPU
   data is 64 bytes. Mesh and local-shadow draws retain per-record commands.
-  Raw flash, ballistic, mote and compatibility output plans expose fanout before sampling. Required storage is reserved
-first; decoration spends only the remaining shared capacity across prepared,
-retained and visible destinations. Empty retained queues transfer ownership by swap.
-Birth reservation and selection share a private helper that measures held capacity
-after required storage and ordering scratch are reserved. Retained flashes expire
-before selection; later display preparation handles only newly appended births,
-preserving the retained/birth/spark order without evaluating retained ages twice.
-An empty prepared birth vector can transfer its reserved allocation to an empty
-retained destination, including shard-only activations. Mixed native due prefixes
-can exchange empty prepared allocations into the frozen owner; active batches keep
-their original buffers and identity until receipt. Renderer particle assembly uses
-view-owned CPU scratch; native upload and GPU completion ownership stay separate.
-Native prefix preparation also grows from the larger empty CPU allocation when
-neither allocation is large enough. This realizes the capacity credit without
-retaining a larger unused scratch beside newly allocated frozen storage.
-Per-view decal selection retains at most the existing64 GPU outputs in fixed
-local candidate storage. A small tournament tree preserves the prior stable-sort
-prefix without storing every candidate. Distortion coverage selection still sees
-all eligible candidates; GPU upload and resource completion contracts are unchanged.
-Retirement compacts canceled rows in its existing scans and carries forward the
-surviving old-prefix length for stable merging with new births. Later frame
-admission counts empty prepared storage as reusable native-copy capacity.
-Live spark admission also accounts for its pending workspace. Priority affects
-selection, while emission retains original source order and ordinal seeds.
-  Typed birth selection accounts for distinct copies and prospective native-prefix
-  storage. Compatibility decorations use remaining headroom after actual typed
-  emission; intentional cosmetic drops suppress equivalent legacy output, while
-  failed conversion keeps its fallback. Essential status shard/tombstone and
-  fire/stamp suffix capacity is prepared before optional rows are admitted.
+Raw flash, ballistic, mote and compatibility plans expose fanout before sampling.
+A shared64MiB soft allowance counts logical canonical rows, profile references,
+retained/frozen births and current frame outputs/payload. It does not estimate STL
+nodes/buckets, free vector capacity, preparation scratch or future split copies;
+process RAM and allocator reservations are separate observations. Required warning,
+geometry and status outputs bypass the cosmetic cap and reserve their actual ranges.
+Optional selection uses importance and stable input-order ties. Emission preserves
+source/ordinal seeds, and intentional cosmetic drops do not revive equivalent legacy
+output. Failed conversion retains its actual fallback.
+
+Retained flashes expire before birth admission; display preparation evaluates only
+newly appended births. Live spark admission counts retained and visible rows without
+predicting a staging vector's allocation. Persistent spark cursors update in place
+and births append to their final retained output; allocation failure exits the render
+thread instead of retrying a copied cursor/output transaction. Fire/stamps reserve their essential suffix
+before decorative rows. Frame scratch is cleared after the prior Render's CPU work
+has joined, so a previous frame's spare capacity is never an admission input.
+
+Ground event routing uses the existing prepared effect profile word for charged
+pulse and wave contracts. Wave evaluation retains live context/age checks; effect
+identity, fixed timing and two-source shape are resolved when recipes are prepared.
+Ground admission checks the program's unique lookup directly rather than retaining
+the same lookup count in every recipe row.
+
+Empty retained queues may take prepared backing by swap. Native freezing keeps the
+larger partition and copies the smaller due/future partition, reusing an empty
+allocation when possible. A frozen batch retains its buffers and identity until its
+matching submission receipt; GPU completion and UI Present remain separate. No new
+handle registry is introduced. Per-view decal selection retains the existing64GPU
+outputs in fixed local candidate storage, while distortion sees all eligible inputs.
+Actual upload, pool index bounds and native completion are preserved.
 Runtime supplies actual VFX quality during adaptation and updates retained profiles
 only when that quality changes, preserving episode identity and clocks.
 PreparedPairFacts indexes only the retained snapshot pair by its
@@ -465,9 +536,11 @@ the ribbon profile.
 Ribbon and EntitySurface share prepared image tables; Fresnel and direct-owner
 Mesh iterate accepted ordered recipes without authored parameter/path decoding.
 Their fixed recipe records live in RenderData values. Catalog admission creates
-checked borrowed recipe views; frame commands carry recipe indices and live owner
-geometry/time only. The catalog backing outlives synchronous Render and its joined
-recording jobs. Actual atlas bounds and dynamic command ranges remain frame facts.
+checked borrowed recipe views. Renderer startup retains those views in its immutable
+content configuration and checks their bounds against the actual resident atlas once.
+Frame commands carry recipe indices and live owner geometry/time only. The catalog
+backing outlives the renderer and its joined recording jobs; dynamic command indices
+and native upload ranges are still checked for each submitted package.
 Successful Ballistic activation suppresses only the corresponding legacy Mesh
 before emitter construction; ShockShell and unrelated layers retain their original
 meaning. Native pending uses the same owner and stable legacy-before-typed order.
@@ -513,8 +586,7 @@ AssetPipeline. Its producer identity follows RendererD3D12 implementation change
 unrelated render-test host edits do not invalidate the archive. Runtime frame
 composition is excluded from the offline baker; shared bootstrap, capture,
 resource and teardown changes remain producer dependencies.
-The render test host compiles the frame with the offline adapter because its
-existing fixtures exercise both frame rendering and native bake capture.
+The render test host links the runtime renderer for its GPU lifetime fixtures.
 The explicit hs_render_static_shadow_candidate target uses a shadow-free input
 Generation; its output is composed into runtime-full after the shadow-free input.
 Gameplay projection and the baker share Presentation's fixed environment-sun direction. Ordinary runtime shadow
@@ -523,7 +595,7 @@ static D32 bank. Fine pages still raster/cache at their original precision;
 dynamic depth remains separate until tap-wise reverse-Z composition. RenderData
 owns the index and lossless page codec (private pinned meshoptimizer dependency).
 The renderer owns bounded coarse staging and GPU seeding, while Apps own atomic
-publication. Incompatible sun/grid/layout or reloaded materials/pipelines use
+publication. Incompatible sun/grid/layout or material/pipeline contracts use
 the realtime path. A per-view CPU plan admits omission of the full CSM producer
 only when baked supply, all receiver domains and current coarse-page command
 capacity are guaranteed. Otherwise the actual CSM remains registered. Active hero
@@ -534,7 +606,10 @@ CPU frame/task capture can omit GPU timing queries and their measurement-only
 resolve. This is explicit in diagnostic metadata; absent GPU measurements are
 not zero-duration work. Direct and Compute own separate query/readback storage
 inside each submission slot; CPU reads only completed slots. Copy timing uses its
-own storage when the device supports Copy queue timestamps. Capture-only CPU
+own storage when the device supports Copy queue timestamps. Development captures
+keep texture-transfer queries separate from Main queries, so Main storage can grow
+after accepted transfers without replacing an in-flight query/readback owner.
+Both are covered by the frame's merged completion. Capture-only CPU
 preparation slices measure main-thread wall intervals; separately reported worker
 intervals overlap those slices and must not be added to them.
 Active DRS uses an `OutputDependencyInterval` with both endpoints on
@@ -578,8 +653,8 @@ of geometry LOD. Geometry metadata products contain a checked material dependenc
 reference; LOD0 also references its hierarchy. Material metadata, program, bindings,
 parameter layout and surface layout belong to the material product only. Terrain
 and ground-detail geometry share their existing standalone material products.
-The renderer derives one immutable material variant per authored ordinal and swaps
-those facts with the candidate geometry on resident reload.
+The renderer derives one immutable material variant per authored ordinal during
+startup resident preparation.
 
 Geometry page preparation returns its parsed package view and validated geometry
 together. Startup, streaming and GPU upload reuse that result. Package views borrow
@@ -629,6 +704,11 @@ Copy completion permits window reuse, and final publication or safe cancellation
 releases it. Existing one-shot and reserved/mapping-only paths keep their contracts.
 Local texture pressure excludes nonlocal upload heaps on discrete adapters; total
 physical-memory diagnostics still report both segments.
+Development residency category and storage totals change with the allocation
+ledger, so reporting reads fixed totals rather than walking allocations again.
+Release omits continuous diagnostic totals and reads admission budgets directly.
+The renderer exports its layout-affecting development define to native consumers;
+budget observations and completion-based retirement retain their own lifetimes.
 
 Sequential views retain their own temporal and native reconstruction state.
 There is no parallel semantic history-resource registry: resources and history
@@ -636,8 +716,13 @@ generation owned by each view are authoritative. Main renders first; auxiliary
 views retain packet order and share canonical scene simulation. Shared descriptor
 banks, allocators and upload scratch belong to the three global submission slots;
 each slot waits for its actual completion before reuse. Output backbuffer indices
-remain separate from those slots. OwnedView is used directly during initialization,
-rendering, resize, options, capture and resident reload; there is no view exchange
+remain separate from those slots. Texture transfers use a second recording lane
+per slot in the same queue executor; these lanes add no output or history banks.
+Their small graph declares only actual mapping/copy sources and targets. Main
+imports the sampled views independently of pending transfer payloads. Accepted
+transfers update the streaming ledger immediately and remain in frame completion
+even if later Main preparation or Present fails. OwnedView is used directly during initialization,
+rendering, resize, options and capture; there is no view exchange
 mirror or whole-device drain for selecting another retained view. Native SDK
 selectors preserve separate viewport contexts; actual reset/reconfigure and
 presentation reuse still require their completion boundaries. Geometry SRV banks
@@ -670,8 +755,8 @@ remain on the CPU, not previous full instances.
 Reuse requires the same device, no logical readers and completed GPU uses. Scene
 upload-only frames still publish a truthful table. Prior table reads cover compute
 visibility resolve and raster/transparent/Hero motion; current-only consumers do
-not acquire a history read. Original per-view projection retains old coordinates
-through origin changes. One perspective-correct unjittered clip varying supplies
+not acquire a history read. Per-view projection retains its actual previous camera
+across skipped views and ordinary movement. One perspective-correct unjittered clip varying supplies
 previous UV/depth, and active raster coordinates supply current motion UV.
 Capture identifies frame scratch by its actual submitted slot/id and committed
 constants stamp; output image indices remain separate. A reused slot cannot be
@@ -738,6 +823,9 @@ Runtime is the composition root, so it may know the concrete systems it runs. Cr
 
 Runtime loads saved settings once and applies explicit command-line overrides
 before creating the window. Apps parse arguments once and do not load profiles.
+SaveStore writes SettingsDocument and ProfileData; SettingsData is only an
+effective simulation/UI/audio projection. Legacy settings are migrated inside
+the reader, without a separate public legacy persistence API.
 Smoke uses process graphics defaults and explicit overrides.
 Experiments can supply a typed graphics preset through the same startup rules;
 explicit process fields then override that preset without persisting it.
@@ -752,17 +840,28 @@ boundary; no PIX or SDK debug-layer DLL is deployed for Release. Game-control
 timing for dynamic resolution and available automatic frame generation is
 separate from optional diagnostic recording. Auto-FG cadence is retained only
 while that policy is active, and accepts samples after submission completion.
+Debug frame/completion histories and transition memory snapshots are collected
+only when the existing timing-stream capture is enabled. Explicit Debug snapshot
+queries may read current memory; normal frames do not build that history.
+GetDiagnostics and its Runtime UI telemetry consumers are absent from Release;
+actual monitor/HDR/settings receipts remain independent.
 Installation verifies staged executable/pack copies outside the game process;
 normal startup still checks the compiled content identity against its opened pack.
+
+DirectXTex serves content production and development HDR capture. The Release
+renderer neither links it nor requires it in a runtime-only configuration.
 
 Jobs submission acts through a creator-bound TaskGroup and returns admission
 success. TaskGroup owns cancellation and joining; task labels, per-task numeric
 handles and scheduling priority are not exposed.
 
-Experiment children execute their validated spec directly. The parent retains
-process isolation and a watchdog; static timeline commands are not retransmitted
-through a separate IPC protocol. Runtime holds its selected simulation rules for
-the session. Rebuilding and restarting selects a new Generation.
+Experiment executes its validated spec and finalizes artifacts in one process;
+CTest or its invoking tool owns the workload timeout. Static timeline commands
+are passed directly to Runtime. Normal Debug, Release and Experiment startup use
+the linked content pack. PreparedContent pins its opened pack, simulation rules,
+renderer catalog, audio and VFX recipes until exit. An explicit development
+`--generation` selects an offline comparison snapshot for that run only. Pending
+IO and GPU work retain their actual backing owners through completion.
 
 ## Public and Private boundaries
 
@@ -771,10 +870,11 @@ Each module's `Public` directory is its supported cross-module API. `Private` is
 ## Build isolation
 
 Material graph validation/optimization/HLSL generation is the RenderData-owned
-`hs_material_compiler` target, enabled only for content tools or RenderData tests.
-Only the material shader producer, render package producer and material package
-tests link it. `hs_render_data` contains runtime data formats without depending
-on this compiler, so compiler edits do not relink unrelated producers or the game.
+`hs_material_compiler` target, enabled for content tools. The material shader and
+render package producers link it. The compiler depends on the bounded material codec leaf; the broad
+`hs_render_data` target aggregates package, material and texture leaves alongside
+runtime codecs without depending on the compiler. Compiler or leaf edits therefore
+do not relink unrelated producers that consume only another leaf.
 Each material producer invocation owns a move-only PreparedMaterial with its
 validated/folded graph, reflection and reachability. Context, uniform, opacity,
 layout and layer-proof consumers borrow that preparation; JSON is parsed once.
@@ -795,6 +895,10 @@ owns source/header rebuild dependencies; a second source/compiler/link-command
 authentication graph is not maintained. Explicit asset and shader-tool inputs
 still participate in each Action key. Equivalent but byte-different relinks can
 recook assets; identical products still retain their ProductSet identity.
+RenderPackage serializes shader logical IDs without consuming DXIL bytes; its
+recipe tracks that semantic input only. Generation admission verifies the actual
+shader products consumed at runtime. Texture, geometry and material payloads keep
+their real byte dependencies.
 The Apps-owned `hs_asset_pipeline` static library compiles the shared Action
 implementation once. Producers remain separate executables, so a producer-specific
 change does not invalidate unrelated recipes. Each process hashes its own executable;
@@ -829,7 +933,7 @@ HS_BUILD_RUNTIME=OFF
 HS_BUILD_CONTENT_TOOLS=OFF
 ```
 
-It builds Core, Jobs, GameDomain, GameRules, Gameplay and Presentation without native runtime/content prerequisites. Enabling `HS_BUILD_TESTS` also builds the native-free RenderData codecs, AssetManifest and Audio/Generation producers needed by the CPU tests. Neither path needs ImGui, Agility SDK, PIX, D3D12 Memory Allocator, runtime fonts, DXC, DirectXTex or FBX SDK. Shader infrastructure exists only when Runtime or content tools need it. Runtime and content options default to `ON`; tests default to `OFF` outside test-enabled presets.
+It builds Core, Jobs, GameDomain, GameRules, Gameplay and Presentation without native runtime/content prerequisites. With `HS_BUILD_TESTS`, the low-level tests use RenderData header values and the logical graph compiler without JSON, content or package producer dependencies. Neither path needs ImGui, Agility SDK, PIX, D3D12 Memory Allocator, runtime fonts, DXC, DirectXTex or FBX SDK. Shader infrastructure exists only when Runtime or content tools need it. Runtime and content options default to `ON`; tests default to `OFF` outside test-enabled presets.
 
 ## Windows verification
 
@@ -837,26 +941,21 @@ Supported builds use single-config generators, as the Ninja presets do. Configur
 rejects multi-config generators so Release cannot expose developer targets whose
 implementations are excluded from the shipping configuration.
 
-Named Debug executable builds compile/link against existing content; they do not
-recook the full generation. Build `hs_content_generation` explicitly when content
-changes. The default ALL build still prepares/verifies the runtime generation,
-and Release retains its compiled shipping-image dependencies.
+Debug and Release executable builds prepare the same fixed pack incrementally
+through `hs_shipping_image`, then link its small generated manifest. Runtime
+installation copies that pack in both configurations. Ordinary builds do not
+copy a runtime Generation; `hs_content_generation` is an explicit offline/native
+fixture snapshot target. Runtime-only library builds do not need that snapshot.
 
-Runtime VFX cases share two test executables, grouped by synthetic versus cooked
-inputs. Each case remains a separate CTest process and name. Only cooked cases
-prepare a Generation; compiling one group never compiles the other group's cases.
-
-`cmake --workflow --preset verify-core` builds and runs the CPU contracts once,
-including RenderData, selected Generation, character interchange, graph ranges
-and asset publication. Gameplay keeps MSVC `/fp:strict`. Python/Ninja publication
-fixtures use the real native-free Audio/Generation producers. CI runs only on
-Windows; these CPU checks do not replace D3D12 or GPU execution.
+`cmake --workflow --preset verify-core` builds and runs the selected CPU
+contracts, including simulation determinism, input admission and graph ranges.
+Gameplay keeps MSVC `/fp:strict`. These checks do not replace D3D12 or GPU execution.
 
 `verify` shares the ordinary `Build/msvc-debug` tree. There are no separate
 validation, GPU-validation, portable-test or ASan presets. D3D12 validation is
 selected by the existing Debug `--validation`/`--gpu-validation` arguments;
-native fixtures retain the mode required by their contracts. SHA-256 and graphics
-settings cases share `foundation.core`, rather than separate executables.
+native fixtures retain the mode required by their contracts. GPU cases cover
+multi-queue execution, residency and owned-view lifetime.
 Test executables and development hosts are excluded from default ALL builds;
 verification builds only CTest's selected `test_prep/*` dependencies, or
 `test_prep/all` for the complete workflow.
@@ -866,3 +965,7 @@ verification builds only CTest's selected `test_prep/*` dependencies, or
 `Tests/check_architecture.cmake` scans production includes, Gameplay graphics API knowledge, cross-module `Private` access, and major `target_link_libraries` edges. It intentionally uses CMake text checks; no parser framework or second build graph is needed for the current rules.
 
 Code, target links, and executable tests are the source of truth if this document becomes stale. Verification policy is defined by the applicable `AGENTS.md`.
+
+Actual texture copies use the executor-owned Copy recorder in its completion slot. Tile map/unmap runs as an external queue operation only when mappings change; a resource-version dependency orders the subsequent recorded copies. Mapping-only batches still receive a real queue completion. Development upload timing has at most two actual stages in its separate query storage; Release has no such capture storage.
+
+Each graph pass stores one closed execution value: void/result worker recording, owner recording, or a shared external queue operation. The existing topology kind identity is preserved; external operations retain their shared owner through accepted GPU completion. Runtime ends and joins its owned simulation/render threads before allocating final diagnostic output after the main loop; settings OOM is a fail-stop result, not an edit-replay state.
