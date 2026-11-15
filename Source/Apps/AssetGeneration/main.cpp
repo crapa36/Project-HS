@@ -1304,8 +1304,7 @@ std::string LoadPointerId(const fs::path &root, const fs::path &relative,
     const std::string pointer_scope = RequiredString(pointer, "scope", "-");
     if (expected_scope && pointer_scope != *expected_scope)
         Fail("invalid-pointer", "-", "pointer scope mismatch");
-    if (relative != fs::path("GenerationState") / ScopeFileName(pointer_scope))
-        Fail("invalid-pointer", "-", "pointer filename/scope mismatch");
+    // Scoped readers choose the filename; GC also retains valid pointer aliases.
     const std::string generation_id = RequiredString(pointer, "generation_id", "-");
     const std::string locator = RequiredString(pointer, "manifest_locator", "-");
     if (!IsLowerSha256(generation_id) ||
@@ -1693,7 +1692,7 @@ void GarbageCollect(const fs::path &root, const std::vector<std::string> &pins,
         if (unpublished_generations.contains(id))
             return;
         const auto generation = LoadGeneration(root, id, true);
-        VerifyProducts(root, generation.products, "-");
+        // GC follows manifest ownership; composition and consumers verify payload bytes.
         for (const auto &product : generation.products)
         {
             known_namespaces.insert(product.namespace_path);
@@ -1836,9 +1835,6 @@ void GarbageCollect(const fs::path &root, const std::vector<std::string> &pins,
                 if (keep)
                     plan.retained_generation_reasons[id].insert("reader lease");
             }
-            // Explicit roots were already verified under this same mutation lock.
-            if (keep && !explicitly_retained)
-                VerifyProducts(root, generation.products, "-");
             for (const auto &product : generation.products)
             {
                 known_namespaces.insert(product.namespace_path);

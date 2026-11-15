@@ -1,9 +1,8 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include "../AssetPipeline/action.hpp"
+#include "producer_inputs.hpp"
 #include "../Content/environment_histogram_cooker.hpp"
-#include "../Content/environment_mesh_cooker.hpp"
 #include "../Content/environment_texture_cooker.hpp"
 
 #include <Windows.h>
@@ -29,6 +28,10 @@ namespace
 {
 namespace fs = std::filesystem;
 namespace ap = hs::asset_pipeline;
+using hs::environment_producer::AddInputs;
+using hs::environment_producer::InputSnapshot;
+using hs::environment_producer::IsCurrent;
+using hs::environment_producer::Require;
 constexpr std::uint32_t kHistogramRecipeVersion=3;
 
 struct ScopedComInitialization
@@ -39,24 +42,6 @@ struct ScopedComInitialization
         if (SUCCEEDED(result)) CoUninitialize();
     }
 };
-
-void Require(bool condition, std::string_view message)
-{
-    if (!condition) throw std::runtime_error("hs_environment: " + std::string(message));
-}
-
-std::vector<std::string> MeshProductNames()
-{
-    constexpr std::array names{"trunk_0", "trunk_1", "trunk_2", "leaf_0", "leaf_1",
-        "leaf_2", "rock_0", "rock_1", "rock_2", "rock_3", "grass_0", "grass_1",
-        "grass_2", "grass_3", "flower_daisy", "flower_buttercup", "flower_violet", "clover_patch",
-    "ground_leaves", "twig_cluster", "fence_short",
-    "shrub_low", "stump_roots", "crate_intact", "crate_broken", "barrel_intact", "barrel_broken", "cart_broken", "fence_broken", "fence_splitrail", "sack_tied", "fallen_log", "rock_mossy", "meadow_ground", "meadow_water"};
-    std::vector<std::string> products;
-    for (const auto* name : names) for (const auto* lod : {"", "_lod1", "_lod2"})
-        products.push_back("environment_" + std::string(name) + lod + ".meshbin");
-    return products;
-}
 
 Microsoft::WRL::ComPtr<ID3D11Device> HardwareCompressor()
 {
@@ -109,79 +94,6 @@ std::string DefaultEncoderIdentity()
         std::to_string(description.DeviceId)+"."+std::to_string(description.SubSysId)+"."+
         std::to_string(description.Revision)+"."+
         std::to_string(static_cast<std::uint64_t>(driver.QuadPart));
-}
-
-void AddInputs(ap::ActionSpec& spec, const fs::path& source_root,
-               const std::vector<fs::path>& paths)
-{
-    for (const auto& path : paths) {
-        const auto relative = path.lexically_relative(source_root);
-        Require(!relative.empty() && !relative.is_absolute() &&
-                relative.begin() != relative.end() && *relative.begin() != "..",
-                "input escapes source root");
-        const auto logical_id=relative.generic_string();
-        if(std::ranges::none_of(spec.inputs,[&](const auto& input){return input.logical_id==logical_id;}))
-            spec.inputs.push_back(ap::HashInput(logical_id,path));
-    }
-}
-
-struct InputSnapshot
-{
-    fs::path source_root;
-    fs::path snapshot_root;
-    std::map<std::string, ap::Input> captured;
-
-    void Capture(const fs::path& snapshot_path)
-    {
-        const auto relative = snapshot_path.lexically_relative(snapshot_root);
-        Require(!relative.empty() && !relative.is_absolute() &&
-                relative.begin() != relative.end() && *relative.begin() != "..",
-                "snapshot input escapes its root");
-        const auto logical_id = relative.generic_string();
-        if (captured.contains(logical_id)) return;
-        const auto source_path = source_root / relative;
-        const auto target_path = snapshot_root / relative;
-        ap::MakeDirectory(target_path.parent_path());
-        captured.emplace(logical_id,
-            ap::CopyAndHashInput(logical_id, source_path, target_path));
-    }
-
-    void SetInputs(ap::ActionSpec& spec, const std::vector<fs::path>& snapshot_paths)
-    {
-        spec.inputs.clear();
-        for (const auto& path : snapshot_paths)
-        {
-            Capture(path);
-            const auto relative = path.lexically_relative(snapshot_root).generic_string();
-            spec.inputs.push_back(captured.at(relative));
-        }
-        std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
-        spec.inputs.erase(std::unique(spec.inputs.begin(), spec.inputs.end(),
-            [](const auto& left, const auto& right) { return left.logical_id == right.logical_id; }),
-            spec.inputs.end());
-    }
-};
-
-bool IsCurrent(const fs::path& build_root, const ap::ActionSpec& spec,
-               const std::vector<std::string>& names)
-{
-    const auto result_path = build_root / "Actions" / spec.namespace_path / "result.json";
-    if (!fs::exists(result_path) || !fs::exists(result_path.parent_path() / "result.d"))
-        return false;
-    try {
-        const ap::ActionResultSnapshot snapshot(build_root, spec.namespace_path);
-        if (snapshot.ActionId() != spec.action_id ||
-            snapshot.ActionKeyValue() != ap::ActionKey(spec) ||
-            snapshot.ProductCount() != names.size()) return false;
-        for (const auto& name : names) {
-            ap::UpstreamProduct dependency;
-            fs::path product_path;
-            snapshot.ReadProduct("environment/" + name, dependency, product_path);
-        }
-    } catch (const std::exception&) {
-        return false;
-    }
-    return true;
 }
 
 struct PendingAction
@@ -408,8 +320,6 @@ void Produce(std::string_view mode, const fs::path& source_root,
     }
 
     const auto texture_source = source_root / "ContentSource/Textures/Environment";
-    const auto mesh_source = source_root /
-        "ContentSource/Models/Environment/environment_meshes.json";
     ap::ActionSpec spec;
     spec.action_id = "environment." + std::string(mode);
     spec.recipe_id = "project-hs.environment." + std::string(mode);
@@ -441,9 +351,6 @@ void Produce(std::string_view mode, const fs::path& source_root,
         names = hs::content::EnvironmentTextureProducts(texture_source);
         device = HardwareCompressor();
         spec.recipe_id += EncoderIdentity(device.Get());
-    } else if (mode == "meshes") {
-        AddInputs(spec, source_root, {mesh_source, mesh_source.parent_path() / "meadow_surface_meshes.json"});
-        names = MeshProductNames();
     } else {
         throw std::runtime_error("hs_environment: unsupported action mode");
     }
@@ -458,15 +365,11 @@ void Produce(std::string_view mode, const fs::path& source_root,
     try {
         InputSnapshot snapshot{source_root,input_stage,{}};
         const auto frozen_texture_source=input_stage/"ContentSource/Textures/Environment";
-        const auto frozen_mesh_source=input_stage/"ContentSource/Models/Environment/environment_meshes.json";
         if(mode=="histogram")
             snapshot.Capture(frozen_texture_source/"project_hs_environment_materials_v9_LEAN.json");
         else if(mode=="texture-role" || mode=="textures") {
             snapshot.Capture(frozen_texture_source/"project_hs_environment_materials_v9_LEAN.json");
             snapshot.Capture(frozen_texture_source/"baked_materials.json");
-        } else {
-            snapshot.Capture(frozen_mesh_source);
-            snapshot.Capture(frozen_mesh_source.parent_path()/"meadow_surface_meshes.json");
         }
 
         std::vector<fs::path> frozen_inputs;
@@ -479,8 +382,6 @@ void Produce(std::string_view mode, const fs::path& source_root,
         } else if(mode=="textures") {
             frozen_inputs=hs::content::EnvironmentTextureInputs(frozen_texture_source);
             names=hs::content::EnvironmentTextureProducts(frozen_texture_source);
-        } else {
-            frozen_inputs={frozen_mesh_source,frozen_mesh_source.parent_path()/"meadow_surface_meshes.json"};
         }
         snapshot.SetInputs(spec,frozen_inputs);
         if(IsCurrent(build_root,spec,names)) {
@@ -498,8 +399,6 @@ void Produce(std::string_view mode, const fs::path& source_root,
                                                         device.Get());
             else if (mode == "textures")
                 hs::content::CookEnvironmentTextures(frozen_texture_source, stage, device.Get());
-            else
-                hs::content::CookEnvironmentMeshes(frozen_mesh_source, stage);
 
             std::vector<ap::Product> products;
             for (const auto& name : names)
@@ -553,13 +452,13 @@ int wmain(int argc, wchar_t** argv)
                 for (const auto ch : group_arg) group += static_cast<char>(ch);
                 for (const auto ch : role_arg) role += static_cast<char>(ch);
             }
-            else if ((arg == L"--histogram" || arg == L"--textures" || arg == L"--meshes" || arg == L"--texture-batch") && mode.empty())
+            else if ((arg == L"--histogram" || arg == L"--textures" || arg == L"--texture-batch") && mode.empty())
                 mode.assign(arg.begin() + 2, arg.end());
             else
                 throw std::runtime_error("hs_environment: invalid command line");
         }
         Require(!mode.empty() && !source_root.empty() && !build_root.empty(),
-                "usage: hs_environment --histogram|--textures|--texture-role <group> <role>|--texture-batch|--meshes --source-root <absolute> --build-root <absolute>");
+                "usage: hs_environment --histogram|--textures|--texture-role <group> <role>|--texture-batch --source-root <absolute> --build-root <absolute>");
         action_id = mode == "texture-role"
             ? "environment.texture." + group + "." + role
             : "environment." + mode;

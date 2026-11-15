@@ -94,15 +94,12 @@ void Produce(const fs::path &source, const fs::path &build)
         p.ssr_refine_steps = row.at("ssr_refine_steps").get<std::uint32_t>();
         p.froxel_stride = row.at("froxel_stride").get<std::uint32_t>();
         p.froxel_slices = row.at("froxel_slices").get<std::uint32_t>();
-        p.volumetric_area_samples = row.at("volumetric_area_samples").get<std::uint32_t>();
         p.hero_refraction_layers = row.at("hero_refraction_layers").get<std::uint32_t>();
         p.pom_max_steps = row.at("pom_max_steps").get<std::uint32_t>();
         p.pom_refinement_steps = row.at("pom_refinement_steps").get<std::uint32_t>();
         p.local_shadow_max_lights = row.at("local_shadow_max_lights").get<std::uint32_t>();
         p.local_shadow_resolution = row.at("local_shadow_resolution").get<std::uint32_t>();
-        p.local_shadow_area_samples = row.at("local_shadow_area_samples").get<std::uint32_t>();
         p.local_shadow_budget_mib = row.at("local_shadow_budget_mib").get<std::uint32_t>();
-        p.lighting_cluster_capacity = row.at("lighting_cluster_capacity").get<std::uint32_t>();
         p.gi_logical_cascades = row.at("gi_logical_cascades").get<std::uint32_t>();
         p.gi_internal_resolution_percent = row.at("gi_internal_resolution_percent").get<std::uint32_t>();
         p.vfx_light_fraction = row.at("vfx_light_fraction").get<float>();

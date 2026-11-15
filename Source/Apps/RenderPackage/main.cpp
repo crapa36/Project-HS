@@ -112,7 +112,7 @@ ap::Input StructuralMaterialInput(const std::string &logical_id,
                                                              structural.size())));
 }
 
-ap::Input ParameterIdentityInput(const std::string &product_id,
+ap::Input ProductIdentityInput(const std::string &product_id,
                                  const fs::path &result_path)
 {
     return SemanticInput(product_id + ".identity", result_path,
@@ -292,7 +292,7 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
     ap::ActionSpec spec;
     spec.action_id = "render." + std::string(name);
     spec.recipe_id = "project-hs.render.material";
-    spec.recipe_version = 5;
+    spec.recipe_version = 6;
     spec.namespace_path = "render/" + std::string(name);
     UpstreamProducts upstream_products(build_root);
     spec.inputs.push_back(StructuralMaterialInput("material/" + std::string(name) + "/package-structure",
@@ -302,7 +302,7 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
     const std::string parameter_namespace = "render/material/" + std::string(name) + "/parameters";
     const std::string parameter_id = parameter_namespace + ".rpkg";
     auto parameter_dependency = upstream_products.Identity(parameter_namespace, parameter_id);
-    spec.inputs.push_back(ParameterIdentityInput(parameter_id, parameter_dependency.result_path));
+    spec.inputs.push_back(ProductIdentityInput(parameter_id, parameter_dependency.result_path));
 
     std::vector<std::string> dependencies;
     dependencies.reserve(definition.prepared.Graph().textures.size() + 2);
@@ -317,7 +317,8 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
 
     const auto shader_namespace = "render/shader/" + std::string(name);
     const std::string shader_id = std::string(shader_namespace) + "_scene.dxil";
-    spec.upstream.push_back(upstream_products.Identity(shader_namespace, shader_id));
+    spec.inputs.push_back(ProductIdentityInput(shader_id,
+        upstream_products.Identity(shader_namespace, shader_id).result_path));
     dependencies.push_back(shader_id);
     std::ranges::sort(dependencies);
     dependencies.erase(std::unique(dependencies.begin(), dependencies.end()), dependencies.end());
@@ -339,7 +340,6 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
         for (const auto &texture : definition.prepared.Graph().textures)
             upstream_products.Verify(texture.product_id.substr(0, texture.product_id.size() - 5),
                 texture.product_id);
-        upstream_products.Verify(shader_namespace, shader_id);
         ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
         return;
     }
@@ -355,7 +355,6 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
             std::as_bytes(std::span(contents.data(), contents.size())), hs::MakeAssetId(texture.product_id));
         rd::ValidateMaterialTexturePackage(texture, view.description, name == kTerrainMaterialName ? 3u : 0u);
     }
-    upstream_products.Verify(shader_namespace, shader_id);
     const auto stage = ap::CreateStage(build_root / "Actions" / spec.namespace_path);
     try
     {
@@ -588,7 +587,7 @@ void Produce(std::string_view name, const fs::path &source_root,
     ap::ActionSpec spec;
     spec.action_id = "render." + std::string(name);
     spec.recipe_id = "project-hs.render.environment";
-    spec.recipe_version = 16;
+    spec.recipe_version = 17;
     spec.namespace_path = "render/" + std::string(name);
     spec.inputs.push_back(ap::HashInput(schema_relative, schema_path));
     UpstreamProducts upstream_products(build_root);
@@ -622,7 +621,7 @@ void Produce(std::string_view name, const fs::path &source_root,
     }
     const auto parameter_namespace = "render/material/" + std::string(material_name) + "/parameters";
     auto parameter_dependency = upstream_products.Identity(parameter_namespace, parameter_id);
-    spec.inputs.push_back(ParameterIdentityInput(parameter_id, parameter_dependency.result_path));
+    spec.inputs.push_back(ProductIdentityInput(parameter_id, parameter_dependency.result_path));
     upstream_sources.push_back({parameter_namespace, parameter_id});
     std::vector<rd::TextureDescription> texture_descriptions;
     for (const auto &texture : definition.prepared.Graph().textures)
@@ -637,8 +636,8 @@ void Produce(std::string_view name, const fs::path &source_root,
     for (const auto &shader_id : masked ? std::vector<std::string>{scene_id, shadow_id}
                                         : std::vector<std::string>{scene_id})
     {
-        spec.upstream.push_back(upstream_products.Identity(shader_namespace, shader_id));
-        upstream_sources.push_back({shader_namespace, shader_id});
+        spec.inputs.push_back(ProductIdentityInput(shader_id,
+            upstream_products.Identity(shader_namespace, shader_id).result_path));
     }
     std::vector<std::string> material_dependencies{parameter_id, scene_id};
     if (masked) material_dependencies.push_back(shadow_id);

@@ -181,7 +181,7 @@ rd::MaterialParameterType ParseParameterType(const Json &value)
     return rd::MaterialParameterType::Float4;
 }
 
-std::vector<rd::MaterialParameterDefinition> ParseParameterDeclarations(const Json &root)
+std::vector<rd::MaterialParameterDefinition> ParseParameterDeclarations(const Json &root, bool require_surface_defaults)
 {
     const auto version = root.at("version").get<unsigned>();
     std::vector<rd::MaterialParameterDefinition> result;
@@ -263,7 +263,7 @@ std::vector<rd::MaterialParameterDefinition> ParseParameterDeclarations(const Js
         required_float("target_roughness", 0.0f, 1.0f);
         required_float("roughness_blend", 0.0f, 1.0f);
     }
-    else
+    else if (require_surface_defaults)
     {
         required_float("metallic", 0.0f, 1.0f);
         required_float("roughness_scale", 0.0f, 2.0f);
@@ -535,7 +535,7 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
     const auto textures = context ? ParseTextures(root) : std::vector<rd::MaterialTextureDefinition>{};
     const auto samplers = ParseSamplers(root);
     Require(!hero || (textures.empty() && samplers.empty()), "hero graph must use the native sampled-context adapter");
-    const auto parameters = ParseParameterDeclarations(root);
+    const auto parameters = ParseParameterDeclarations(root, !hero);
     std::vector<Pending> pending;
     std::unordered_map<std::string, std::size_t> ids;
     pending.reserve(definitions.size());

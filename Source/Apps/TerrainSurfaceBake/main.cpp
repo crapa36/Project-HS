@@ -220,8 +220,8 @@ int main(int argc, char **argv)
         ap::ActionSpec spec;
         spec.action_id = kAction; spec.namespace_path = kNamespace;
         const TerrainBc7Encoder encoder;
-        spec.recipe_id = "project-hs.render.terrain-surface/native-seed-1-bc7-layout5-tiles-apron" + encoder.identity;
-        spec.recipe_version = 5;
+        spec.recipe_id = "project-hs.render.terrain-surface/native-seed-1-bc7-layout6-tiles-apron" + encoder.identity;
+        spec.recipe_version = 6;
         Require(!generation.product_paths.empty(), "Terrain bake input Generation is empty");
         std::set<std::string> visited;
         std::vector<std::string> pending{
@@ -279,8 +279,8 @@ int main(int argc, char **argv)
             std::vector<std::string> section_ids, dependencies;
             std::vector<bool> written;
             std::vector<ap::Product> products;
+            std::vector<std::byte> metadata;
             rd::TextureDescription description{};
-            std::array<std::byte, 32> source_identity{};
             bool begun = false;
             Require(hs::D3D12Renderer::BakeTerrainSurfacePages(config, scene,
                 [&](std::span<const rd::TerrainSurfaceSection> incoming, rd::TextureDescription global,
@@ -293,10 +293,11 @@ int main(int argc, char **argv)
                     sections.assign(incoming.begin(), incoming.end());
                     description = global;
                     description.format = rd::kTextureFormatBc7;
-                    source_identity = identity;
                     written.resize(sections.size());
                     for (std::size_t i = 0; i < sections.size(); ++i)
                         for (std::size_t plane = 0; plane < 3; ++plane) section_ids.push_back(SectionId(i, plane));
+                    metadata = rd::BuildTerrainSurfacePackage(
+                        hs::MakeAssetId(kMetadata), section_ids, sections, description, identity);
                     begun = true;
                     return hs::Result::Success();
                 },
@@ -323,8 +324,6 @@ int main(int argc, char **argv)
                 }));
             Require(begun && std::ranges::all_of(written, [](bool value) { return value; }),
                 "Native terrain bake did not complete every section");
-            const auto metadata = rd::BuildTerrainSurfacePackage(
-                hs::MakeAssetId(kMetadata), section_ids, sections, description, source_identity);
             const auto metadata_path = stage / kMetadataFile;
             ap::WriteBytes(metadata_path, metadata);
             auto product = ap::HashProduct(std::string(kMetadata), std::string(kMetadataFile), metadata_path);

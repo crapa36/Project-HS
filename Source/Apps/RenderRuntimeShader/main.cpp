@@ -6,6 +6,7 @@
 #include "../AssetPipeline/dxc_process.hpp"
 #include "../AssetPipeline/render_shader_binding_inputs.hpp"
 #include "../AssetPipeline/shader_source_snapshot.hpp"
+#include "../../../Content/Shaders/ambient_occlusion_programs.hlsli"
 
 #include <hs/core/windows_command_line.hpp>
 
@@ -144,14 +145,20 @@ constexpr std::array kClusterRefinementPrograms{
 
 std::span<const ShaderFamily> ShaderFamilies()
 {
-    static constexpr std::array ambient_programs{
-        ProgramOutput{"gtao_horizon_cs.dxil", L"GTAOHorizonCS", L"cs_6_0"},
-        ProgramOutput{"gtao_prepare_inverse_w_cs.dxil", L"AoPrepareInverseWCS", L"cs_6_0"},
-        ProgramOutput{"gtao_temporal_cs.dxil", L"GTAOTemporalCS", L"cs_6_0"},
-        ProgramOutput{"gtao_bilateral_cs.dxil", L"GTAOBilateralCS", L"cs_6_0"},
-        ProgramOutput{"contact_shadow_cs.dxil", L"ContactShadowCS", L"cs_6_0"}};
-    static constexpr std::array adaptive_gtao_programs{
-        ProgramOutput{"adaptive_gtao_cs.dxil", L"AdaptiveGtaoCS", L"cs_6_0"}};
+#define HS_AO_MAIN_Main(file, entry, profile) ProgramOutput{file, entry, profile},
+#define HS_AO_MAIN_Adaptive(file, entry, profile)
+#define HS_AO_MAIN(role, family, file, entry, profile) HS_AO_MAIN_##family(file, entry, profile)
+    static constexpr std::array ambient_programs{HS_AO_PROGRAMS(HS_AO_MAIN)};
+#undef HS_AO_MAIN
+#undef HS_AO_MAIN_Adaptive
+#undef HS_AO_MAIN_Main
+#define HS_AO_ADAPTIVE_Main(file, entry, profile)
+#define HS_AO_ADAPTIVE_Adaptive(file, entry, profile) ProgramOutput{file, entry, profile},
+#define HS_AO_ADAPTIVE(role, family, file, entry, profile) HS_AO_ADAPTIVE_##family(file, entry, profile)
+    static constexpr std::array adaptive_gtao_programs{HS_AO_PROGRAMS(HS_AO_ADAPTIVE)};
+#undef HS_AO_ADAPTIVE
+#undef HS_AO_ADAPTIVE_Adaptive
+#undef HS_AO_ADAPTIVE_Main
     static constexpr std::array reconstruction_programs{
         ProgramOutput{"reconstruction_guides_cs.dxil", L"ReconstructionGuidesCS", L"cs_6_0"}};
     static constexpr std::array presentation_programs{

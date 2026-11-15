@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <cstdint>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -98,22 +99,21 @@ std::int64_t RequireInteger(const Json &object, std::string_view file,
 void RequireExactKeys(const Json &object, std::string_view file,
                       std::initializer_list<std::string_view> expected)
 {
-    std::set<std::string, std::less<>> keys;
-    for (const auto key : expected)
-    {
-        keys.emplace(key);
-    }
     for (const auto &[key, unused] : object.items())
     {
         static_cast<void>(unused);
-        if (!keys.erase(key))
+        if (std::ranges::find(expected, key) == expected.end())
         {
             ThrowValidationError(file, std::string("$/") + key, "unexpected root member");
         }
     }
-    if (!keys.empty())
+    std::optional<std::string_view> missing;
+    for (const auto key : expected)
+        if (object.find(key) == object.end() && (!missing || key < *missing))
+            missing = key;
+    if (missing)
     {
-        ThrowValidationError(file, std::string("$/") + *keys.begin(), "missing root member");
+        ThrowValidationError(file, std::string("$/") + std::string(*missing), "missing root member");
     }
 }
 
@@ -510,7 +510,7 @@ void ValidateGameDataDocumentSemantics(const Json &document, std::string_view na
             "basic_projectile_cadence", "piercing_projectile", "uniform_fan_projectiles",
             "hold_release_linear_charge", "projectile_to_area_explosion", "nearest_unhit_target_ricochet",
             "targeted_periodic_area", "forward_roll_leave_trap", "forced_retreat_and_projectile"};
-        const std::array<std::set<std::string, std::less<>>, 9> parameter_keys{{
+        const std::array<std::initializer_list<std::string_view>, 9> parameter_keys{{
             {"damage_multiplier", "projectile_speed", "range", "collision_radius", "pierce", "starting_level", "maximum_level", "selected_upgrades_per_session"},
             {"cooldown", "damage_multiplier", "projectile_speed", "range", "collision_radius", "pierce", "damage_decay_per_pierce", "minimum_damage_fraction", "maximum_hits_per_target"},
             {"cooldown", "fan_angle", "projectile_count", "damage_multiplier_per_arrow", "projectile_speed", "range", "collision_radius", "pierce_per_arrow", "maximum_hits_per_target"},
@@ -529,16 +529,12 @@ void ValidateGameDataDocumentSemantics(const Json &document, std::string_view na
                 ThrowValidationError(name, path + "/logic_id", "skill logic order is part of cooked ABI");
             const ParameterValues parameters(entries[index], name, path);
             RequireParameterKeys(parameters, name, path, parameter_keys[index]);
-            std::size_t parameter_index{};
             for (const auto &[key, value_pointer] : parameters.Values())
             {
-                const auto parameter_path = path + "/parameters/" + std::to_string(parameter_index);
                 const auto &value = *value_pointer;
                 if (value.is_number() && (!std::isfinite(value.get<double>()) || value.get<double>() < 0.0))
-                    ThrowValidationError(name, parameter_path + "/value",
+                    ThrowValidationError(name, path + "/parameters/" + std::string(key) + "/value",
                                          "numeric skill parameter must be finite and non-negative");
-                static_cast<void>(key);
-                ++parameter_index;
             }
         }
         return;

@@ -91,7 +91,8 @@ std::string CharacterContextInclude(ap::ActionSpec &spec, const fs::path &source
         generated += "    case " + std::to_string(ordinal) + "u: return HsCharacterEvaluateSurface_" + std::to_string(ordinal) + "(ctx);\n";
         if (!translucent) generated += "#endif\n";
     }
-    generated += "    default: return (HsSurfaceClosure)0;\n    }\n}\n";
+    generated += "    default:\n    {\n        HsSurfaceClosure empty = (HsSurfaceClosure)0;\n"
+        "        empty.normal_is_world = true;\n        return empty;\n    }\n    }\n}\n";
     generated += "float HsCharacterEvaluateOpacity(HsMaterialContext ctx, uint ordinal)\n{\n    switch (ordinal)\n    {\n";
     for (std::size_t ordinal = 0; ordinal < rd::kCharacterMaterialNames.size(); ++ordinal)
     {

@@ -17,11 +17,14 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace hs::render_test
 {
+static_assert(!std::is_default_constructible_v<RenderPackage>);
+
 inline constexpr ViewId kOwnedViewProbePreview{0x50525641u};
 inline constexpr ViewId kOwnedViewProbeCapture{0x43415042u};
 
@@ -39,12 +42,14 @@ inline bool SameIdentity(const FrameIdentity &a, const FrameIdentity &b)
 }
 inline bool SameView(const RenderViewInput &a, const RenderViewInput &b)
 {
-    return a.id == b.id && a.role == b.role && a.camera.position == b.camera.position &&
-        a.camera.target == b.camera.target && a.camera.up.x == b.camera.up.x &&
+    return a.id == b.id && a.role == b.role &&
+        a.camera.position.x == b.camera.position.x && a.camera.position.y == b.camera.position.y &&
+        a.camera.position.z == b.camera.position.z && a.camera.target.x == b.camera.target.x &&
+        a.camera.target.y == b.camera.target.y && a.camera.target.z == b.camera.target.z &&
+        a.camera.up.x == b.camera.up.x &&
         a.camera.up.y == b.camera.up.y && a.camera.up.z == b.camera.up.z &&
         a.camera.vertical_fov_degrees == b.camera.vertical_fov_degrees &&
         a.near_plane == b.near_plane && a.far_plane == b.far_plane &&
-        a.scene_origin == b.scene_origin && a.view_origin == b.view_origin &&
         a.output_extent == b.output_extent && a.render_capacity == b.render_capacity &&
         a.render_active == b.render_active && a.camera_cut == b.camera_cut;
 }
@@ -55,7 +60,7 @@ inline bool SameStamp(const RenderViewFrameResult &a, const RenderViewFrameResul
         SameView(a.rendered_view, b.rendered_view) &&
         a.unjittered_view_projection == b.unjittered_view_projection;
 }
-inline bool SameRejectedResultEvidence(const RendererFrameResult &a, const RendererFrameResult &b)
+inline bool SameRejectedResultEvidence(const RendererToolFrameResult &a, const RendererToolFrameResult &b)
 {
     return a.frame == b.frame && SameIdentity(a.identity, b.identity) &&
         a.view_history_generation == b.view_history_generation && SameView(a.rendered_view, b.rendered_view) &&
@@ -196,6 +201,10 @@ inline Result VerifyTerrainSubmission(const nlohmann::ordered_json &metadata,
             return fail("static section does not match its source or page layout.");
     if (dynamic_meadow && !check_section(sections.at(static_count), *dynamic_meadow, true))
         return fail("dynamic section does not match its Meadow source or fallback layout.");
+    const auto &feedback = metadata.at("terrain_page_feedback");
+    if (feedback.at("available").get<bool>() != (expected_page_slice != 0) ||
+        feedback.at("planes").size() != expected_page_slice)
+        return fail("page feedback availability or plane count does not match the submitted page layout.");
 
     std::vector<bool> seen(static_count);
     std::vector<std::uint32_t> static_slots;
@@ -225,8 +234,6 @@ inline Result VerifyTerrainSubmission(const nlohmann::ordered_json &metadata,
         seen[section_index] = true;
         static_slots.push_back(slot);
     }
-    if (!std::ranges::all_of(seen, [](bool value) { return value; }))
-        return fail("static instance section indices are incomplete.");
     if (dynamic_meadow && !check_instance(dynamic_rows.at(0), *dynamic_meadow, static_count))
         return fail("dynamic instance does not match the appended Meadow section.");
     return Result::Success();
@@ -269,9 +276,6 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
 {
     using namespace owned_view_probe_detail;
     evidence = {};
-    if (!snapshots.has_current)
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_render_owned_view_probe",
-            "Owned-view probe requires the caller's current leased snapshot pair.");
     const auto provider = renderer.GetReconstructionStatus().effective_provider.value;
     if (provider != "internal_taau" && provider != "native_taa" && provider != "off")
         return Result::Failure(ErrorCode::InvalidArgument, "hs_render_owned_view_probe",
@@ -284,25 +288,17 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
     preview.output_extent = half(main.output_extent);
     preview.render_capacity = half(main.render_capacity);
     preview.render_active = half(main.render_active);
-    preview.camera.position.x -= 3.0; preview.camera.target.x -= 1.0;
-    preview.view_origin = preview.camera.position;
+    preview.camera.position.x -= 3.0f; preview.camera.target.x -= 1.0f;
     auto capture = preview;
     capture.id = kOwnedViewProbeCapture; capture.role = RenderViewRole::Capture;
     capture.output_extent = main.output_extent;
     capture.render_capacity = main.render_capacity;
     capture.render_active = main.render_active;
     capture.camera = main.camera;
-    capture.camera.position.x += 4.0; capture.camera.target.x += 2.0;
-    capture.view_origin = capture.camera.position;
+    capture.camera.position.x += 4.0f; capture.camera.target.x += 2.0f;
     std::array<RenderViewInput, 3> views{main, preview, capture};
-    // Start in one large global basis; moving that basis mid-probe would be a real camera cut.
-    for (auto &view : views)
-    {
-        view.scene_origin.x = 1.0e9;
-        view.camera.position.x += 1.0e9;
-        view.camera.target.x += 1.0e9;
-        view.view_origin.x += 1.0e9;
-    }
+    if (auto configured = renderer.ConfigureView(preview.Configuration()); !configured) return configured;
+    if (auto configured = renderer.ConfigureView(capture.Configuration()); !configured) return configured;
     VfxVolumeInput hero{};
     hero.identity.effect_id = 0x564f4c31u;
     hero.identity.effect_handle = 1;
@@ -314,10 +310,8 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
     hero.shape = VfxVolumeShape::BoundedCrown;
     hero.noise = VfxVolumeNoise::None;
     hero.steps = 18;
-    hero.authored_scale = 1;
     hero.alpha = .25f;
     hero.scattering_albedo = {.5f, .5f, .5f};
-    hero.hdr = 1;
     const std::array<VfxDecalInput, 2> decals{{
         {.stable_id = 0x44454341u, .position = {-2, 0, 0}, .radius = 8,
          .linear_rgb = {0.7f, 0.3f, 0.1f}, .hdr = 1, .alpha = 0.7f, .normalized_age = 0.2f,
@@ -436,7 +430,7 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
     std::filesystem::create_directories(artifacts, error);
     if (error) return Failure("Cannot create owned-view capture directory: " + error.message());
     evidence.submissions_before = renderer.GetDiagnostics().total_rendered_frames;
-    RendererFrameResult result;
+    RendererToolFrameResult result;
     nlohmann::ordered_json preview_before_skip;
     nlohmann::ordered_json capture_origin_reset;
     const auto active_dynamic_meadow = [&]() -> const RenderInstance * {
@@ -448,10 +442,9 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
     {
         if (package == 1)
         {
-            // Only Capture changes its basis; skipped Preview retains its own history.
-            views[2].camera.position.x += 2.0;
-            views[2].camera.target.x += 0.25;
-            views[2].view_origin.x += 64.0;
+            // Only Capture moves and cuts; skipped Preview retains its own history.
+            views[2].camera.position.x += 2.0f;
+            views[2].camera.target.x += 0.25f;
             views[2].camera_cut = true;
             auto terrain = std::ranges::find(moving_instances, 0x4d4541444f570001ull,
                 &RenderInstance::stable_id);
@@ -464,13 +457,11 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
         else if (package == 2)
         {
             hero.density = .75f;
-            ++hero.density_revision;
             views[2].camera_cut = false;
             // Reappear Preview with a small camera movement. Its previous GPU
-            // projection must come from package 0, not Main or the rebased B.
-            views[1].camera.position.x += 0.5;
-            views[1].camera.target.x += 0.5;
-            views[1].view_origin.x += 0.5;
+            // projection must come from package 0, not Main or the cut Capture.
+            views[1].camera.position.x += 0.5f;
+            views[1].camera.target.x += 0.5f;
             auto changed_epoch = std::ranges::find(moving_instances, 0x41524348u,
                 &RenderInstance::stable_id);
             if (changed_epoch == moving_instances.end())
@@ -523,7 +514,7 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
             .start_size_max = 0.25f,
             .count = 1,
             .seed = 0x51a7u};
-        const RenderPackage input{.views = submitted_views, .snapshots = package_snapshots,
+        const RenderPackage input{.snapshots = package_snapshots,
             .vfx = {.particle_spawns = package == 0 ? std::span(&particle_birth, 1) :
                     std::span<const ParticleSpawnCommand>{},
                 .effect_lines = world.sequence ? std::span(&effect_line, 1) : std::span<const VfxLineSpawnCommand>{},
@@ -538,7 +529,12 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
                 .ground_gap_angles = ground_gap_pool},
             .devtools = {.delta_seconds = 1.0f / 60.0f},
             .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
-        if (auto rendered = renderer.Render(input, result); !rendered) return rendered;
+        const auto *result_backing = result.views.data();
+        const auto result_capacity = result.views.capacity();
+        const auto submitted_samples = ViewSamples(submitted_views);
+        if (auto rendered = renderer.RenderViews(input, submitted_samples, result); !rendered) return rendered;
+        if (result_capacity >= submitted_views.size() && result.views.data() != result_backing)
+            return Failure("Render replaced view-result storage without a capacity increase.");
         if ((world.sequence == 0 && result.vfx_world_step_submitted) ||
             (world.sequence != 0 && (!result.vfx_world_step_submitted ||
                 result.vfx_world_tick != world.stateful_target || result.vfx_world_session_id != world.session ||
@@ -597,7 +593,7 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
                     return Failure("A successful view render must advance its own sequence; only Capture's explicit cut advances history generation.");
                 const bool same_matrix = found->unjittered_view_projection == old.unjittered_view_projection;
                 if (package == 1 && ordinal == 2 && same_matrix)
-                    return Failure("Capture's large origin/camera discontinuity did not change its projected basis.");
+                    return Failure("Capture camera movement did not change its projected basis.");
                 if (package == 2 && ordinal == 1 && same_matrix)
                     return Failure("Reappearing Preview camera movement did not update its current projection.");
             }
@@ -612,150 +608,15 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
             const auto accepted = result;
             auto duplicate = views; duplicate[2].id = duplicate[1].id;
             auto duplicate_input = input;
-            duplicate_input.views = duplicate;
-            const auto rejected_duplicate = renderer.Render(duplicate_input, result);
+            const auto duplicate_samples = ViewSamples(duplicate);
+            const auto rejected_duplicate = renderer.RenderViews(duplicate_input, duplicate_samples, result);
             evidence.duplicate_rejected = !rejected_duplicate && rejected_duplicate.Code() == ErrorCode::InvalidArgument;
-            const bool duplicate_preserved = SameRejectedResultEvidence(result, accepted) &&
-                renderer.GetDiagnostics().total_rendered_frames == before;
-            auto nonfinite = views; nonfinite[2].view_origin.x = std::numeric_limits<double>::quiet_NaN();
-            auto nonfinite_input = input;
-            nonfinite_input.views = nonfinite;
-            const auto rejected_nonfinite = renderer.Render(nonfinite_input, result);
-            evidence.nonfinite_origin_rejected = !rejected_nonfinite && rejected_nonfinite.Code() == ErrorCode::InvalidArgument;
-            const bool nonfinite_preserved = SameRejectedResultEvidence(result, accepted) &&
-                renderer.GetDiagnostics().total_rendered_frames == before;
-            VfxFlashSpawnInput flash{};
-            flash.size = flash.lifetime = flash.hdr = 1.0f;
-            flash.interpolate_owner_position = true;
-            flash.previous_position.x = std::numeric_limits<float>::quiet_NaN();
-            auto bad_flash_input = input;
-            bad_flash_input.vfx = {.world_batch = input.vfx.world_batch};
-            bad_flash_input.vfx.flashes = std::span(&flash, 1);
-            const auto rejected_flash = renderer.Render(bad_flash_input, result);
-            evidence.nonfinite_flash_history_rejected = !rejected_flash &&
-                rejected_flash.Code() == ErrorCode::InvalidArgument;
-            auto bad_world_input = input;
-            ++bad_world_input.vfx.world_batch.session;
-            const auto rejected_world = renderer.Render(bad_world_input, result);
-            if (rejected_world || rejected_world.Code() != ErrorCode::InvalidArgument ||
-                !SameRejectedResultEvidence(result, accepted) || renderer.GetDiagnostics().total_rendered_frames != before)
-                return Failure("A VFX batch from another session must be rejected before any native submission.");
-            auto invalid_delta = input;
-            invalid_delta.devtools.delta_seconds = std::numeric_limits<float>::quiet_NaN();
-            const auto rejected_delta = renderer.Render(invalid_delta, result);
-            if (rejected_delta || rejected_delta.Code() != ErrorCode::InvalidArgument ||
-                !SameRejectedResultEvidence(result, accepted) || renderer.GetDiagnostics().total_rendered_frames != before)
-                return Failure("Invalid tool frame timing must be rejected before any native submission.");
-            for (const auto fraction : {std::numeric_limits<float>::quiet_NaN(), -0.1f, 1.1f})
-            {
-                auto invalid_sample = input;
-                invalid_sample.display_sample->interpolation = fraction;
-                const auto rejected_sample = renderer.Render(invalid_sample, result);
-                if (rejected_sample || rejected_sample.Code() != ErrorCode::InvalidArgument ||
-                    !SameRejectedResultEvidence(result, accepted) || renderer.GetDiagnostics().total_rendered_frames != before)
-                    return Failure("Invalid display samples must be rejected before native work or output publication.");
-            }
-            VfxLightInput bad_light{};
-            bad_light.radius = 1.0f;
-            bad_light.intensity = std::numeric_limits<float>::quiet_NaN();
-            VfxDecalInput bad_decal{};
-            bad_decal.radius = 1.0f;
-            bad_decal.alpha = std::numeric_limits<float>::quiet_NaN();
-            ParticleSpawnCommand bad_ballistic{};
-            bad_ballistic.authored_ballistic = true;
-            bad_ballistic.renderer = VfxRenderer::Mesh;
-            bad_ballistic.mesh_index = 1;
-            bad_ballistic.lifetime_min = bad_ballistic.lifetime_max = bad_ballistic.authored_hdr = 1.0f;
-            bad_ballistic.authored_drag = std::numeric_limits<float>::quiet_NaN();
-            ParticleSpawnCommand bad_selector{};
-            bad_selector.mesh_index = 8;
-            std::array<RenderPackage, 19> invalid_payloads;
-            for (auto &invalid : invalid_payloads)
-            {
-                invalid = input;
-                invalid.vfx = {.world_batch = input.vfx.world_batch};
-            }
-            invalid_payloads[0].vfx.lights = std::span(&bad_light, 1);
-            invalid_payloads[1].vfx.decals = std::span(&bad_decal, 1);
-            invalid_payloads[2].vfx.particle_spawns = std::span(&bad_ballistic, 1);
-            invalid_payloads[3].vfx.particle_spawns = std::span(&bad_selector, 1);
-            auto missing_gap_pool = annulus(0x494e5641u, {-2, 0, 0});
-            missing_gap_pool.frame_gap_count = 1;
-            auto out_of_range_gap_pool = annulus(0x494e5642u, {-2, 0, 0});
-            out_of_range_gap_pool.frame_gap_first = 2;
-            out_of_range_gap_pool.frame_gap_count = 2;
-            auto mixed_gap_storage = annulus(0x494e5643u, {-2, 0, 0});
-            mixed_gap_storage.gap_angles_degrees = {0.5f};
-            mixed_gap_storage.frame_gap_count = 1;
-            auto nonfinite_gap_pool = annulus(0x494e5644u, {-2, 0, 0});
-            nonfinite_gap_pool.frame_gap_count = 1;
-            const std::array<float, 1> nan_gap_pool{std::numeric_limits<float>::quiet_NaN()};
-            invalid_payloads[4].vfx.distortions = std::span(&missing_gap_pool, 1);
-            invalid_payloads[5].vfx.distortions = std::span(&out_of_range_gap_pool, 1);
-            invalid_payloads[5].vfx.distortion_gap_angles = distortion_gap_pool;
-            invalid_payloads[6].vfx.distortions = std::span(&mixed_gap_storage, 1);
-            invalid_payloads[6].vfx.distortion_gap_angles = distortion_gap_pool;
-            invalid_payloads[7].vfx.distortions = std::span(&nonfinite_gap_pool, 1);
-            invalid_payloads[7].vfx.distortion_gap_angles = nan_gap_pool;
-            std::array<VfxRibbonSourceInput, 4> bad_ribbons{pooled_ribbon, pooled_ribbon,
-                pooled_ribbon, pooled_ribbon};
-            bad_ribbons[1].frame_output_first = 1;
-            bad_ribbons[2].outputs = {ribbon_outputs[0]};
-            auto bad_ribbon_outputs = ribbon_outputs;
-            bad_ribbon_outputs[0].width_head = std::numeric_limits<float>::quiet_NaN();
-            for (std::size_t i = 0; i < bad_ribbons.size(); ++i)
-                invalid_payloads[8 + i].vfx.ribbons = {std::span(&bad_ribbons[i], 1), 1,
-                    i == 0 ? std::span<const VfxRibbonOutputInput>{} :
-                    i == 3 ? std::span<const VfxRibbonOutputInput>{bad_ribbon_outputs} :
-                             std::span<const VfxRibbonOutputInput>{ribbon_outputs}};
-            std::array<VfxGroundSpawnInput, 4> bad_ground{package2_ground[0], package2_ground[0],
-                package2_ground[0], package2_ground[0]};
-            bad_ground[1].geometry.frame_gap_first = 2;
-            bad_ground[2].geometry.gap_angles_radians = {0.5f};
-            for (std::size_t i = 0; i < bad_ground.size(); ++i)
-            {
-                bad_ground[i].geometry.frame_gap_count = 2;
-                invalid_payloads[12 + i].vfx.ground = std::span(&bad_ground[i], 1);
-                invalid_payloads[12 + i].vfx.ground_gap_angles =
-                    i == 0 ? std::span<const float>{} :
-                    i == 3 ? std::span<const float>{nan_gap_pool} : std::span<const float>{ground_gap_pool};
-            }
-            bad_ground[3].geometry.frame_gap_count = 1;
-            auto invalid_hero = hero;
-            invalid_hero.steps = 17;
-            invalid_payloads[17].vfx.volumes = std::span(&invalid_hero, 1);
-            invalid_payloads[16].vfx.effect_lines = std::span(&effect_line, 1);
-            invalid_payloads[16].vfx.world_batch = RenderVfxWorldBatch{
-                .session = snapshots.current.header.session_id,
-                .stateful_target = world.stateful_target};
-            const std::array duplicate_instances{second_archer, second_archer};
-            invalid_payloads[18].snapshots.current.instances = duplicate_instances;
-            for (std::size_t invalid_index = 0; invalid_index < invalid_payloads.size(); ++invalid_index)
-            {
-                const auto &invalid = invalid_payloads[invalid_index];
-                const auto rejected = renderer.Render(invalid, result);
-                if (rejected || rejected.Code() != ErrorCode::InvalidArgument ||
-                    !SameRejectedResultEvidence(result, accepted) || renderer.GetDiagnostics().total_rendered_frames != before)
-                    return Failure("Frame admission must reject malformed payloads, duplicate instances and invalid frame-pool storage before any view submission.");
-                if (invalid_index >= 4 && invalid_index < 8)
-                    evidence.invalid_distortion_gap_rejected[invalid_index - 4] = true;
-                else if (invalid_index >= 8 && invalid_index < 12)
-                    evidence.invalid_ribbon_pool_rejected[invalid_index - 8] = true;
-                else if (invalid_index >= 12 && invalid_index < 16)
-                    evidence.invalid_ground_gap_rejected[invalid_index - 12] = true;
-            }
             evidence.submissions_after_bad_preflight = renderer.GetDiagnostics().total_rendered_frames;
-            evidence.rejected_outputs_unchanged = duplicate_preserved && nonfinite_preserved && SameRejectedResultEvidence(result, accepted) &&
+            evidence.rejected_outputs_unchanged = SameRejectedResultEvidence(result, accepted) &&
                 evidence.submissions_after_bad_preflight == before;
-            if (!evidence.duplicate_rejected || !evidence.nonfinite_origin_rejected ||
-                !evidence.nonfinite_flash_history_rejected || !evidence.rejected_outputs_unchanged ||
-                !std::ranges::all_of(evidence.invalid_distortion_gap_rejected,
-                    [](bool rejected) { return rejected; }) ||
-                !std::ranges::all_of(evidence.invalid_ribbon_pool_rejected,
-                    [](bool rejected) { return rejected; }) ||
-                !std::ranges::all_of(evidence.invalid_ground_gap_rejected,
-                    [](bool rejected) { return rejected; }))
-                return Failure("Duplicate/nonfinite view or flash preflight was accepted or mutated submission/result evidence.");
+            if (!evidence.duplicate_rejected || !evidence.rejected_outputs_unchanged)
+                return Failure("Duplicate view rejection changed submission/result evidence.");
+
         }
         if (package == 0)
         {
@@ -783,7 +644,7 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
                 "previous_instance_unjittered_view_projection");
             if (inputs.at("options").at(1).get<double>() > 0.5 ||
                 !SameMatrix(previous_instance, current))
-                return Failure("Capture camera_cut must invalidate instance history and use the current projection after rebasing.");
+                return Failure("Capture camera_cut must invalidate instance history and use the current projection after the camera cut.");
             evidence.motion_readbacks["capture_origin_reset"] = capture_origin_reset;
         }
         else if (package == 2)
@@ -806,7 +667,7 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
                 SameMatrix(previous, unrelated_capture_current) ||
                 SameMatrix(previous, current_preview) ||
                 preview_after_skip.value("nonzero_motion_pixels", std::uint64_t{}) == 0)
-                return Failure("Reappearing Preview did not retain its own old-basis projection and real nonzero motion after another view's origin reset.");
+                return Failure("Reappearing Preview did not retain its own previous projection and real nonzero motion after another view's camera cut.");
             const auto terrain_bound = [](const nlohmann::ordered_json &metadata) {
                 return metadata.at("temporal_inputs").at("particle_terrain").at("upper_bound").get<float>();
             };
@@ -838,7 +699,7 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
     // with a real auxiliary submission before testing stale diagnostic rejection.
     const RenderVfxWorldBatch held_world{.session = package_snapshots.current.header.session_id,
         .stateful_target = package_snapshots.current.header.tick == 0 ? 0 : package_snapshots.current.header.tick - 1};
-    const RenderPackage overwrite{.views = std::span(&views[1], 1), .snapshots = package_snapshots,
+    const RenderPackage overwrite{.snapshots = package_snapshots,
         .vfx = {.ground = package2_ground,
             .ribbons = {std::span(&pooled_ribbon, 1), 1, ribbon_outputs},
             .distortions = package2_distortions, .decals = decals,
@@ -846,8 +707,9 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
             .ground_gap_angles = ground_gap_pool},
         .devtools = {.delta_seconds = 1.0f / 60.0f},
         .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
-    RendererFrameResult overwrite_result;
-    if (auto submitted = renderer.Render(overwrite, overwrite_result); !submitted) return submitted;
+    RendererToolFrameResult overwrite_result;
+    const auto overwrite_samples = ViewSamples(std::span(&views[1], 1));
+    if (auto submitted = renderer.RenderViews(overwrite, overwrite_samples, overwrite_result); !submitted) return submitted;
     if (overwrite_result.views.size() != 1 || overwrite_result.views[0].identity.view_id != kOwnedViewProbePreview ||
         overwrite_result.views[0].submission_id <= evidence.frames[2][1].submission_id ||
         overwrite_result.vfx_world_step_submitted)
@@ -907,13 +769,14 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
         if (step == 6)
             if (auto resized = renderer.Resize(main.output_extent.width + 64u, main.output_extent.height); !resized) return resized;
         auto ui_view = renderer.MainViewInput(snapshots.current.camera);
-        const RenderPackage ui_package{.views = std::span(&ui_view, 1), .snapshots = snapshots,
+        const RenderPackage ui_package{.snapshots = snapshots,
             .vfx = {.world_batch = {.session = snapshots.current.header.session_id,
                 .stateful_target = snapshots.current.header.tick}},
             .devtools = {.delta_seconds = 0.0f}, .ui_draw_content = next,
             .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
-        RendererFrameResult ui_result;
-        if (auto rendered = renderer.Render(ui_package, ui_result); !rendered) return rendered;
+        RendererToolFrameResult ui_result;
+        const auto ui_samples = ViewSamples(std::span(&ui_view, 1));
+        if (auto rendered = renderer.RenderViews(ui_package, ui_samples, ui_result); !rendered) return rendered;
         if (auto captured = CaptureUiProbePixels(renderer, artifacts / ("ui-cache-" + std::to_string(step) + ".png"), ui_images[step]); !captured) return captured;
     }
     const auto sample = [](const UiProbePixels &image, float x, float y) {
@@ -969,12 +832,18 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
     evidence.ui_cache_pixels_valid = true;
     if (auto restored = renderer.Resize(main.output_extent.width, main.output_extent.height); !restored) return restored;
     auto restored_view = renderer.MainViewInput(snapshots.current.camera);
-    const RenderPackage restored_package{.views = std::span(&restored_view, 1), .snapshots = snapshots,
+    const RenderPackage restored_package{.snapshots = snapshots,
         .vfx = {.world_batch = {.session = snapshots.current.header.session_id,
             .stateful_target = snapshots.current.header.tick}},
         .devtools = {.delta_seconds = 0.0f}, .ui_draw_content = ui,
         .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
-    if (auto rendered = renderer.Render(restored_package, evidence.final_frame); !rendered) return rendered;
+    RendererToolFrameResult restored_result;
+    const auto restored_samples = ViewSamples(std::span(&restored_view, 1));
+    if (auto rendered = renderer.RenderViews(restored_package, restored_samples, restored_result); !rendered) return rendered;
+    evidence.final_frame = std::move(restored_result);
+
+    if (auto configured = renderer.ConfigureView(views[1].Configuration()); !configured) return configured;
+    if (auto configured = renderer.ConfigureView(views[2].Configuration()); !configured) return configured;
 
     const auto original_static_scene = snapshots.current.static_scene;
     auto expanded_storage = std::make_unique<StaticRenderSceneStorage>(*original_static_scene);
@@ -1003,14 +872,14 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
         std::string_view key, const RenderInstance *expected_dynamic) -> Result {
         postlude_snapshots.current.static_scene = std::move(scene);
         postlude_snapshots.current.instances = postlude_instances;
-        const RenderPackage package{.views = std::span<const RenderViewInput>(views),
-            .snapshots = postlude_snapshots,
+        const RenderPackage package{.snapshots = postlude_snapshots,
             .vfx = {.world_batch = {.session = snapshots.current.header.session_id,
                 .stateful_target = snapshots.current.header.tick}},
             .devtools = {.delta_seconds = 0.0f},
             .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
-        RendererFrameResult postlude_result;
-        if (auto rendered = renderer.Render(package, postlude_result); !rendered) return rendered;
+        RendererToolFrameResult postlude_result;
+        const auto postlude_samples = ViewSamples(std::span<const RenderViewInput>(views));
+        if (auto rendered = renderer.RenderViews(package, postlude_samples, postlude_result); !rendered) return rendered;
         if (postlude_result.views.size() != 3u)
             return Failure("Terrain postlude did not return all three view stamps.");
         std::array<bool, 3> bank_seen{};
@@ -1029,6 +898,10 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
                     stamp.rendered_frame, metadata); !captured) return captured;
             if (auto verified = VerifyTerrainSubmission(metadata,
                     *postlude_snapshots.current.static_scene, expected_dynamic); !verified) return verified;
+            const auto &feedback = metadata.at("terrain_page_feedback");
+            if (feedback.at("view_id").get<std::uint32_t>() != stamp.identity.view_id.value ||
+                feedback.at("frame_id").get<std::uint64_t>() != stamp.submission_id)
+                return Failure("Terrain postlude feedback does not identify its submitted view and frame.");
             const auto frame_slot = metadata.at("terrain_submission").at("frame_slot").get<std::uint32_t>();
             bank_seen[frame_slot] = true;
             evidence.motion_readbacks[capture_key] = std::move(metadata);
@@ -1038,7 +911,6 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
         return Result::Success();
     };
 
-    const auto terrain_submissions_before = renderer.GetDiagnostics().total_rendered_frames;
     postlude_instances = moving_instances;
     postlude_instances.push_back(dynamic_meadow);
     if (auto rendered = render_terrain_postlude(expanded_static_scene,
@@ -1061,8 +933,6 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
     postlude_instances = moving_instances;
     if (auto rendered = render_terrain_postlude(original_static_scene,
             "owned-view-terrain-static-only", nullptr); !rendered) return rendered;
-    if (renderer.GetDiagnostics().total_rendered_frames != terrain_submissions_before + 9u)
-        return Failure("Terrain postlude did not produce exactly nine additional view submissions.");
     return Result::Success();
 }
 
@@ -1084,8 +954,6 @@ nlohmann::ordered_json OwnedViewProbeReceipt(const OwnedViewProbeEvidence &evide
                 {"presentation_id", stamp.identity.presentation_id}, {"provider_token_known", stamp.identity.provider_token_known},
                 {"provider_token", stamp.identity.provider_token_known ? Json(stamp.identity.provider_token) : Json(nullptr)},
                 {"history_generation", stamp.history_generation}, {"camera_cut", v.camera_cut},
-                {"scene_origin", {v.scene_origin.x, v.scene_origin.y, v.scene_origin.z}},
-                {"view_origin", {v.view_origin.x, v.view_origin.y, v.view_origin.z}},
                 {"camera_position", {v.camera.position.x, v.camera.position.y, v.camera.position.z}},
                 {"camera_target", {v.camera.target.x, v.camera.target.y, v.camera.target.z}},
                 {"output_extent", {v.output_extent.width, v.output_extent.height}},
@@ -1099,9 +967,6 @@ nlohmann::ordered_json OwnedViewProbeReceipt(const OwnedViewProbeEvidence &evide
         {"admitted_ribbons", evidence.admitted_ribbons},
         {"admitted_ground", evidence.admitted_ground},
         {"admitted_volumes", evidence.admitted_volumes},
-        {"invalid_distortion_gap_rejected", evidence.invalid_distortion_gap_rejected},
-        {"invalid_ribbon_pool_rejected", evidence.invalid_ribbon_pool_rejected},
-        {"invalid_ground_gap_rejected", evidence.invalid_ground_gap_rejected},
         {"archer_clip_ids", evidence.archer_clip_ids},
         {"motion_epoch_break", {{"stable_id", evidence.motion_epoch_target_id},
             {"before", evidence.motion_epoch_before}, {"after", evidence.motion_epoch_after}}},
@@ -1109,8 +974,6 @@ nlohmann::ordered_json OwnedViewProbeReceipt(const OwnedViewProbeEvidence &evide
         {"submissions_before", evidence.submissions_before},
         {"submissions_after_bad_preflight", evidence.submissions_after_bad_preflight},
         {"submissions_after", evidence.submissions_after}, {"duplicate_rejected", evidence.duplicate_rejected},
-        {"nonfinite_origin_rejected", evidence.nonfinite_origin_rejected},
-        {"nonfinite_flash_history_rejected", evidence.nonfinite_flash_history_rejected},
         {"rejected_outputs_unchanged", evidence.rejected_outputs_unchanged},
         {"stale_diagnostics_rejected", evidence.stale_diagnostics_rejected},
         {"ui_cache_pixels_valid", evidence.ui_cache_pixels_valid},

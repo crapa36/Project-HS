@@ -159,7 +159,7 @@ int ProduceSceneProbe(int argc,char **argv)
         pending.insert(pending.end(),layout.dependencies.begin(),layout.dependencies.end());
         // Capture uploads source-only terrain records and never dispatches page-bake kernels.
         for (const auto id : {"game-data/simulation-rules", "render/config/quality_profiles.rpkg",
-                "render/lighting/coated_ggx_dfg.dds", "render/lighting/default_ltc.rpkg",
+                "render/lighting/coated_ggx_dfg.dds",
                 "render/shader/light_list_cs.dxil"})
             pending.emplace_back(id);
         for(const auto &[id,_]:generation.product_paths)

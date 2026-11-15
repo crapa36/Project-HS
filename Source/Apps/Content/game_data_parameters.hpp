@@ -2,8 +2,11 @@
 
 #include "content_cooker.hpp"
 
-#include <set>
+#include <algorithm>
+#include <initializer_list>
+#include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -35,20 +38,25 @@ template <typename Expected>
 void RequireParameterKeys(const ParameterValues &parameters, std::string_view file,
                           std::string_view path, const Expected &expected)
 {
-    std::set<std::string, std::less<>> keys;
-    for (const auto key : expected) keys.emplace(key);
     for (const auto &[key, unused] : parameters.Values())
     {
         static_cast<void>(unused);
-        const auto expected_key = keys.find(key);
-        if (expected_key == keys.end())
+        if (std::ranges::find(expected, key) == std::ranges::end(expected))
             ThrowValidationError(file, std::string(path) + "/parameters/" +
                 std::string(key),
                 "unexpected or duplicate parameter key");
-        keys.erase(expected_key);
     }
-    if (!keys.empty())
-        ThrowValidationError(file, std::string(path) + "/parameters", "missing parameter '" + *keys.begin() + "'");
+    std::optional<std::string_view> missing;
+    for (const auto &key : expected)
+    {
+        const auto view = std::string_view(key);
+        if (!std::ranges::binary_search(parameters.Values(), view, {},
+                [](const auto &row) { return row.first; }) && (!missing || view < *missing))
+            missing = view;
+    }
+    if (missing)
+        ThrowValidationError(file, std::string(path) + "/parameters", "missing parameter '" +
+            std::string(*missing) + "'");
 }
 
 inline void RequireParameterKeys(const ParameterValues &parameters, std::string_view file,

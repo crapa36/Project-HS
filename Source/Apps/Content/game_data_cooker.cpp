@@ -6,7 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
-#include <set>
+#include <initializer_list>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -482,24 +482,9 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     skill_parameters.reserve(skills.size());
     for (std::size_t index = 0; index < skills.size(); ++index)
         skill_parameters.emplace_back(skills[index], "skills", "$/entries/" + std::to_string(index));
-    constexpr std::array skill_ids{"skill.basic_attack", "skill.piercing_shot", "skill.multishot", "skill.charged_shot", "skill.explosive_arrow", "skill.ricochet_arrow", "skill.arrow_rain", "skill.trap", "skill.retreat_shot"};
-    constexpr std::array skill_logics{"basic_projectile_cadence", "piercing_projectile", "uniform_fan_projectiles", "hold_release_linear_charge", "projectile_to_area_explosion", "nearest_unhit_target_ricochet", "targeted_periodic_area", "forward_roll_leave_trap", "forced_retreat_and_projectile"};
-    const std::array<std::set<std::string, std::less<>>, 9> skill_keys{{
-        {"damage_multiplier", "projectile_speed", "range", "collision_radius", "pierce", "starting_level", "maximum_level", "selected_upgrades_per_session"},
-        {"cooldown", "damage_multiplier", "projectile_speed", "range", "collision_radius", "pierce", "damage_decay_per_pierce", "minimum_damage_fraction", "maximum_hits_per_target"},
-        {"cooldown", "fan_angle", "projectile_count", "damage_multiplier_per_arrow", "projectile_speed", "range", "collision_radius", "pierce_per_arrow", "maximum_hits_per_target"},
-        {"maximum_charge_time", "minimum_damage_multiplier", "maximum_damage_multiplier", "minimum_range", "maximum_range", "minimum_collision_radius", "maximum_collision_radius", "projectile_speed", "pierce", "movement_speed_multiplier_while_charging", "cooldown"},
-        {"cooldown", "projectile_speed", "range", "collision_radius", "explosion_radius", "explosion_damage_multiplier"},
-        {"cooldown", "damage_multiplier", "projectile_speed", "collision_radius", "initial_range", "ricochet_search_radius", "maximum_ricochets"},
-        {"target_range", "cooldown", "activation_delay", "radius", "duration", "tick_interval", "damage_multiplier_per_tick", "total_damage_ticks"},
-        {"forward_roll_distance", "forward_roll_duration", "cooldown", "activation_delay", "active_duration", "detection_radius", "explosion_radius", "damage_multiplier", "slow_fraction", "slow_duration"},
-        {"forced_move_duration", "forced_move_distance", "damage_multiplier", "cooldown", "projectile_speed", "collision_radius", "projectile_range", "pierce"}}};
     for (std::size_t index = 0; index < skills.size(); ++index)
     {
         const auto path = "$/entries/" + std::to_string(index);
-        if (RequireString(skills[index], "skills", path, "id") != skill_ids[index] || RequireString(skills[index], "skills", path, "logic_id") != skill_logics[index])
-            ThrowValidationError("skills", path, "skill ID/logic order is part of the cooked ABI");
-        RequireParameterKeys(skill_parameters[index], "skills", path, skill_keys[index]);
         auto &s = data.skills[index];
         s.handler = static_cast<AbilityHandlerId>(index);
         s.starting_level = acquisition_level;
@@ -615,7 +600,7 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     RequireParameterKeys(U(0,7), "upgrades", upath(0,7), {"activation_window","angles","projectile_count","damage_multiplier_per_arrow"}); u.basic_attack.post_active_three_arrow = {ToTicks(Number(U(0,7),"upgrades",upath(0,7),"activation_window"),"upgrades",upath(0,7)+"/parameters/activation_window"), Angles<3>(U(0,7),"upgrades",upath(0,7),"angles"), Integer<std::uint32_t>(U(0,7),"upgrades",upath(0,7),"projectile_count"), Number(U(0,7),"upgrades",upath(0,7),"damage_multiplier_per_arrow")};
 
     // Remaining typed groups use the same exact-key boundary and direct JSON conversions.
-    const std::array<std::array<std::set<std::string, std::less<>>, 8>, 8> keys{{
+    const std::array<std::array<std::initializer_list<std::string_view>, 8>, 8> keys{{
         {{ {"delay","damage_multiplier"}, {"angles","projectile_count","damage_multiplier","search_radius"}, {"bleed_stacks"}, {"width","duration","tick_interval","damage_multiplier_per_tick","slow_fraction","slow_duration"}, {"normal_enemy_pierce_interval","projectile_count","angle_from_direction","damage_multiplier"}, {"move_distance"}, {"maximum_transfer_targets"}, {"cooldown_multiplier"} }},
         {{ {"delay","fan_angle","projectile_count","damage_multiplier_per_arrow"}, {"angles","projectile_count_per_original","damage_multiplier"}, {"additional_pierce"}, {"projectile_count","damage_multiplier","fan_angle"}, {"bleed_stacks"}, {"damage_multiplier","maximum_transfers_per_cast"}, {"additional_projectiles","outer_angles","damage_multiplier"}, {"damage_multiplier","maximum_retargets","search_radius"} }},
         {{ {"maximum_charge_time","maximum_damage_multiplier","full_charge_end_explosion_damage_multiplier","explosion_radius"}, {"charge_time_multiplier"}, {"minimum_damage_multiplier"}, {"additional_pierce"}, {"bleed_stacks","existing_bleed_stacks_for_rupture","rupture_damage_multiplier"}, {"normal_enemy_pierce_count","angles","projectile_count","damage_multiplier"}, {"radius","damage_multiplier"}, {"minimum_normal_enemy_kills","current_cooldown_refund_fraction"} }},

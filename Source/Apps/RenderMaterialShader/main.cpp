@@ -96,7 +96,7 @@ std::size_t MaterialOrdinal(std::string_view name)
 struct MaterialShaderOptions
 {
     std::uint32_t sidecar_planes{};
-    bool feedback{}, translucency_diagnostics{}, character_translucent_domain{}, terrain_visibility_resolve{}, single_layer_water{};
+    bool feedback{}, translucency_diagnostics{}, character_translucent_domain{}, terrain_visibility_resolve{};
 };
 
 void RunDxc(const fs::path &dxc, const fs::path &source_root,
@@ -121,7 +121,6 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
     if (options.translucency_diagnostics) args.emplace_back(L"-DHS_CAPTURE_TRANSLUCENCY_DIAGNOSTICS=1");
     if (options.character_translucent_domain) args.emplace_back(L"-DHS_CHARACTER_TRANSLUCENT_DOMAIN_ONLY=1");
     if (options.terrain_visibility_resolve) args.emplace_back(L"-DHS_TERRAIN_VISIBILITY_RESOLVE=1");
-    if (options.single_layer_water) args.emplace_back(L"-DHS_SINGLE_LAYER_WATER=1");
     args.emplace_back(L"-DHS_SURFACE_SIDECAR_PLANES=" + std::to_wstring(options.sidecar_planes));
     std::wstring command = hs::QuoteWindowsCommandLineArgument(dxc.wstring());
     for (const auto &arg : args)
@@ -146,10 +145,9 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
 
 bool IsCharacterTranslucentProgram(const ProgramOutput &program)
 {
-    constexpr std::array<std::wstring_view, 7> entries{
+    constexpr std::array<std::wstring_view, 6> entries{
         L"LayeredTranslucencyPeelFrontPS", L"LayeredTranslucencyGatherExitDepthPS", L"LayeredTranslucencyAccumulateUnpeeledPS",
-        L"LayeredTranslucencyCompositeFrontPS", L"LayeredTranslucencyCompositeLayerPS", L"CharacterTranslucentPS",
-        L"SingleLayerWaterPS"};
+        L"LayeredTranslucencyCompositeFrontPS", L"LayeredTranslucencyCompositeLayerPS", L"CharacterTranslucentPS"};
     return std::ranges::find(entries, program.entry) != entries.end();
 }
 
@@ -214,7 +212,6 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                                 "Content/Shaders/environment.hlsli",
                                 "Content/Shaders/probe_ibl.hlsli",
                                 "Content/Shaders/light_list.hlsli",
-                                "Content/Shaders/ltc_area.hlsli",
                                  "Content/Shaders/shadow_data.hlsli",
                                  "Content/Shaders/local_shadow.hlsli", "Content/Shaders/local_shadow_abi.hlsli",
 
@@ -290,9 +287,8 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
         ProgramOutput{"render/shader/layered_translucency_composite_front_ps.dxil", "layered_translucency_composite_front_ps.dxil",
                       "Content/Shaders/project_hs.hlsl", L"LayeredTranslucencyCompositeFrontPS", L"ps_6_0"},
         ProgramOutput{"render/shader/layered_translucency_composite_layer_ps.dxil", "layered_translucency_composite_layer_ps.dxil",
-                      "Content/Shaders/project_hs.hlsl", L"LayeredTranslucencyCompositeLayerPS", L"ps_6_0"},
-        ProgramOutput{"render/shader/single_layer_water_ps.dxil", "single_layer_water_ps.dxil",
-                      "Content/Shaders/project_hs.hlsl", L"SingleLayerWaterPS", L"ps_6_0"}};
+                      "Content/Shaders/project_hs.hlsl", L"LayeredTranslucencyCompositeLayerPS", L"ps_6_0"}
+        };
     if (ssr)
     {
         std::erase_if(outputs, [](const auto &program) { return !program.id.starts_with("render/shader/ssr_"); });
@@ -374,8 +370,7 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
             RunDxc(dxc, source_snapshot, stage, output, program.source_relative,
                    program.entry, program.profile, define,
                    {.sidecar_planes = sidecar_layout.plane_count, .translucency_diagnostics = translucency_diagnostics,
-                    .character_translucent_domain = IsCharacterTranslucentProgram(program),
-                    .single_layer_water = program.entry == L"SingleLayerWaterPS"});
+                    .character_translucent_domain = IsCharacterTranslucentProgram(program)});
             Require(ValidDxil(output), "DXC did not produce a DXIL container");
             products.push_back(ap::HashProduct(program.id, program.filename, output));
         }
@@ -789,8 +784,7 @@ void Produce(std::string_view name, const fs::path &source_root,
                                   "Content/Shaders/light_list.hlsli",
                                   "Content/Shaders/local_shadow.hlsli", "Content/Shaders/local_shadow_abi.hlsli",
 
-                                  "Content/Shaders/ltc_area.hlsli",
-                                 "Content/Shaders/material_surface.hlsli",
+                                   "Content/Shaders/material_surface.hlsli",
                                  "Content/Shaders/character_material.hlsli",
                                  "Content/Shaders/material_sidecar.hlsli",
                                  "Content/Shaders/deferred_surface.hlsli",

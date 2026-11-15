@@ -2,16 +2,16 @@
 #include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/core/cooked_format.hpp>
 #include <hs/core/process_info.hpp>
-#include <hs/core/windows_command_line.hpp>
+#include <hs/core/shipped_content_owner.hpp>
 #include <hs/gameplay/game_simulation.hpp>
 #include <hs/presentation/projector.hpp>
 #include <hs/runtime/application.hpp>
 #include <hs/runtime/experiment_spec.hpp>
+#include <hs/runtime/shipping_content.hpp>
 
 #include <nlohmann/json.hpp>
 
 #include <Windows.h>
-#include <DbgHelp.h>
 
 #include <algorithm>
 #include <array>
@@ -27,7 +27,6 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 extern "C"
@@ -55,8 +54,6 @@ struct Arguments
     std::optional<std::filesystem::path> generation_pointer;
     bool warp{};
     bool simulation_only{};
-    bool child{};
-    bool timeline_self_test{};
 };
 
 [[nodiscard]] hs::Result ParseArguments(int argc, char **argv, Arguments &arguments)
@@ -84,14 +81,6 @@ struct Arguments
         {
             arguments.simulation_only = true;
         }
-        else if (argument == "--child")
-        {
-            arguments.child = true;
-        }
-        else if (argument == "--timeline-self-test")
-        {
-            arguments.timeline_self_test = true;
-        }
         else
         {
             return hs::Result::Failure(hs::ErrorCode::InvalidArgument, "hs_experiment",
@@ -106,174 +95,6 @@ struct Arguments
                                    "Spec and artifact paths must not be empty.");
     }
     return hs::Result::Success();
-}
-
-[[nodiscard]] hs::Result WriteHeartbeat(const std::filesystem::path &path,
-                                        hs::Tick tick, std::string_view state)
-{
-    std::ofstream stream(path, std::ios::trunc);
-    stream << nlohmann::json{{"tick", tick}, {"state", state}}.dump() << '\n';
-    return stream ? hs::Result::Success()
-                  : hs::Result::Failure(hs::ErrorCode::InvalidState, "hs_experiment",
-                                        "Cannot write heartbeat.");
-}
-
-[[nodiscard]] bool WriteMiniDump(HANDLE process, DWORD process_id,
-                                 const std::filesystem::path &path)
-{
-    const auto file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                                  FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-    const auto written = MiniDumpWriteDump(
-        process, process_id, file,
-        static_cast<MINIDUMP_TYPE>(MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory),
-        nullptr, nullptr, nullptr);
-    CloseHandle(file);
-    if (written != TRUE) DeleteFileW(path.c_str());
-    return written == TRUE;
-}
-
-[[nodiscard]] int RunWatchedChild(const std::filesystem::path &executable,
-                                  const std::filesystem::path &spec_path,
-                                  const std::filesystem::path &artifact_directory,
-                                  bool warp,
-                                  const std::filesystem::path &generation_pointer)
-{
-#if defined(HS_DEVELOPMENT_TOOLS)
-    auto command = hs::QuoteWindowsCommandLineArgument(executable.wstring()) +
-                   L" --child --spec=" +
-                   hs::QuoteWindowsCommandLineArgument(spec_path.wstring()) +
-                   L" --artifacts=" +
-                   hs::QuoteWindowsCommandLineArgument(artifact_directory.wstring());
-    if (warp) command += L" --warp";
-    if (!generation_pointer.empty())
-        command += L" --generation=" +
-                   hs::QuoteWindowsCommandLineArgument(generation_pointer.wstring());
-
-    // A previous run's heartbeat must not start this child's running timeout.
-    const auto heartbeat_path = artifact_directory / "heartbeat.json";
-    std::error_code previous_heartbeat_error;
-    auto last_write = std::filesystem::last_write_time(heartbeat_path, previous_heartbeat_error);
-    if (previous_heartbeat_error) last_write = {};
-
-    using Handle = std::unique_ptr<void, decltype(&CloseHandle)>;
-    Handle job(CreateJobObjectW(nullptr, nullptr), &CloseHandle);
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (!job || !SetInformationJobObject(job.get(), JobObjectExtendedLimitInformation,
-                                         &limits, sizeof(limits)))
-    {
-        std::cerr << "Cannot own experiment child lifetime (Win32 " << GetLastError() << ").\n";
-        return 1;
-    }
-    STARTUPINFOW startup{sizeof(startup)};
-    PROCESS_INFORMATION process{};
-    if (!CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, FALSE, CREATE_SUSPENDED,
-                        nullptr, executable.parent_path().c_str(), &startup, &process))
-    {
-        std::cerr << "CreateProcessW failed with error " << GetLastError() << ".\n";
-        return 1;
-    }
-    Handle child(process.hProcess, &CloseHandle);
-    Handle child_thread(process.hThread, &CloseHandle);
-    // Assign before any child code runs; parent exit then also stops descendants.
-    if (!AssignProcessToJobObject(job.get(), child.get()) ||
-        ResumeThread(child_thread.get()) == static_cast<DWORD>(-1))
-    {
-        const auto error = GetLastError();
-        const bool requested = TerminateProcess(child.get(), 4) != FALSE;
-        const auto stopped = WaitForSingleObject(child.get(), 5'000);
-        std::cerr << "Cannot start owned experiment child (Win32 " << error
-                  << "); termination_requested=" << requested
-                  << "; exit_confirmed=" << (stopped == WAIT_OBJECT_0) << ".\n";
-        return 1;
-    }
-    child_thread.reset();
-
-    const auto startup_started = std::chrono::steady_clock::now();
-    auto last_progress = startup_started;
-    bool running_heartbeat_started{};
-    for (;;)
-    {
-        const auto waited = WaitForSingleObject(child.get(), 100);
-        if (waited == WAIT_OBJECT_0) break;
-        if (waited != WAIT_TIMEOUT)
-        {
-            std::cerr << "Cannot wait for experiment child (Win32 " << GetLastError() << ").\n";
-            return 1;
-        }
-        std::error_code error;
-        const auto write = std::filesystem::last_write_time(heartbeat_path, error);
-        if (!error && write != last_write)
-        {
-            std::ifstream heartbeat_stream(heartbeat_path);
-            const auto heartbeat = nlohmann::json::parse(heartbeat_stream, nullptr, false);
-            if (heartbeat.is_object())
-            {
-                last_write = write;
-                const auto state = heartbeat.value("state", std::string{});
-                // First recording can still compile driver/validation shaders.
-                // Tick zero belongs to startup until simulation makes progress.
-                if ((state == "running" && heartbeat.value("tick", std::uint64_t{}) != 0) || state == "finished")
-                {
-                    running_heartbeat_started = true;
-                    last_progress = std::chrono::steady_clock::now();
-                }
-            }
-        }
-        const auto timeout = running_heartbeat_started
-            ? std::chrono::seconds(15) : std::chrono::seconds(120);
-        const auto observed = running_heartbeat_started ? last_progress : startup_started;
-        if (std::chrono::steady_clock::now() - observed > timeout)
-        {
-            const auto dumped = WriteMiniDump(process.hProcess, process.dwProcessId,
-                                              artifact_directory / "watchdog.dmp");
-            const bool requested = TerminateJobObject(job.get(), 4) != FALSE;
-            const auto termination_error = requested ? ERROR_SUCCESS : GetLastError();
-            const auto stopped = WaitForSingleObject(child.get(), 5'000);
-            std::ofstream(artifact_directory / "watchdog.json", std::ios::trunc)
-                << nlohmann::json{{"timeout_seconds", timeout.count()},
-                                  {"phase", running_heartbeat_started ? "running" : "startup"},
-                                  {"process_id", process.dwProcessId},
-                                  {"dump_written", dumped},
-                                  {"termination_requested", requested},
-                                  {"termination_error", termination_error},
-                                  {"exit_confirmed", stopped == WAIT_OBJECT_0},
-                                  {"wait_status", stopped}}
-                       .dump(2)
-                << '\n';
-            std::cerr << (running_heartbeat_started
-                ? "Experiment child heartbeat timed out.\n"
-                : "Experiment child startup timed out.\n");
-            if (stopped != WAIT_OBJECT_0)
-                std::cerr << "Child exit is unconfirmed; closing its lifetime job, PID="
-                          << process.dwProcessId << ".\n";
-            return 1;
-        }
-    }
-    DWORD exit_code{};
-    if (!GetExitCodeProcess(child.get(), &exit_code))
-    {
-        std::cerr << "Cannot read experiment child exit code (Win32 " << GetLastError() << ").\n";
-        return 1;
-    }
-    if (exit_code != 0)
-    {
-        const auto dumped = WriteMiniDump(process.hProcess, process.dwProcessId,
-                                          artifact_directory / "child_failure.dmp");
-        std::cerr << "Experiment child exited with code 0x" << std::hex << exit_code
-                  << std::dec << "; dump_written=" << std::boolalpha << dumped << ".\n";
-    }
-    return static_cast<int>(exit_code);
-#else
-    (void)executable;
-    (void)spec_path;
-    (void)artifact_directory;
-    (void)warp;
-    (void)generation_pointer;
-    std::cerr << "Experiment child control is excluded from Release.\n";
-    return 2;
-#endif
 }
 
 [[nodiscard]] std::optional<std::uint64_t> HashFile(const std::filesystem::path &path)
@@ -298,17 +119,6 @@ struct Arguments
     return hs::Fnv1a64(bytes);
 }
 
-[[nodiscard]] std::optional<std::uint64_t>
-ReadCookedSourceHash(const std::filesystem::path &path)
-{
-    hs::CookedHeader header;
-    if (auto result = hs::ReadCookedHeader(path, header); !result)
-    {
-        return std::nullopt;
-    }
-    return header.source_hash;
-}
-
 [[nodiscard]] bool EqualHex(std::string_view left, std::string_view right) noexcept
 {
     return std::ranges::equal(left, right, [](unsigned char lhs, unsigned char rhs) {
@@ -319,12 +129,12 @@ ReadCookedSourceHash(const std::filesystem::path &path)
 [[nodiscard]] hs::Result ClearPreviousArtifacts(
     const std::filesystem::path &directory, const hs::ExperimentSpec &spec)
 {
-    constexpr std::array<std::string_view, 16> names{
+    constexpr std::array<std::string_view, 18> names{
         "adapter.txt", "camera.json", "d3d12_validation.log", "dred.txt",
         "dred_config.json", "events.ndjson", "gpu_passes.csv", "heartbeat.json",
         "particle_stats.json", "render.json",
         "result.json", "shader_hot_reload.log", "spec.json", "timeline.csv",
-        "watchdog.dmp", "watchdog.json"};
+        "watchdog.dmp", "watchdog.json", "input_spec.json", "child_failure.dmp"};
     std::vector<std::filesystem::path> paths;
     paths.reserve(names.size() + spec.captures.size());
     for (const auto name : names) paths.emplace_back(name);
@@ -495,7 +305,7 @@ ReadCookedSourceHash(const std::filesystem::path &path)
 [[nodiscard]] hs::ApplicationResult
 RunSimulationExperiment(const hs::ExperimentSpec &spec,
                         const std::filesystem::path &directory,
-                        const std::filesystem::path &cooked_path)
+                        const hs::SimulationRules &rules)
 {
     std::error_code error;
     std::filesystem::create_directories(directory, error);
@@ -505,11 +315,6 @@ RunSimulationExperiment(const hs::ExperimentSpec &spec,
                                     error.message())};
     }
 
-    hs::SimulationRules rules;
-    if (auto loaded = hs::LoadSimulationRules(cooked_path, rules); !loaded)
-    {
-        return {loaded};
-    }
     hs::GameSimulation simulation;
     if (auto initialized = simulation.Initialize({spec.seed, true, false},
                                                  rules);
@@ -520,9 +325,6 @@ RunSimulationExperiment(const hs::ExperimentSpec &spec,
 
     std::ofstream timeline(directory / "timeline.csv", std::ios::trunc);
     std::ofstream events(directory / "events.ndjson", std::ios::trunc);
-    const auto heartbeat_path = directory / "heartbeat.json";
-    if (auto heartbeat = WriteHeartbeat(heartbeat_path, 0, "running"); !heartbeat)
-        return {heartbeat};
     timeline << "tick,checksum,phase,enemies,projectiles,pickups,cpu_us,memory_bytes,ecs_count,queue_depth\n";
     std::size_t next_action{};
     hs::TickResult tick;
@@ -582,15 +384,12 @@ RunSimulationExperiment(const hs::ExperimentSpec &spec,
                        << '\n';
         }
         simulation.ClearDomainSignals();
-        if (tick.tick % 60 == 0)
-            (void)WriteHeartbeat(heartbeat_path, tick.tick, "running");
         if ((spec.termination.on_victory && tick.phase == hs::SessionPhase::Victory) ||
             (spec.termination.on_defeat && tick.phase == hs::SessionPhase::Defeat))
             break;
     }
 
     const auto probe = simulation.GetObservation();
-    (void)WriteHeartbeat(heartbeat_path, tick.tick, "finished");
     if (auto shutdown = simulation.Shutdown(); !shutdown && result) result = shutdown;
     const bool valid = result.Succeeded() && timeline.good() && events.good();
     nlohmann::json output{{"schema_version", 1},
@@ -631,35 +430,60 @@ int main(int argc, char **argv)
     }
 
     const auto executable = hs::CurrentExecutablePath();
-    const auto generation_pointer = arguments.generation_pointer
-        ? std::filesystem::absolute(*arguments.generation_pointer)
-        : executable.parent_path() / "GenerationState/runtime-full.json";
-    hs::SelectedGeneration selected_generation;
-    if (auto loaded = hs::LoadSelectedGeneration(generation_pointer,
-                                                  selected_generation);
-        !loaded)
+    std::filesystem::path generation_pointer;
+    auto simulation_rules = std::make_unique<hs::SimulationRules>();
+    std::uint64_t content_hash_value{};
+    if (arguments.generation_pointer)
     {
-        std::cerr << loaded.Message() << '\n';
-        return 2;
+        generation_pointer = std::filesystem::absolute(*arguments.generation_pointer);
+        hs::SelectedGeneration selected_generation;
+        if (auto loaded = hs::LoadSelectedGeneration(generation_pointer, selected_generation); !loaded)
+        {
+            std::cerr << loaded.Message() << '\n';
+            return 2;
+        }
+        std::filesystem::path simulation_rules_path;
+        if (auto resolved = selected_generation.Require("game-data/simulation-rules", simulation_rules_path); !resolved)
+        {
+            std::cerr << resolved.Message() << '\n';
+            return 2;
+        }
+        if (auto loaded = hs::LoadSimulationRules(simulation_rules_path, *simulation_rules, &content_hash_value); !loaded)
+        {
+            std::cerr << loaded.Message() << '\n';
+            return 2;
+        }
     }
-    std::filesystem::path simulation_rules_path;
-    if (auto resolved = selected_generation.Require("game-data/simulation-rules",
-                                                    simulation_rules_path);
-        !resolved)
+    else
     {
-        std::cerr << resolved.Message() << '\n';
-        return 2;
+        const auto &info = hs::shipping::ImageInfo();
+        hs::ShippedContentOwner owner;
+        if (auto opened = hs::shipping::OpenImage(executable.parent_path(), info, owner); !opened)
+        {
+            std::cerr << opened.Message() << '\n';
+            return 2;
+        }
+        std::vector<std::byte> bytes;
+        if (auto read = hs::shipping::ReadRange(owner, info.tables[static_cast<std::size_t>(hs::shipping::ShippingTable::Simulation)], bytes); !read)
+        {
+            std::cerr << read.Message() << '\n';
+            return 2;
+        }
+        if (auto decoded = hs::DecodeSimulationRules(bytes, *simulation_rules); !decoded)
+        {
+            std::cerr << decoded.Message() << '\n';
+            return 2;
+        }
+        content_hash_value = info.content_hash;
     }
     const auto build_hash_value = HashFile(executable);
-    const auto content_hash_value =
-        ReadCookedSourceHash(simulation_rules_path);
     if (executable.empty() || !build_hash_value || !content_hash_value)
     {
         std::cerr << "Cannot calculate build/content hashes.\n";
         return 2;
     }
     const auto build_hash = std::format("{:016x}", *build_hash_value);
-    const auto content_hash = std::format("{:016x}", *content_hash_value);
+    const auto content_hash = std::format("{:016x}", content_hash_value);
 
     hs::ExperimentSpec spec;
     if (arguments.spec_path)
@@ -684,18 +508,13 @@ int main(int argc, char **argv)
             spec.mode = hs::ExperimentMode::SimulationOnly;
             spec.captures.clear();
         }
-        if (arguments.timeline_self_test)
-        {
-            spec.mode = hs::ExperimentMode::SimulationOnly;
-            spec.captures.clear();
-            spec.timeline_actions.push_back({2, 1, "heal_player", "{\"amount\":5}"});
-            spec.timeline_actions.push_back({1, 1, "damage_player", "{\"amount\":10}"});
-            spec.assertions.push_back({"timeline-health", "/health", "eq",
-                                       std::int64_t{95}, 0.0});
-        }
+        std::ranges::sort(spec.timeline_actions, {}, [](const auto &action) {
+            return std::pair{action.target_tick, action.sequence};
+        });
     }
     hs::ApplicationConfig config;
     config.smoke = true;
+    config.mute_audio = true;
     config.visible = spec.mode == hs::ExperimentMode::PresentPerformance;
     config.capture_diagnostics = config.visible;
     config.vsync = false;
@@ -713,7 +532,6 @@ int main(int argc, char **argv)
     }
     config.warp = config.warp || arguments.warp;
     config.artifact_directory = std::filesystem::absolute(config.artifact_directory);
-    config.heartbeat_path = config.artifact_directory / "heartbeat.json";
     std::error_code directory_error;
     std::filesystem::create_directories(config.artifact_directory, directory_error);
     if (directory_error)
@@ -728,22 +546,10 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    if (!arguments.child)
+    if (auto cleared = ClearPreviousArtifacts(config.artifact_directory, spec); !cleared)
     {
-        if (auto cleared = ClearPreviousArtifacts(config.artifact_directory, spec); !cleared)
-        {
-            std::cerr << cleared.Message() << '\n';
-            return 2;
-        }
-        const auto child_spec = config.artifact_directory / "input_spec.json";
-        if (auto saved = hs::SaveExperimentSpec(child_spec, spec); !saved)
-        {
-            std::cerr << saved.Message() << '\n';
-            return 2;
-        }
-        return RunWatchedChild(executable, child_spec,
-                               config.artifact_directory, config.warp,
-                               config.generation_pointer);
+        std::cerr << cleared.Message() << '\n';
+        return 2;
     }
 
     if (auto timeline = PopulateApplicationTimeline(spec, config); !timeline)
@@ -756,7 +562,7 @@ int main(int argc, char **argv)
     const auto run = spec.mode == hs::ExperimentMode::SimulationOnly
                          ? RunSimulationExperiment(
                                spec, config.artifact_directory,
-                               simulation_rules_path)
+                               *simulation_rules)
                          : hs::RunApplication(config);
     if (!run.result)
     {

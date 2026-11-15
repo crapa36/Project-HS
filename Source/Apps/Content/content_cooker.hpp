@@ -83,6 +83,7 @@ void RequirePositive(Number value, std::string_view file, std::string_view path)
 
 ContentSources LoadAndValidateGameDataDocuments();
 ContentSources LoadScopedGameDataSources(std::span<const std::string_view> names);
+// Consumes the admitted documents returned by the source loaders above.
 BuiltGameData BuildGameData(const ContentSources &sources);
 hs::PresentationCatalog BuildPresentationCatalog(const ContentSources &sources);
 
