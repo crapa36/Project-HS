@@ -452,13 +452,9 @@ class RenderGraphBuilder
     [[nodiscard]] QueueHint FinalQueue(ResourceHandle resource) const noexcept;
 
   private:
-    [[nodiscard]] std::uint64_t PlanCompilationCount() const noexcept;
-    [[nodiscard]] std::uint64_t PlanReuseCount() const noexcept;
-    [[nodiscard]] std::uint64_t PlanInputBuildCount() const noexcept;
     struct Impl;
     std::unique_ptr<Impl> impl_;
 
-    friend struct RenderGraphTestAccess;
     friend class PassBuilder;
     friend class RenderPassContext;
     friend class RenderExternalPassContext;

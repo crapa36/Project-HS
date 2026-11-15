@@ -140,7 +140,7 @@ void D3D12Renderer::Impl::WriteViewDescriptors(OwnedView &owner, std::uint32_t f
     }
     auto local_probe_null = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     local_probe_null.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + kLocalProbeDescriptorOffset) * srv_stride;
-    for (UINT index = 0; index != 5; ++index)
+    for (UINT index = 0; index != kLocalProbeSrvCount; ++index)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC view{};
         view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;

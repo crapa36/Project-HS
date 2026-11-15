@@ -77,7 +77,8 @@ Float4 DecodeTexel(std::span<const std::byte> bytes, std::size_t offset, bool sh
     return result;
 }
 TexturePackageView CubeView(std::span<const std::byte> payload, std::uint32_t edge,
-                            std::uint32_t mips, const std::vector<std::string> &dependencies)
+                            std::uint32_t mips, const std::vector<std::string> &dependencies,
+                            float &max_radiance)
 {
     Require(payload.size() == TexelCount(edge, mips) * 16, "cube payload size mismatch");
     TexturePackageView result;
@@ -90,7 +91,10 @@ TexturePackageView CubeView(std::span<const std::byte> payload, std::uint32_t ed
             const auto extent = std::max(1u, edge >> mip), row = extent * 16, slice = extent * row;
             result.subresources.push_back({face, mip, extent, extent, row, slice, payload.subspan(offset, slice)});
             for (std::size_t texel = 0; texel < slice; texel += 16)
-                (void)DecodeTexel(payload, offset + texel, false);
+            {
+                const auto value = DecodeTexel(payload, offset + texel, false);
+                max_radiance = std::max({max_radiance, value.x, value.y, value.z});
+            }
             offset += slice;
         }
     return result;
@@ -146,8 +150,10 @@ LightingProbePackageView ReadLightingProbePackage(std::span<const std::byte> byt
     Require(Get(metadata, 16, 4) == mips && Get(metadata, 40, 8) == rawBytes &&
             Get(metadata, 48, 8) == filteredBytes && payload.size() == rawBytes + filteredBytes,
             "probe payload layout mismatch");
-    result.radiance = CubeView(payload.first(static_cast<std::size_t>(rawBytes)), result.description.edge, 1, package.dependencies);
-    result.prefiltered = CubeView(payload.subspan(static_cast<std::size_t>(rawBytes)), result.description.edge, mips, package.dependencies);
+    result.radiance = CubeView(payload.first(static_cast<std::size_t>(rawBytes)), result.description.edge, 1,
+                               package.dependencies, result.max_radiance);
+    result.prefiltered = CubeView(payload.subspan(static_cast<std::size_t>(rawBytes)), result.description.edge, mips,
+                                  package.dependencies, result.max_radiance);
     for (std::size_t i = 0; i < result.irradiance.size(); ++i)
         result.irradiance[i] = DecodeTexel(package.chunks[2].bytes, i * 16, true);
     return result;

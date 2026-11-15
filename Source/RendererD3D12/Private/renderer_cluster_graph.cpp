@@ -317,66 +317,45 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
         if(!retained)
         {
             read_tables(*count);
-            state.refs.version = count->Write(state.refs.version, Access::UnorderedWrite);
             for (auto &cut : state.cuts)
                 if (cut.active)
                 {
                     for (auto *buffer : {&cut.counts, &cut.demand, &cut.status, &cut.command_counts,
-                        &cut.selected_bounds, &cut.previous_rejected})
+                        &cut.history_bits})
                         buffer->version = count->Write(buffer->version, Access::UnorderedWrite);
-                    auto &retest = cut.retest_mesh_commands.native ? cut.retest_mesh_commands : cut.retest_draw_commands;
-                    retest.version = count->Write(retest.version, Access::UnorderedWrite);
                 }
-            for (auto &cut : state.cuts)
-                if (cut.active)
-                    for (auto *buffer : {&cut.history_bits, &cut.history_generations})
-                        buffer->version = count->Write(buffer->version, Access::UnorderedWrite);
         }
         count->SetExecute([this, frame_slot, &state, bind](RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             constexpr UINT zero[4]{};
-            const auto clear = [&](std::uint32_t ordinal, std::uint32_t uav, AllocationResource &resource) {
+            const auto clear = [&](std::uint32_t ordinal, std::uint32_t clear_index, AllocationResource &resource) {
                 auto gpu = cluster_runtime->descriptors->GetGPUDescriptorHandleForHeapStart();
                 auto cpu = cluster_runtime->clear_descriptors->GetCPUDescriptorHandleForHeapStart();
                 const auto offset = (frame_slot * kClusterRuntimeCatalogs + ordinal) *
-                    kClusterOcclusionPhases * kClusterCutBankStride + kClusterCutClearOffset + uav;
+                    kClusterOcclusionPhases * kClusterCutBankStride + kClusterCutClearOffset + clear_index;
                 gpu.ptr += static_cast<UINT64>(offset) * srv_stride;
-                cpu.ptr += static_cast<SIZE_T>(offset) * srv_stride;
+                cpu.ptr += static_cast<SIZE_T>((frame_slot * kClusterRuntimeCatalogs + ordinal) *
+                    kClusterCutClearCount + clear_index) * srv_stride;
                 list->ClearUnorderedAccessViewUint(gpu, cpu, resource.resource.Get(), zero, 0, nullptr);
             };
             ID3D12DescriptorHeap *heaps[]{cluster_runtime->descriptors.Get()};
             list->SetDescriptorHeaps(1, heaps);
-            bool refs_cleared{};
             for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)
             {
                 if (!state.cuts[ordinal].active) continue;
                 auto &cut = cluster_runtime->frames[frame_slot].cuts[ordinal];
-                // Emit overwrites every published argument; its count excludes the unused tail.
-                const std::array resources{&cut.counts, &cut.demand, &cut.status, &cut.command_counts,
-                    &cut.history_bits, &cut.history_generations, &cut.selected_bounds, &cut.previous_rejected,
-                    cut.geometry_frontend_flags ? &cut.retest_mesh_commands : &cut.retest_draw_commands};
-                const std::array<std::uint32_t, 9> slots{0, 4, 5, 10, 12, 13, 14, 15,
-                    cut.geometry_frontend_flags ? 17u : 16u};
-                for (std::size_t i = 0; i < resources.size(); ++i) clear(ordinal, slots[i], *resources[i]);
-                if (!refs_cleared)
-                {
-                    clear(ordinal, 7u, cluster_runtime->frames[frame_slot].refs);
-                    refs_cleared = true;
-                }
+                // Other scratch is written over its consumed prefix by the producing shader.
+                for (std::uint32_t i = 0; i < kClusterCutClearCount; ++i)
+                    clear(ordinal, i, cut.*kClusterCutClearMembers[i]);
             }
             // Complete all initialization before shader work so the next catalog's
             // barriers cannot serialize an otherwise independent Count dispatch.
             for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)
             {
                 if (!state.cuts[ordinal].active) continue;
-                for (const auto *buffer : {&state.cuts[ordinal].counts,
-                    &state.cuts[ordinal].demand, &state.cuts[ordinal].status, &state.cuts[ordinal].command_counts,
-                    &state.cuts[ordinal].history_bits, &state.cuts[ordinal].history_generations,
-                    &state.cuts[ordinal].selected_bounds, &state.cuts[ordinal].previous_rejected}) context.UavBarrier(buffer->handle);
-                auto &cut = state.cuts[ordinal];
-                context.UavBarrier((cut.retest_mesh_commands.native ? cut.retest_mesh_commands : cut.retest_draw_commands).handle);
+                for (const auto *buffer : {&state.cuts[ordinal].demand, &state.cuts[ordinal].status,
+                    &state.cuts[ordinal].command_counts, &state.cuts[ordinal].history_bits}) context.UavBarrier(buffer->handle);
             }
-            context.UavBarrier(state.refs.handle);
             list->SetPipelineState(cluster_count_pipeline.Get());
             for (std::uint32_t ordinal = 0; ordinal < kClusterRuntimeCatalogs; ++ordinal)
             {
@@ -441,7 +420,7 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
             read_tables(*emit);
             geometry_records = emit->ReadWrite(geometry_records, Access::UnorderedWrite);
             state.geometry_records = geometry_records;
-            state.refs.version = emit->ReadWrite(state.refs.version, Access::UnorderedWrite);
+            state.refs.version = emit->Write(state.refs.version, Access::UnorderedWrite);
             if (visibility_raster_records)
             {
                 *visibility_raster_records = emit->ReadWrite(*visibility_raster_records, Access::UnorderedWrite);
@@ -452,9 +431,10 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
                 if (!cut.active) continue;
                 emit->Read(cut.counts.version, Access::UnorderedRead);
                 emit->Read(cut.offsets.version, Access::UnorderedRead);
-                for (auto *buffer : {&cut.status, &cut.command_counts,
-                    &cut.history_bits, &cut.history_generations, &cut.selected_bounds})
+                for (auto *buffer : {&cut.status, &cut.command_counts, &cut.history_bits})
                     buffer->version = emit->ReadWrite(buffer->version, Access::UnorderedWrite);
+                for (auto *buffer : {&cut.history_generations, &cut.selected_bounds})
+                    buffer->version = emit->Write(buffer->version, Access::UnorderedWrite);
                 auto &commands = cut.mesh_commands.native ? cut.mesh_commands : cut.draw_commands;
                 commands.version = emit->ReadWrite(commands.version, Access::UnorderedWrite);
             }

@@ -153,7 +153,7 @@ void Validate4(Float4 p,bool sh)
 void Encode4(std::span<std::byte> bytes,std::size_t offset,Float4 p,bool sh)
 { Validate4(p,sh); Put3(bytes,offset,{p.x,p.y,p.z}); PutFloat(bytes,offset+12,p.w); }
 TexturePackageView CubeView(std::span<const std::byte> bytes,std::uint32_t edge,std::uint32_t mips,
-    std::size_t probes,const std::vector<std::string> &dependencies)
+    std::size_t probes,const std::vector<std::string> &dependencies,float &max_radiance)
 {
     Require(bytes.size()==Mul(Texels(edge,mips,probes),16),"cube payload byte count");
     TexturePackageView cube; cube.description={edge,edge,static_cast<std::uint32_t>(6*probes),mips,kTextureFormatRgba32Float};
@@ -163,7 +163,12 @@ TexturePackageView CubeView(std::span<const std::byte> bytes,std::uint32_t edge,
         const auto e=std::max(1u,edge>>mip),row=e*16,slice=e*row;
         cube.subresources.push_back({layer,mip,e,e,row,slice,bytes.subspan(offset,slice)});
         for (std::size_t at=0;at<slice;at+=16)
-            Validate4({GetFloat(bytes,offset+at),GetFloat(bytes,offset+at+4),GetFloat(bytes,offset+at+8),GetFloat(bytes,offset+at+12)},false);
+        {
+            const Float4 value{GetFloat(bytes,offset+at),GetFloat(bytes,offset+at+4),
+                GetFloat(bytes,offset+at+8),GetFloat(bytes,offset+at+12)};
+            Validate4(value,false);
+            max_radiance=std::max({max_radiance,value.x,value.y,value.z});
+        }
         offset+=slice;
     }
     return cube;
@@ -365,8 +370,8 @@ SceneProbePackageView ReadSceneProbePackage(std::span<const std::byte> bytes,Ass
         Add(Add(Add(Add(Add(offset,raw),ggx),sh),distance),baked?Mul(d.grid.CellCount(),72):0)==bytes.size(),"payload counts/strides/extent mismatch");
     if (baked)
     {
-        p.radiance=CubeView(bytes.subspan(offset,static_cast<std::size_t>(raw)),d.edge,1,count,p.dependencies); offset+=static_cast<std::size_t>(raw);
-        p.prefiltered=CubeView(bytes.subspan(offset,static_cast<std::size_t>(ggx)),d.edge,std::bit_width(d.edge),count,p.dependencies); offset+=static_cast<std::size_t>(ggx);
+        p.radiance=CubeView(bytes.subspan(offset,static_cast<std::size_t>(raw)),d.edge,1,count,p.dependencies,p.max_radiance); offset+=static_cast<std::size_t>(raw);
+        p.prefiltered=CubeView(bytes.subspan(offset,static_cast<std::size_t>(ggx)),d.edge,std::bit_width(d.edge),count,p.dependencies,p.max_radiance); offset+=static_cast<std::size_t>(ggx);
         p.cosine_sh=bytes.subspan(offset,static_cast<std::size_t>(sh)); offset+=static_cast<std::size_t>(sh);
         for (std::size_t at=0;at<sh;at+=16) Validate4({GetFloat(p.cosine_sh,at),GetFloat(p.cosine_sh,at+4),GetFloat(p.cosine_sh,at+8),GetFloat(p.cosine_sh,at+12)},true);
         p.first_hit_distance=bytes.subspan(offset,static_cast<std::size_t>(distance));

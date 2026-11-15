@@ -30,7 +30,6 @@ HS_GRAPHICS_SETTING(26, GeometryQuality, geometry_quality, GraphicsQuality, Enum
 HS_GRAPHICS_SETTING(27, FoliageQuality, foliage_quality, GraphicsQuality, Enum, GraphicsQuality::Medium, "medium", 0, 0, Assets, "graphics.foliage_quality")
 HS_GRAPHICS_SETTING(28, MaterialQuality, material_quality, GraphicsQuality, Enum, GraphicsQuality::Medium, "medium", 0, 0, Assets, "graphics.material_quality")
 HS_GRAPHICS_SETTING(29, PomQuality, pom_quality, GraphicsOptionalQuality, Enum, GraphicsOptionalQuality::Medium, "medium", 0, 0, Assets, "graphics.pom_quality")
-HS_GRAPHICS_SETTING(30, LightingQuality, lighting_quality, GraphicsQuality, Enum, GraphicsQuality::Medium, "medium", 0, 0, Lighting, "graphics.lighting_quality")
 HS_GRAPHICS_SETTING(31, ShadowMode, shadow_mode, GraphicsShadowMode, Enum, GraphicsShadowMode::Raster, "raster", 0, 0, Lighting, "graphics.shadow_mode")
 HS_GRAPHICS_SETTING(32, ShadowQuality, shadow_quality, GraphicsQuality, Enum, GraphicsQuality::Medium, "medium", 0, 0, Lighting, "graphics.shadow_quality")
 HS_GRAPHICS_SETTING(33, ShadowDistanceM, shadow_distance_m, float, Float, 160.0f, "160", 20, 500, Lighting, "graphics.shadow_distance_m")

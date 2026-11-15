@@ -67,7 +67,6 @@ class ScreenOverlaySystem
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &,const CompletionSet &,bool);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
-    void SwapState(ScreenOverlaySystem &other) noexcept { targets_.swap(other.targets_); }
   private:
     [[nodiscard]] Result RegisterFrame(RenderGraphBuilder &,const ScreenOverlayInputs &,
         ScreenOverlayOutputs &,ScreenOverlayLayout *,const ScreenOverlayLayout *);

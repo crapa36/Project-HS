@@ -8,13 +8,13 @@
 #define HS_VM_GRADIENT_SPACE 3
 // External owners retain their own shader declarations; these are this pass's table ranges.
 #define HS_VM_EXTERNAL_RANGES(X) \
+ X(ProbeSh,9,1,2,23,27) \
+ X(ProbeRecords,10,1,4,23,28) \
  X(Gradient,4,1,HS_VM_GRADIENT_REGISTER,HS_VM_GRADIENT_SPACE,29) \
- X(Light,5,3,0,19,30) \
- X(Shadow,6,4,0,21,33) \
- X(ShadowRoot,7,2,5,21,37) \
- X(LocalShadow,8,4,0,27,39) \
- X(ProbeIrradiance,9,1,2,23,27) \
- X(ProbeRecords,10,1,4,23,28)
+ X(Light,5,2,0,19,30) \
+ X(Shadow,6,4,0,21,32) \
+ X(ShadowRoot,7,2,5,21,36) \
+ X(LocalShadow,8,4,0,27,38)
 #define HS_VM_EXTERNAL_LIGHTING_READS(X) X(Lights) X(Probes) X(Shadows) X(LocalShadows) X(CompactShadow)
 #define HS_VM_EXTERNAL_HERO_READS(X) X(Gradient)
 

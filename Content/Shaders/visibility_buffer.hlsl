@@ -312,7 +312,8 @@ bool HsLoadResolveTriangle(uint2 pixel, uint2 visibility,
         .Load3(indexByteOffset);
     const SceneInput input0 = LoadGeometryVertex(descriptors, indices.x);
     uint classifiedVariant;
-    if (!HsClassifiedMaterialVariant(record, geometry, input0.Material, classifiedVariant) ||
+    uint2 material_bindings;
+    if (!HsClassifiedMaterialVariant(record, geometry, input0.Material, classifiedVariant, material_bindings) ||
         classifiedVariant != expectedVariant)
         return false;
     const SceneInput input1 = LoadGeometryVertex(descriptors, indices.y);
@@ -320,9 +321,10 @@ bool HsLoadResolveTriangle(uint2 pixel, uint2 visibility,
     const HsSceneVertexContext context =
         HsResolveVertexContext(record, geometry, draw, visibility.x,
             sceneHeader1, sceneHeader2, sceneHeader3);
-    vertex0 = EvaluateSceneVertex(input0, context, indices.x);
-    vertex1 = EvaluateSceneVertex(input1, context, indices.y);
-    vertex2 = EvaluateSceneVertex(input2, context, indices.z);
+    // Flat material identity belongs to the provoking vertex, not the interpolated corners.
+    vertex0 = EvaluateSceneVertexWithMaterialBindings(input0, context, indices.x, material_bindings, true);
+    vertex1 = EvaluateSceneVertexWithMaterialBindings(input1, context, indices.y, material_bindings, true);
+    vertex2 = EvaluateSceneVertexWithMaterialBindings(input2, context, indices.z, material_bindings, true);
     const float2 extent = ScreenSize.xy;
     const float2 pixelCenter = (float2)pixel + 0.5;
     const float2 sampleNdc = float2(
@@ -441,6 +443,7 @@ SceneOutput HsInterpolateSceneOutput(SceneOutput a, SceneOutput b, SceneOutput c
     output.RasterDrawRecordId = a.RasterDrawRecordId;
     output.InstanceKey = a.InstanceKey;
     output.OpticalComponentId = a.OpticalComponentId;
+    output.MaterialBindings = a.MaterialBindings;
     return output;
 }
 

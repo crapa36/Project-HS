@@ -5,7 +5,6 @@
 #include "renderer_asset_source.hpp"
 
 #include <filesystem>
-#include <array>
 #include <functional>
 #include <memory>
 #include <span>
@@ -14,12 +13,6 @@
 
 namespace hs
 {
-struct ImmutableAssetRange
-{
-    std::uint64_t offset{}; // Relative to the product range in the source.
-    std::uint32_t byte_count{};
-    std::array<std::byte, 32> digest{};
-};
 struct ImmutableAssetRead
 {
     StreamingRequestId request;

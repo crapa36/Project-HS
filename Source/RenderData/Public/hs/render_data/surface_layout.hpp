@@ -30,11 +30,11 @@ struct DecodedSurfaceMetadata
     return {material, flags};
 }
 
-// Surface ABI 5 also pairs compact VSM casters/group metadata with indexed instancing.
+// Surface ABI 7 binds local packed SH coefficients and cell metadata in one buffer.
 // Logical material identity is distinct from a texture-array/atlas entry.
 struct SurfaceLayout
 {
-    static constexpr std::uint32_t version = 5;
+    static constexpr std::uint32_t version = 7;
     static constexpr std::string_view abi_product = "render/abi/surface_layout.abi";
     static constexpr std::uint32_t render_target_count = 6;
     static constexpr std::uint32_t invalid_material = 0;

@@ -12,6 +12,7 @@
 namespace hs::render_data
 {
 inline constexpr std::uint16_t kRenderPackageVersion = 1;
+inline constexpr std::size_t kRenderPackageMetadataPrefixBytes = 32u * 1024u;
 inline constexpr std::uint32_t kExpandedVertexStride = 76;
 inline constexpr std::uint16_t kExpandedVertexWireVersion = 2;
 inline constexpr std::uint16_t kLegacyExpandedVertexWireVersion = 1;
@@ -71,9 +72,6 @@ enum class ChunkType : std::uint32_t
     LightingProbeMetadata = 26,
     LightingProbeRadiance = 27,
     LightingProbeIrradiance = 28,
-    LtcLutMetadata = 29,
-    LtcLutMatrix = 30,
-    LtcLutAmplitude = 31,
     VolumetricVolumes = 32,
     CharacterAnimationMetadata = 33,
     CharacterNamedClips = 34,
@@ -152,6 +150,7 @@ struct PackageDirectory
     std::span<const ChunkSource> chunks);
 // The decoder mode requires immediate semantic vertex decoding before payload use.
 enum class PackageReadMode { FullValidation, GeometryDecoderValidatesVertices };
+// Generic reads validate framing/integrity and optional vertices; owning typed codecs decode domain chunks.
 [[nodiscard]] PackageView ReadPackage(std::span<const std::byte> bytes,
     AssetId expected_asset_id, PackageReadMode mode = PackageReadMode::FullValidation);
 [[nodiscard]] std::array<std::byte, 32> Sha256(std::span<const std::byte> bytes);

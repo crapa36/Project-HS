@@ -45,7 +45,6 @@ cbuffer FrameConstants : register(b0)
     float4 LightingOptions;
     uint4 CharacterMaterialParameterBases[2];
     uint4 CharacterMaterialVaryingMasks[2];
-    uint4 CharacterBindingRanges[7];
     float4 ProbeOptions;
 };
 #include "screen_reflections_abi.hlsli"

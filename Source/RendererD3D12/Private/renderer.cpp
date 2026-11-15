@@ -3,7 +3,7 @@
 #include "renderer_reconstruction.hpp"
 #include "renderer_packed_assets.hpp"
 #include <iterator>
-#include <new>
+#include <stdexcept>
 #include <tuple>
 
 namespace hs
@@ -42,7 +42,6 @@ Result ValidateNativeOptions(const Options &options)
         !quality(options.foliage_quality, GraphicsQuality::Ultra) ||
         !quality(options.material_quality, GraphicsQuality::Ultra) ||
         !quality(options.pom_quality, GraphicsOptionalQuality::Ultra) ||
-        !quality(options.lighting_quality, GraphicsQuality::Ultra) ||
         !quality(options.ao_mode, GraphicsAoMode::GTAO) ||
         !quality(options.ao_quality, GraphicsQuality::Ultra) ||
         !quality(options.reflection_mode, GraphicsReflectionMode::ScreenSpace) ||
@@ -193,7 +192,7 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
             native_config.development_catalog = RendererDevelopmentCatalog::Build(native_config);
             native_config.development_catalog->Bind(native_config);
         }
-        catch (const std::exception &error)
+        catch (const std::runtime_error &error)
         {
             return Result::Failure(ErrorCode::InvalidArgument, "RendererDevelopmentCatalog", error.what());
         }
@@ -325,10 +324,6 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     LightingProbeCandidate probe;
     if (auto prepared = MeasureStartupStep(RendererStartupStep::LightingProbe, [&] { return impl_->PrepareLightingProbe(impl_->config, probe); }); !prepared) return prepared;
     if (auto committed = MeasureStartupStep(RendererStartupStep::LightingProbe, [&] { return impl_->lighting_probe.Commit(std::move(probe),
-            impl_->graph_queue_executor.Completed()); }); !committed) return committed;
-    LtcLutCandidate ltc;
-    if (auto prepared = MeasureStartupStep(RendererStartupStep::LtcLut, [&] { return impl_->PrepareLtcLut(impl_->config, ltc); }); !prepared) return prepared;
-    if (auto committed = MeasureStartupStep(RendererStartupStep::LtcLut, [&] { return impl_->ltc_lut.Commit(std::move(ltc),
             impl_->graph_queue_executor.Completed()); }); !committed) return committed;
     HdrPostCandidate hdr_post;
     ScreenOverlayCandidate screen_overlay;
@@ -500,7 +495,7 @@ Result D3D12Renderer::InitializeWorldTransportBake(const RendererConfig &configu
         native_config.development_catalog = RendererDevelopmentCatalog::Build(native_config);
         native_config.development_catalog->Bind(native_config);
     }
-    catch (const std::exception &error)
+    catch (const std::runtime_error &error)
     {
         return Result::Failure(ErrorCode::InvalidArgument, "RendererDevelopmentCatalog", error.what());
     }
@@ -694,7 +689,7 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
     };
 
     const auto resize_result = impl_->swap_chain->ResizeBuffers(
-        kFrameCount, width, height, owned_view.display_state.format, 0);
+        kFrameCount, width, height, owned_view.display_state.format, impl_->swap_chain_flags);
     if (FAILED(resize_result))
     {
         const auto failure = impl_->CheckDevice(resize_result, "ResizeBuffers");
@@ -901,8 +896,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     DecalSurfaceCandidate decal_surface;
     if (recreate_decal_surface)
         if (auto prepared = impl_->PrepareDecalSurface(feature_config, capacity, false, decal_surface); !prepared) return prepared;
-    const bool recreate_light_list = capacity != owned_view.state.render_capacity ||
-        options.lighting_quality != impl_->config.lighting_quality;
+    const bool recreate_light_list = capacity != owned_view.state.render_capacity;
     const bool recreate_volumetrics = capacity != owned_view.state.render_capacity ||
         options.volumetric_quality != impl_->config.volumetric_quality ||
         options.vfx_quality != impl_->config.vfx_quality;
@@ -922,7 +916,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     LightListCandidate light_list;
     if (recreate_light_list)
         if (auto prepared = impl_->PrepareLightList(owned_view, feature_config, capacity, light_list); !prepared) return prepared;
-    // Product adoption prepares shadows through ReloadPipeline; quality and capacity alter allocation here.
+    // Quality and capacity alter shadow allocation here.
     const bool recreate_virtual_shadows = capacity != owned_view.state.render_capacity ||
         options.shadow_quality != impl_->config.shadow_quality ||
         options.shadow_mode != impl_->config.shadow_mode;
@@ -935,7 +929,8 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
         if (auto prepared = impl_->PrepareVirtualShadows(owned_view, feature_config, capacity,
                 virtual_shadows); !prepared) return prepared;
 #if defined(HS_DEVELOPMENT_TOOLS)
-    impl_->diagnostics.ObserveTransition(impl_->DiagnosticsMemory());
+    if (impl_->config.capture_timing_stream)
+        impl_->diagnostics.ObserveTransition(impl_->DiagnosticsMemory());
 #endif
     const auto previous_hdr = owned_view.display_state.hdr_active;
     bool presentation_recreated{};
@@ -1076,6 +1071,14 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     owned_view.hdr_capture_source.Reset();
 #endif
     ++impl_->view_configuration_revision;
+    ++owned_view.history_generation;
+    owned_view.configuration_revision = impl_->view_configuration_revision;
+    owned_view.content_generation = impl_->resource_generation_id;
+    owned_view.pipeline_revision = impl_->pipeline_revision;
+    owned_view.temporal_history_valid = false;
+    owned_view.hzb_history_valid = false;
+    owned_view.last_history_frame_slot = UINT32_MAX;
+    owned_view.history_output_extent = owned_view.state.output_extent;
     return Result::Success();
 }
 
@@ -1092,21 +1095,13 @@ Result D3D12Renderer::SetFrameGenerationAllowed(bool allowed)
         impl_->config.frame_generation_allowed = allowed;
         return Result::Success();
     }
-    try
-    {
-        auto candidate = impl_->config;
-        candidate.frame_generation_allowed = allowed;
-        auto display = main_view.display_state;
-        if (auto recreated = impl_->RecreatePresentation(candidate, {main_view.width, main_view.height},
-                main_view.state.render_capacity, display); !recreated) return recreated;
-        impl_->config.frame_generation_allowed = allowed;
-        return Result::Success();
-    }
-    catch (const std::bad_alloc &)
-    {
-        return Result::Failure(ErrorCode::TaskFailed, "hs_renderer_d3d12",
-            "Frame generation policy transition allocation failed.");
-    }
+    auto candidate = impl_->config;
+    candidate.frame_generation_allowed = allowed;
+    auto display = main_view.display_state;
+    if (auto recreated = impl_->RecreatePresentation(candidate, {main_view.width, main_view.height},
+            main_view.state.render_capacity, display); !recreated) return recreated;
+    impl_->config.frame_generation_allowed = allowed;
+    return Result::Success();
 }
 
 Result D3D12Renderer::BeginInputFrame(std::uint64_t &identity)
@@ -1385,11 +1380,6 @@ Result D3D12Renderer::Shutdown()
     }
     Result result = Result::Success();
     if (auto drained = impl_->asset_io.DrainSubmitted(impl_->streaming, impl_->residency); !drained) return drained;
-#if defined(HS_DEVELOPMENT_TOOLS)
-    for (auto &candidate : impl_->unresolved_resident_candidates)
-        if (auto drained = candidate->asset_io.DrainSubmitted(candidate->streaming, candidate->residency); !drained)
-            return drained;
-#endif
     const bool has_view_provider = std::ranges::any_of(impl_->owned_views, [](const auto &entry) {
         return static_cast<bool>(entry.second->reconstruction_provider);
     });
@@ -1413,26 +1403,8 @@ Result D3D12Renderer::Shutdown()
     impl_->material_parameter_slots.clear();
     impl_->material_parameter_candidate_slots.clear();
     impl_->resident_utility_submissions.clear();
-#if defined(HS_DEVELOPMENT_TOOLS)
-    for (auto &candidate : impl_->unresolved_resident_candidates)
-    {
-        for (auto &[id, view] : candidate->owned_views)
-        {
-            (void)id;
-            for (auto &pool : view->targets.transient_pools) pool.Clear();
-            if (auto cleared = impl_->ResetOwnedViewAfterCompletion(*view); !cleared) return cleared;
-        }
-        for (auto &view : candidate->unresolved_view_candidates)
-        {
-            for (auto &pool : view->targets.transient_pools) pool.Clear();
-            if (auto cleared = impl_->ResetOwnedViewAfterCompletion(*view); !cleared) return cleared;
-        }
-        candidate->owned_views.clear();
-        candidate->unresolved_view_candidates.clear();
-    }
-    impl_->unresolved_resident_candidates.clear();
-#endif
     impl_->graph.Reset();
+    impl_->texture_upload_graph.Reset();
     {
         // IO and all GPU queues are complete. Destroy backing/maps/readback
         // while their actual allocator and native device are still retained.
@@ -1473,8 +1445,6 @@ Result D3D12Renderer::Shutdown()
     if (impl_->streamline_session)
         if (auto closed = impl_->streamline_session->ShutdownAfterCompletion(); !closed) return closed;
     if (auto cleared = impl_->lighting_probe.ResetAfterCompletion(
-            impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
-    if (auto cleared = impl_->ltc_lut.ResetAfterCompletion(
             impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
     impl_->volumetric_media.clear();
     impl_->archer_named_animations = {};
@@ -1555,6 +1525,14 @@ Result D3D12Renderer::Shutdown()
         }
         frame.mapped_timestamps = {};
         frame.timestamp_capacity = 0;
+#if defined(HS_DEVELOPMENT_TOOLS)
+        if (frame.texture_upload_timing.mapped)
+        {
+            D3D12_RANGE no_write{};
+            frame.texture_upload_timing.readback.resource->Unmap(0, &no_write);
+        }
+        frame.texture_upload_timing = {};
+#endif
         frame.timestamp_passes.clear();
         frame.timestamp_frequencies.clear();
         frame.completion = {};
@@ -1660,7 +1638,6 @@ Result D3D12Renderer::Shutdown()
     impl_->terrain_descriptor_banks = {};
     impl_->terrain_plane_stream_ids.clear();
     impl_->terrain_plane_needed.clear();
-    impl_->terrain_plane_backings.clear();
     impl_->terrain_tiles.clear();
     for (auto &mips : impl_->terrain_frame_mips) mips.Reset();
     for (auto &sections : impl_->terrain_frame_sections) sections.Reset();
@@ -1846,19 +1823,6 @@ Result D3D12Renderer::ConsumeCompletedTranslucencyDiagnostics(std::vector<Render
     }
     for (auto &view : impl_->unresolved_view_candidates)
         if (auto result = view->translucency.ConsumeCompletedWork(completed, output); !result) return result;
-    for (auto &resident : impl_->unresolved_resident_candidates)
-    {
-        for (auto &[id, view] : resident->owned_views)
-        {
-            (void)id;
-            if (auto result = view->translucency.ConsumeCompletedWork(completed, output); !result) return result;
-        }
-        for (auto &view : resident->unresolved_view_candidates)
-            if (auto result = view->translucency.ConsumeCompletedWork(completed, output); !result) return result;
-        output.insert(output.end(), std::make_move_iterator(resident->translucency_diagnostics_pending.begin()),
-                      std::make_move_iterator(resident->translucency_diagnostics_pending.end()));
-        resident->translucency_diagnostics_pending.clear();
-    }
     std::ranges::sort(output, [](const auto &a, const auto &b) {
         return std::tie(a.completed_frame, a.view_id, a.phase, a.layer, a.contributor) <
             std::tie(b.completed_frame, b.view_id, b.phase, b.layer, b.contributor);
@@ -1886,14 +1850,6 @@ RendererTranslucencyDiagnosticsStatus D3D12Renderer::TranslucencyDiagnosticsStat
     for (const auto &[id, view] : impl_->owned_views)
     { (void)id; AddTranslucencyDiagnosticsStatus(status, view->translucency.WorkStatus(), true); }
     for (const auto &view : impl_->unresolved_view_candidates) AddTranslucencyDiagnosticsStatus(status, view->translucency.WorkStatus(), true);
-    for (const auto &resident : impl_->unresolved_resident_candidates)
-    {
-        AddTranslucencyDiagnosticsStatus(status, resident->translucency_diagnostics_retired, false);
-        for (const auto &[id, view] : resident->owned_views)
-        { (void)id; AddTranslucencyDiagnosticsStatus(status, view->translucency.WorkStatus(), true); }
-        for (const auto &view : resident->unresolved_view_candidates)
-            AddTranslucencyDiagnosticsStatus(status, view->translucency.WorkStatus(), true);
-    }
     return status;
 #else
     return {};
@@ -1960,15 +1916,20 @@ const RendererDiagnosticsFrame &D3D12Renderer::LastRenderedFrameDiagnostics() co
 
 RendererQueueStats D3D12Renderer::LastQueueStats() const noexcept
 {
-    const auto stats = impl_->graph_queue_executor.LastExecutionStats();
+#if defined(HS_DEVELOPMENT_TOOLS)
+    const auto &stats = impl_->last_frame_graph_stats;
     return {stats.direct_batches, stats.compute_batches, stats.copy_batches,
             stats.cross_queue_waits, stats.record_jobs, stats.transient_resource_count,
             stats.transient_block_count, stats.alias_activation_count,
             stats.transient_bytes_without_aliasing, stats.transient_backing_bytes};
+#else
+    return {};
+#endif
 }
 
 RendererResidencyStats D3D12Renderer::ResidencyStats() const noexcept
 {
+#if defined(HS_DEVELOPMENT_TOOLS)
     const auto accounting = impl_->residency.Accounting();
     const auto completed = impl_->graph_queue_executor.Completed();
     const auto texture = impl_->texture_streaming.Statistics(impl_->streaming, completed);
@@ -2014,6 +1975,9 @@ RendererResidencyStats D3D12Renderer::ResidencyStats() const noexcept
         geometry_generation,
         static_cast<std::uint8_t>(geometry_state),
     };
+#else
+    return {};
+#endif
 }
 
 RendererTextureProductStatus D3D12Renderer::GetTextureStreamingStatus(std::string_view logical_id) const noexcept

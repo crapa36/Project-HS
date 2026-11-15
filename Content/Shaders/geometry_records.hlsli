@@ -14,6 +14,7 @@ struct GeometryDrawRecord
     uint MeshletCount, VisibleBase, InstanceCount, Flags;
     uint TriangleOffset, RemapOffset, GeometryGeneration, Lod;
     uint MeshId, Reserved0, Reserved1, Reserved2;
+    uint MaterialBindingSet;
 };
 
 GeometryDrawRecord LoadGeometryDrawRecord(uint id)
@@ -30,7 +31,9 @@ GeometryDrawRecord LoadGeometryDrawRecord(uint id)
     record.InstanceCount = b.z; record.Flags = b.w;
     record.TriangleOffset = c.x; record.RemapOffset = c.y;
     record.GeometryGeneration = c.z; record.Lod = c.w;
-    record.MeshId = d.x; record.Reserved0 = d.y;
+    record.MeshId = d.x & HS_GEOMETRY_MESH_ID_MASK;
+    record.MaterialBindingSet = d.x >> HS_GEOMETRY_MATERIAL_SET_SHIFT;
+    record.Reserved0 = d.y;
     record.Reserved1 = d.z; record.Reserved2 = d.w;
     return record;
 }

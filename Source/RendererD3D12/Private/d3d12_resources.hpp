@@ -199,6 +199,17 @@ struct FrameContext
     std::vector<std::uint64_t> timestamp_frequencies;
     std::vector<std::uint32_t> timestamp_pass_query_slots;
     std::vector<std::uint32_t> timestamp_query_slots;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    struct UploadTiming
+    {
+        Microsoft::WRL::ComPtr<ID3D12QueryHeap> heap;
+        AllocationResource readback;
+        std::uint64_t *mapped{};
+        std::array<GpuPassTiming, 2> passes;
+        std::uint32_t count{};
+        bool recorded{};
+    } texture_upload_timing;
+#endif
 };
 
 } // namespace hs

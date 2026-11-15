@@ -36,52 +36,27 @@ bool SameLight(const LightView &a,const LightView &b)
     return a.stable_id==b.stable_id&&a.generation==b.generation&&a.revision==b.revision&&a.type==b.type&&
         a.position.x==b.position.x&&a.position.y==b.position.y&&a.position.z==b.position.z&&a.range==b.range&&
         a.direction.x==b.direction.x&&a.direction.y==b.direction.y&&a.direction.z==b.direction.z&&
-        a.inner_cone_radians==b.inner_cone_radians&&a.outer_cone_radians==b.outer_cone_radians&&a.emitter_radius==b.emitter_radius&&
-        a.shape.x==b.shape.x&&a.shape.y==b.shape.y&&a.area_tangent.x==b.area_tangent.x&&
-        a.area_tangent.y==b.area_tangent.y&&a.area_tangent.z==b.area_tangent.z&&a.two_sided==b.two_sided;
+        a.inner_cone_radians==b.inner_cone_radians&&a.outer_cone_radians==b.outer_cone_radians&&a.emitter_radius==b.emitter_radius;
 }
-bool Area(const LightView &light)
-{return light.type==LightType::Rectangle||light.type==LightType::Disk;}
-double EmitterBound(const LightView &light)
-{
-    if(light.type==LightType::Rectangle)return std::hypot(double(light.shape.x)*0.5,double(light.shape.y)*0.5);
-    if(light.type==LightType::Disk)return std::max(double(light.shape.x),double(light.shape.y));
-    return light.emitter_radius;
-}
-UINT SampleCount(const LightView &light,const LocalShadowProfile &profile)
-{return Area(light)?profile.area_samples:1u;}
-UINT FaceCount(const LightView &light,const LocalShadowProfile &profile)
-{return light.type==LightType::Spot?1u:6u*SampleCount(light,profile);}
+UINT FaceCount(const LightView &light)
+{return light.type==LightType::Spot?1u:6u;}
 bool Supported(const LightView &light)
 {
     const auto &p=light.position;const auto &d=light.direction;
-    const bool area=Area(light),spot=light.type==LightType::Spot;
-    if((!area&&!spot&&light.type!=LightType::Point)||!light.stable_id||!light.generation||!light.revision||
+    const bool spot=light.type==LightType::Spot;
+    if((!spot&&light.type!=LightType::Point)||!light.stable_id||!light.generation||!light.revision||
         !std::isfinite(p.x)||!std::isfinite(p.y)||!std::isfinite(p.z)||!std::isfinite(light.range)||light.range<=0.02f||
         !std::isfinite(light.quantity)||light.quantity<0||!std::isfinite(light.color.x)||light.color.x<0||
         !std::isfinite(light.color.y)||light.color.y<0||!std::isfinite(light.color.z)||light.color.z<0||
-        (light.unit!=(area?LightUnit::Luminance:LightUnit::Lumen)&&
+        (light.unit!=LightUnit::Lumen&&
          !(light.type==LightType::Point&&light.unit==LightUnit::RadiantIntensity)))return false;
-    if((area||spot)&&(!std::isfinite(d.x)||!std::isfinite(d.y)||!std::isfinite(d.z)||
+    if(spot&&(!std::isfinite(d.x)||!std::isfinite(d.y)||!std::isfinite(d.z)||
         !(std::hypot(double(d.x),double(d.y),double(d.z))>0)))return false;
     if(spot&&(!std::isfinite(light.inner_cone_radians)||!std::isfinite(light.outer_cone_radians)||
         light.inner_cone_radians<0||light.inner_cone_radians>=light.outer_cone_radians||
         light.outer_cone_radians>=DirectX::XM_PIDIV2))return false;
-    if(area)
-    {
-        const auto &t=light.area_tangent;
-        if(!std::isfinite(t.x)||!std::isfinite(t.y)||!std::isfinite(t.z)||
-            !std::isfinite(light.shape.x)||light.shape.x<=0||!std::isfinite(light.shape.y)||light.shape.y<=0)return false;
-        // Match the light-list emitter basis: cross original inputs in double,
-        // so a parallel authored tangent cannot become a fabricated orientation.
-        const double bx=double(d.y)*t.z-double(d.z)*t.y,by=double(d.z)*t.x-double(d.x)*t.z,
-            bz=double(d.x)*t.y-double(d.y)*t.x;
-        if(!(std::hypot(bx,by,bz)>0)||!std::isfinite(std::hypot(bx,by,bz)))return false;
-        const double area_m2=double(light.shape.x)*light.shape.y*(light.type==LightType::Rectangle?1.0:std::numbers::pi_v<double>);
-        if(area_m2<std::numeric_limits<float>::min()||area_m2>std::numeric_limits<float>::max())return false;
-    }
-    else if(!std::isfinite(light.emitter_radius)||light.emitter_radius<0)return false;
-    const double influence=double(light.range)+(area?EmitterBound(light):0.0);
+    if(!std::isfinite(light.emitter_radius)||light.emitter_radius<0)return false;
+    const double influence=double(light.range);
     return std::isfinite(influence)&&influence*influence<=std::numeric_limits<float>::max();
 }
 double Priority(const LightView &light,DirectX::XMFLOAT3 camera,bool moved)
@@ -89,11 +64,9 @@ double Priority(const LightView &light,DirectX::XMFLOAT3 camera,bool moved)
     const double x=double(light.position.x)-camera.x,y=double(light.position.y)-camera.y,z=double(light.position.z)-camera.z;
     const double distance2=x*x+y*y+z*z;
     const double luminance=std::max(0.0,double(light.color.x)*0.2126+double(light.color.y)*0.7152+double(light.color.z)*0.0722);
-    const double flux=Area(light)?double(light.quantity)*std::numbers::pi_v<double>*double(light.shape.x)*light.shape.y*
-        (light.type==LightType::Rectangle?1.0:std::numbers::pi_v<double>)*(light.two_sided?2.0:1.0):
-        light.unit==LightUnit::RadiantIntensity?double(light.quantity)*kRgbReferenceLumensPerWatt*4.0*std::numbers::pi_v<double>:
+    const double flux=light.unit==LightUnit::RadiantIntensity?double(light.quantity)*kRgbReferenceLumensPerWatt*4.0*std::numbers::pi_v<double>:
         double(light.quantity);
-    const double importance=flux*luminance,bound=EmitterBound(light),influence=double(light.range)+(Area(light)?bound:0.0);
+    const double importance=flux*luminance,bound=light.emitter_radius,influence=double(light.range);
     // Projected influence area and the emitter's photometric importance are
     // evaluated separately; revision/movement modestly prioritizes stale caches.
     const double contribution=std::min(1.0,influence*influence/std::max(distance2,0.0001));
@@ -237,56 +210,24 @@ GpuLocalShadowRecord Record(const LocalShadowStorage &s,const LightView &light)
 {
     using namespace DirectX;GpuLocalShadowRecord record;
     record.identity={UINT(light.stable_id),UINT(light.stable_id>>32),light.generation,UINT(light.type)};
-    record.revision={UINT(light.revision),UINT(light.revision>>32),SampleCount(light,s.profile),FaceCount(light,s.profile)};
+    record.revision={UINT(light.revision),UINT(light.revision>>32),0,FaceCount(light)};
     record.position_range={light.position.x,light.position.y,light.position.z,light.range};
-    const bool area=Area(light),spot=light.type==LightType::Spot;
-    const double length=area||spot?std::hypot(double(light.direction.x),double(light.direction.y),double(light.direction.z)):1.0;
-    const auto direction=area||spot?XMVectorSet(float(light.direction.x/length),float(light.direction.y/length),float(light.direction.z/length),0):XMVectorSet(0,0,1,0);
+    const bool spot=light.type==LightType::Spot;
+    const double length=spot?std::hypot(double(light.direction.x),double(light.direction.y),double(light.direction.z)):1.0;
+    const auto direction=spot?XMVectorSet(float(light.direction.x/length),float(light.direction.y/length),float(light.direction.z/length),0):XMVectorSet(0,0,1,0);
     XMStoreFloat4(&record.direction_cos_outer,direction);record.direction_cos_outer.w=std::cos(light.outer_cone_radians);
     const float near_plane=std::max(0.005f,std::min(0.05f,light.range*0.001f));
     record.parameters={near_plane,s.profile.depth_bias,s.profile.normal_bias_m,float(s.profile.filter_samples)};
-    for(UINT sample=0;sample<record.revision.z;++sample)
-        record.sample_positions[sample]={light.position.x,light.position.y,light.position.z,0};
-    if(area)
-    {
-        const auto &d=light.direction;const auto &t=light.area_tangent;
-        const double bx=double(d.y)*t.z-double(d.z)*t.y,by=double(d.z)*t.x-double(d.x)*t.z,bz=double(d.x)*t.y-double(d.y)*t.x;
-        const double cross_length=std::hypot(bx,by,bz),ux=bx/cross_length,uy=by/cross_length,uz=bz/cross_length;
-        const double nx=d.x/length,ny=d.y/length,nz=d.z/length;
-        const double tx=uy*nz-uz*ny,ty=uz*nx-ux*nz,tz=ux*ny-uy*nx;
-        const double scale=light.type==LightType::Rectangle?0.5:1.0,width=light.shape.x*scale,height=light.shape.y*scale;
-        record.emitter_normal_two_sided={float(nx),float(ny),float(nz),light.two_sided?1.0f:0.0f};
-        // Fixed plane quadrature: the centroid, two opposite equal-area half
-        // centroids, or four symmetric quadrant points. These are bounded
-        // visibility samples, not a claim of exact area-light integration.
-        for(UINT sample=0;sample<record.revision.z;++sample)
-        {
-            double x{},y{};
-            if(record.revision.z==2)
-            {
-                const double offset=light.type==LightType::Rectangle?0.5:4.0/(3.0*std::numbers::pi_v<double>);
-                if(width>=height)x=sample==0?-offset:offset;else y=sample==0?-offset:offset;
-            }
-            else if(record.revision.z==4)
-            {
-                const double offset=light.type==LightType::Rectangle?0.5:4.0/(3.0*std::numbers::pi_v<double>);
-                x=(sample&1u)?offset:-offset;y=(sample&2u)?offset:-offset;
-            }
-            record.sample_positions[sample]={float(double(light.position.x)+tx*x*width+ux*y*height),
-                float(double(light.position.y)+ty*x*width+uy*y*height),
-                float(double(light.position.z)+tz*x*width+uz*y*height),0};
-        }
-    }
     const XMFLOAT3 directions[6]{{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
     const XMFLOAT3 ups[6]{{0,1,0},{0,1,0},{0,0,-1},{0,0,1},{0,1,0},{0,1,0}};
     const float fov=spot?light.outer_cone_radians*2:XM_PIDIV2;
     // Swapping the native near/far arguments creates the established reversed Z.
-    const float far_plane=float(double(light.range)+(area?EmitterBound(light):0.0));
+    const float far_plane=float(double(light.range));
     const auto projection=XMMatrixPerspectiveFovLH(fov,1,far_plane,near_plane);
     for(UINT face=0;face<record.revision.w;++face)
     {
-        const UINT cube_face=face%6,sample=face/6;
-        const auto position=XMLoadFloat4(&record.sample_positions[sample]);
+        const UINT cube_face=face;
+        const auto position=XMVectorSet(light.position.x,light.position.y,light.position.z,0);
         auto toward=spot?direction:XMLoadFloat3(&directions[cube_face]);
         auto up=!spot?XMLoadFloat3(&ups[cube_face]):
             (std::abs(XMVectorGetY(toward))>0.99f?XMVectorSet(0,0,1,0):XMVectorSet(0,1,0,0));
@@ -382,7 +323,6 @@ Result LocalShadowSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
     if(!device||!allocator||!profile.byte_budget||!profile.maximum_lights||profile.maximum_lights>64||
         profile.face_resolution<16||profile.face_resolution>4096||!profile.max_casters||!profile.max_draw_groups||
         !profile.command_capacity||profile.command_capacity>=kLocalShadowPassBit||!profile.frame_slots||profile.frame_slots>16||
-        (profile.area_samples!=1&&profile.area_samples!=2&&profile.area_samples!=4)||
         !std::isfinite(profile.normal_bias_m)||profile.normal_bias_m<0||!std::isfinite(profile.depth_bias)||profile.depth_bias<0)
         return Failure(ErrorCode::InvalidArgument,"Invalid local shadow capacities/budget/bias.");
     auto s=std::make_shared<LocalShadowStorage>();s->device=device;s->allocator=allocator;s->profile=profile;
@@ -574,7 +514,7 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
     std::vector<Selected> selected;UINT reserved_tiles{},reserved_commands{};
     for(const auto &rank:ranked)
     {
-        const auto &light=*rank.light;const UINT faces=FaceCount(light,s->profile);
+        const auto &light=*rank.light;const UINT faces=FaceCount(light);
         if(selected.size()==s->cache.size()||faces>physical_tiles-reserved_tiles){++status.budget_lights;continue;}
         const auto old=std::ranges::find_if(s->cache,[&](const auto &c){return c.occupied&&
             c.light.stable_id==light.stable_id&&c.light.generation==light.generation;});

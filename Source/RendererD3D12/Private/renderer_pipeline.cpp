@@ -126,14 +126,22 @@ Result D3D12Renderer::Impl::CreateRootSignature()
     geometry_range.OffsetInDescriptorsFromTableStart =
         kGeometryDescriptorOffset - kTemporalTextureDescriptorOffset;
     auto terrain_page_range = material_texture_range;
-    terrain_page_range.NumDescriptors = kTerrainPageDescriptorCount;
+    terrain_page_range.NumDescriptors = HS_TERRAIN_SRV_DESCRIPTOR_COUNT;
     terrain_page_range.RegisterSpace = HS_TERRAIN_PAGE_SPACE;
     terrain_page_range.BaseShaderRegister = HS_TERRAIN_SECTION_SRV;
     terrain_page_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
     terrain_page_range.OffsetInDescriptorsFromTableStart = kTerrainPageDescriptorOffset - kPostTextureDescriptorCount;
+    D3D12_DESCRIPTOR_RANGE1 terrain_request_range{};
+    terrain_request_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+    terrain_request_range.NumDescriptors = 1;
+    terrain_request_range.BaseShaderRegister = HS_TERRAIN_REQUEST_UAV;
+    terrain_request_range.RegisterSpace = HS_TERRAIN_PAGE_SPACE;
+    terrain_request_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE |
+                                  D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
+    terrain_request_range.OffsetInDescriptorsFromTableStart = terrain_page_range.OffsetInDescriptorsFromTableStart + HS_TERRAIN_REQUEST_DESCRIPTOR;
     const std::array ranges{character_range, monster_pbr_range, environment_range,
                             gradient_range, ribbon_detail_range, impact_range, smoke_range,
-                            material_texture_range, terrain_page_range};
+                            material_texture_range, terrain_page_range, terrain_request_range};
 
     D3D12_DESCRIPTOR_RANGE1 curve_range = impact_range;
     curve_range.NumDescriptors = 1;
@@ -210,7 +218,7 @@ Result D3D12Renderer::Impl::CreateRootSignature()
     probe_range.RegisterSpace = 15;
     probe_range.OffsetInDescriptorsFromTableStart = kProbeDescriptorOffset - kTemporalTextureDescriptorOffset;
     D3D12_DESCRIPTOR_RANGE1 light_range = probe_range;
-    light_range.NumDescriptors = 6;
+    light_range.NumDescriptors = kLightListResourceCount;
     light_range.RegisterSpace = 19;
     light_range.OffsetInDescriptorsFromTableStart = kLightListDescriptorOffset - kTemporalTextureDescriptorOffset;
     const std::array history_geometry_ranges{
@@ -220,7 +228,7 @@ Result D3D12Renderer::Impl::CreateRootSignature()
         D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kVirtualShadowDescriptorCount, 0, 21,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kVirtualShadowDescriptorOffset - kTemporalTextureDescriptorOffset},
-        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 5, 0, 23,
+        D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kLocalProbeSrvCount, 0, 23,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE,
             kLocalProbeDescriptorOffset - kTemporalTextureDescriptorOffset},
         D3D12_DESCRIPTOR_RANGE1{D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 24,
@@ -1365,395 +1373,6 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     return CreateClusterPipelines(pipeline_config);
 }
 
-#if defined(HS_DEVELOPMENT_TOOLS)
-Result D3D12Renderer::ReloadShaderGeneration(
-    const std::string &generation_id,
-    const std::unordered_map<std::string, std::filesystem::path> &product_paths,
-    const std::unordered_map<std::string, std::string> &product_digests)
-{
-    if (!impl_->initialized || impl_->frame_submission_faulted)
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               "Shader Generation adoption requires an active renderer.");
-    if (generation_id.empty() || product_paths.size() != impl_->config.product_paths.size() ||
-        product_digests.size() != product_paths.size() ||
-        impl_->config.product_digests.size() != impl_->config.product_paths.size())
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               "Shader Generation product identity is incomplete.");
-    bool shaders_changed = false;
-    bool parameters_changed = false;
-    bool probe_changed = false;
-    bool ltc_changed = false;
-    const auto parameter_product = [](std::string_view id) {
-        const auto matches = [&](std::string_view name) {
-            return id == "render/material/" + std::string(name) + "/parameters.rpkg";
-        };
-        return std::ranges::any_of(kAuthoredMaterialNames, matches) ||
-               std::ranges::any_of(kCharacterMaterialNames, matches) ||
-               std::ranges::any_of(render_data::kDecalMaterialNames, matches);
-    };
-    for (const auto &[id, previous_digest] : impl_->config.product_digests)
-    {
-        const auto found = product_digests.find(id);
-        if (!product_paths.contains(id) || found == product_digests.end())
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "Shader Generation changes the product set: " + id);
-        if (found->second == previous_digest) continue;
-        if (id.starts_with("render/shader/")) shaders_changed = true;
-        else if (parameter_product(id)) parameters_changed = true;
-        else if (id == "render/lighting/default_probe.rpkg") probe_changed = true;
-        else if (id == "render/lighting/default_ltc.rpkg") ltc_changed = true;
-        else
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                                   "Shader Generation changes resident content: " + id);
-    }
-    RendererConfig candidate = impl_->config;
-    // This API explicitly selects loose developer Generation products.
-    candidate.packed_content.reset();
-    candidate.prepared_renderer_catalog.reset();
-    candidate.packed_bulks = {};
-    candidate.packed_textures = {};
-    candidate.packed_geometry = {};
-    candidate.packed_materials = {};
-    candidate.packed_characters = {};
-    candidate.packed_animations = {};
-    candidate.packed_vfx_mesh_atlas = nullptr;
-    candidate.packed_source_revisions = {};
-    candidate.packed_revision_bulks = {};
-    candidate.selected_texture_feedback = false;
-    candidate.content_generation_id = generation_id;
-    candidate.product_paths = product_paths;
-    candidate.product_digests = product_digests;
-    try
-    {
-        candidate.development_catalog = RendererDevelopmentCatalog::Build(candidate);
-        candidate.development_catalog->Bind(candidate);
-    }
-    catch (const std::exception &error)
-    {
-        return Result::Failure(ErrorCode::InvalidArgument, "RendererDevelopmentCatalog", error.what());
-    }
-    if (parameters_changed)
-        if (auto prepared = impl_->PrepareMaterialParameters(candidate, true); !prepared)
-        {
-            if (!impl_->material_parameter_upload_pending)
-            {
-                impl_->material_parameter_candidate.Reset();
-                impl_->material_parameter_upload.Reset();
-                impl_->material_parameter_upload_device.Reset();
-            }
-            return prepared;
-        }
-    if (!shaders_changed)
-    {
-        LightingProbeCandidate probe;
-        LtcLutCandidate ltc;
-        if (probe_changed)
-            if (auto prepared = impl_->PrepareLightingProbe(candidate, probe); !prepared) return prepared;
-        if (ltc_changed)
-            if (auto prepared = impl_->PrepareLtcLut(candidate, ltc); !prepared) return prepared;
-        if (probe_changed || ltc_changed)
-            if (auto drained = impl_->WaitForGpu(); !drained) return drained;
-        if (probe_changed)
-            if (auto committed = impl_->lighting_probe.Commit(std::move(probe),
-                    impl_->graph_queue_executor.Completed()); !committed) return committed;
-        if (ltc_changed)
-            if (auto committed = impl_->ltc_lut.Commit(std::move(ltc),
-                    impl_->graph_queue_executor.Completed()); !committed) return committed;
-        // Parameter/lighting-data adoption preserves the native root and PSOs.
-        if (parameters_changed) impl_->CommitMaterialParameters();
-        impl_->config = std::move(candidate);
-        for (auto &[id, view] : impl_->owned_views)
-        {
-            view->temporal_history_valid = false;
-            view->hzb_history_valid = false;
-        }
-        return Result::Success();
-    }
-    return impl_->ReloadPipeline(std::move(candidate), parameters_changed);
-}
-
-Result D3D12Renderer::Impl::ReloadPipeline(RendererConfig candidate_config, bool parameters_changed)
-{
-    auto &owner = *owned_views.at(active_view_id.value);
-    AdaptiveShadingCandidate adaptive;
-    if (auto prepared = PrepareAdaptiveShading(owner, candidate_config, owner.state.render_capacity,
-            adaptive); !prepared) return prepared;
-    ScreenOverlayCandidate screen_overlay;
-    if (auto prepared = PrepareScreenOverlay(candidate_config, owner.state.render_capacity,
-            screen_overlay); !prepared) return prepared;
-    DecalSurfaceCandidate decals;
-    if (auto prepared = PrepareDecalSurface(candidate_config, owner.state.render_capacity,
-            false, decals); !prepared) return prepared;
-    AmbientOcclusionCandidate ambient;
-    SubsurfaceCandidate diffusion;
-    ScreenReflectionsCandidate reflections;
-    ReconstructionGuidesCandidate guides;
-    PresentationGuidesCandidate presentation;
-    if (auto prepared = PreparePresentationGuides(candidate_config, {owner.width, owner.height},
-            owner.state.render_capacity, owner.display_state, sdk_presentation.PresentationOwner(), presentation); !prepared) return prepared;
-    HdrPostCandidate hdr_post;
-    LightListCandidate light_list;
-    if (auto prepared = PrepareLightList(owner, candidate_config, owner.state.render_capacity, light_list); !prepared)
-        return prepared;
-    if (auto prepared = PrepareHdrPost(owner, candidate_config, owner.state.render_capacity,
-            {owner.width, owner.height}, hdr_post); !prepared) return prepared;
-    VirtualShadowCandidate virtual_shadows;
-    AdditionalShadowPrepared additional_shadows;
-    if (auto prepared = PrepareAdditionalShadows(owner, candidate_config, owner.state.render_capacity,
-            additional_shadows); !prepared) return prepared;
-    VolumetricPrepared volumetrics;
-    if (auto prepared = PrepareVolumetrics(owner, candidate_config, owner.state.render_capacity, volumetrics); !prepared) return prepared;
-    LocalProbeRuntimeCandidate local_probes;
-    if (auto prepared = PrepareLocalProbes(candidate_config, local_probes); !prepared) return prepared;
-    if (auto prepared = PrepareVirtualShadows(owner, candidate_config, owner.state.render_capacity,
-            virtual_shadows); !prepared) return prepared;
-    LightingProbeCandidate probe;
-    constexpr std::string_view probe_id = "render/lighting/default_probe.rpkg";
-    const auto candidate_probe = RendererProductDigest(candidate_config, probe_id);
-    const auto resident_probe = RendererProductDigest(config, probe_id);
-    const bool replace_probe = !candidate_probe.empty() && candidate_probe != resident_probe;
-    if (replace_probe)
-        if (auto prepared = PrepareLightingProbe(candidate_config, probe); !prepared) return prepared;
-    LtcLutCandidate ltc;
-    constexpr std::string_view ltc_id = "render/lighting/default_ltc.rpkg";
-    const auto candidate_ltc = RendererProductDigest(candidate_config, ltc_id);
-    const auto resident_ltc = RendererProductDigest(config, ltc_id);
-    const bool replace_ltc = !candidate_ltc.empty() && candidate_ltc != resident_ltc;
-    if (replace_ltc)
-        if (auto prepared = PrepareLtcLut(candidate_config, ltc); !prepared) return prepared;
-    if (auto prepared = PrepareAmbientOcclusion(owner, candidate_config, owner.state.render_capacity, ambient,
-            adaptive.Status().compute_ready); !prepared)
-        return prepared;
-    if (auto prepared = PrepareSurfaceLighting(owner, candidate_config, owner.state.render_capacity,
-            diffusion, reflections); !prepared) return prepared;
-    if (owner.reconstruction_provider)
-        if (auto prepared = PrepareReconstructionGuides(owner, candidate_config, owner.state.render_capacity,
-                {owner.width, owner.height}, guides, owner.reconstruction_provider->NeedsCompositionGuide()); !prepared) return prepared;
-    if (sdk_presentation.IsEnabled())
-    {
-        std::vector<ID3D12CommandQueue *> queues;
-        for (const auto hint : {QueueHint::Direct, QueueHint::Compute, QueueHint::Copy})
-            if (auto *native = graph_queue_executor.NativeQueue(hint)) queues.push_back(native);
-        if (auto retired = sdk_presentation.BeforeReuse(queues); !retired) return retired;
-    }
-    if (auto waited = WaitForGpu(); !waited)
-    {
-        if (!material_parameter_upload_pending) material_parameter_candidate.Reset();
-        return waited;
-    }
-    auto previous_root = std::move(root_signature);
-    auto previous_scene = std::move(scene_pipeline);
-    auto previous_shadow = std::move(shadow_pipeline);
-    auto previous_environment_opaque_shadow = std::move(environment_opaque_shadow_pipeline);
-    auto previous_material_scenes = std::move(environment_material_scene_pipelines);
-    std::array previous_heroes{std::move(hero_scene_pipeline), std::move(hero_visibility_pipeline),
-        std::move(hero_shadow_pipeline), std::move(character_resolve_pipeline), std::move(hero_translucent_pipeline)};
-    auto previous_material_shadows = std::move(environment_material_shadow_pipelines);
-    auto previous_visibility = std::move(visibility_pipeline);
-    auto previous_material_visibility = std::move(environment_material_visibility_pipelines);
-    auto previous_surface_resolve = std::move(surface_resolve_pipeline);
-    auto previous_material_resolve = std::move(environment_material_resolve_pipelines);
-    auto previous_raster_records = std::move(raster_records_pipeline);
-    auto previous_visibility_clear = std::move(visibility_clear_pipeline);
-    auto previous_visibility_count = std::move(visibility_count_pipeline);
-    auto previous_visibility_prefix = std::move(visibility_prefix_pipeline);
-    auto previous_visibility_scatter = std::move(visibility_scatter_pipeline);
-    auto previous_particle = std::move(particle_pipeline);
-    auto previous_ground_ring = std::move(ground_ring_pipeline);
-    auto previous_ground_add = std::move(ground_add_pipeline);
-    auto previous_owner_mesh = std::move(owner_mesh_pipeline);
-    auto previous_vfx_distortion = std::move(vfx_distortion_pipeline);
-    auto previous_vfx_flash = std::move(vfx_flash_pipeline);
-    auto previous_vfx_sprite_oit = std::move(vfx_sprite_oit_pipeline);
-    auto previous_slime = std::move(slime_pipeline);
-    auto previous_fresnel_shell = std::move(fresnel_shell_pipeline);
-    auto previous_particle_compute = std::move(particle_compute_pipeline);
-    auto previous_static_visibility = std::move(static_visibility_pipeline);
-    auto previous_visibility_retest = std::move(visibility_retest_pipeline);
-    auto previous_depth_pyramid_init = std::move(depth_pyramid_init_pipeline);
-    auto previous_depth_pyramid_reduce = std::move(depth_pyramid_reduce_pipeline);
-    auto previous_skin_cache = std::move(skin_cache_pipeline);
-    auto previous_skin_bounds = std::move(skin_bounds_pipeline);
-    auto previous_deferred = std::move(deferred_pipeline);
-    auto previous_composite = std::move(composite_pipeline);
-    auto previous_temporal = std::move(temporal_pipeline);
-    auto previous_bloom_extract = std::move(bloom_extract_pipeline);
-    auto previous_bloom_downsample = std::move(bloom_downsample_pipeline);
-    auto previous_bloom_upsample = std::move(bloom_upsample_pipeline);
-    auto previous_bloom = std::move(bloom_pipeline);
-    auto previous_tone_map = std::move(tone_map_pipeline);
-    auto previous_fxaa = std::move(fxaa_pipeline);
-    auto previous_ui = std::move(ui_pipeline);
-    auto previous_ui_draw = std::move(ui_draw_pipeline);
-    auto previous_ui_root = std::move(ui_draw_root);
-    auto previous_ribbon_update = std::move(ribbon_update_pipeline);
-    auto previous_ribbon_args = std::move(ribbon_args_pipeline);
-    auto previous_ribbon_add = std::move(ribbon_add_pipeline);
-    auto previous_ribbon_oit = std::move(ribbon_oit_pipeline);
-    auto previous_signature = std::move(draw_signature);
-    auto previous_indexed_signature = std::move(indexed_geometry_signature);
-    auto previous_mesh_signature = std::move(mesh_geometry_signature);
-    auto previous_cluster_root = std::move(cluster_root_signature);
-    auto previous_cluster_count = std::move(cluster_count_pipeline);
-    auto previous_cluster_prefix = std::move(cluster_prefix_pipeline);
-    auto previous_cluster_emit = std::move(cluster_emit_pipeline);
-    auto previous_cluster_occlusion = std::move(cluster_occlusion_pipeline);
-    auto previous_cluster_retest = std::move(cluster_retest_pipeline);
-    auto previous_cluster_scene = std::move(cluster_scene_pipelines);
-    auto previous_cluster_shadow = std::move(cluster_shadow_pipelines);
-    auto previous_cluster_visibility = std::move(cluster_visibility_pipelines);
-    auto previous_cluster_draw_signature = std::move(cluster_draw_signature);
-    auto previous_cluster_mesh_signature = std::move(cluster_mesh_signature);
-    auto previous_mesh_pipelines = std::move(mesh_pipeline_pairs);
-    auto previous_virtual_shadow_indexed = std::move(virtual_shadow_indexed_pipelines);
-    auto previous_virtual_shadow_mesh = std::move(virtual_shadow_mesh_pipelines);
-    auto previous_dispatch_signature = std::move(dispatch_signature);
-    auto previous_ribbon_signature = std::move(ribbon_draw_signature);
-
-    auto result = CreatePipeline(candidate_config);
-    LayeredTranslucencyCandidate transparency;
-    if (result)
-        result = PrepareLayeredTranslucency(owner, candidate_config, owner.state.render_capacity, transparency);
-    if (result)
-        result = CreateEnvironmentBrdfLut(candidate_config, environment_brdf_candidate);
-    if (!result)
-    {
-        if (environment_brdf_init_pending)
-            frame_submission_faulted = true;
-        else
-            environment_brdf_candidate.Reset();
-        if (!material_parameter_upload_pending) material_parameter_candidate.Reset();
-        root_signature = std::move(previous_root);
-        scene_pipeline = std::move(previous_scene);
-        shadow_pipeline = std::move(previous_shadow);
-        environment_opaque_shadow_pipeline = std::move(previous_environment_opaque_shadow);
-        environment_material_scene_pipelines = std::move(previous_material_scenes);
-        hero_scene_pipeline = std::move(previous_heroes[0]);
-        hero_visibility_pipeline = std::move(previous_heroes[1]);
-        hero_shadow_pipeline = std::move(previous_heroes[2]);
-        character_resolve_pipeline = std::move(previous_heroes[3]);
-        hero_translucent_pipeline = std::move(previous_heroes[4]);
-        environment_material_shadow_pipelines = std::move(previous_material_shadows);
-        visibility_pipeline = std::move(previous_visibility);
-        environment_material_visibility_pipelines = std::move(previous_material_visibility);
-        surface_resolve_pipeline = std::move(previous_surface_resolve);
-        environment_material_resolve_pipelines = std::move(previous_material_resolve);
-        raster_records_pipeline = std::move(previous_raster_records);
-        visibility_clear_pipeline = std::move(previous_visibility_clear);
-        visibility_count_pipeline = std::move(previous_visibility_count);
-        visibility_prefix_pipeline = std::move(previous_visibility_prefix);
-        visibility_scatter_pipeline = std::move(previous_visibility_scatter);
-        particle_pipeline = std::move(previous_particle);
-        ground_ring_pipeline = std::move(previous_ground_ring);
-        ground_add_pipeline = std::move(previous_ground_add);
-        owner_mesh_pipeline = std::move(previous_owner_mesh);
-        vfx_distortion_pipeline = std::move(previous_vfx_distortion);
-        vfx_flash_pipeline = std::move(previous_vfx_flash);
-        vfx_sprite_oit_pipeline = std::move(previous_vfx_sprite_oit);
-        slime_pipeline = std::move(previous_slime);
-        fresnel_shell_pipeline = std::move(previous_fresnel_shell);
-        particle_compute_pipeline = std::move(previous_particle_compute);
-        static_visibility_pipeline = std::move(previous_static_visibility);
-        visibility_retest_pipeline = std::move(previous_visibility_retest);
-        depth_pyramid_init_pipeline = std::move(previous_depth_pyramid_init);
-        depth_pyramid_reduce_pipeline = std::move(previous_depth_pyramid_reduce);
-        skin_cache_pipeline = std::move(previous_skin_cache);
-        skin_bounds_pipeline = std::move(previous_skin_bounds);
-        deferred_pipeline = std::move(previous_deferred);
-        composite_pipeline = std::move(previous_composite);
-        temporal_pipeline = std::move(previous_temporal);
-        bloom_extract_pipeline = std::move(previous_bloom_extract);
-        bloom_downsample_pipeline = std::move(previous_bloom_downsample);
-        bloom_upsample_pipeline = std::move(previous_bloom_upsample);
-        bloom_pipeline = std::move(previous_bloom);
-        tone_map_pipeline = std::move(previous_tone_map);
-        fxaa_pipeline = std::move(previous_fxaa);
-        ui_pipeline = std::move(previous_ui);
-        ui_draw_pipeline = std::move(previous_ui_draw);
-        ui_draw_root = std::move(previous_ui_root);
-        ribbon_update_pipeline = std::move(previous_ribbon_update);
-        ribbon_args_pipeline = std::move(previous_ribbon_args);
-        ribbon_add_pipeline = std::move(previous_ribbon_add);
-        ribbon_oit_pipeline = std::move(previous_ribbon_oit);
-        draw_signature = std::move(previous_signature);
-        indexed_geometry_signature = std::move(previous_indexed_signature);
-        mesh_geometry_signature = std::move(previous_mesh_signature);
-        cluster_root_signature = std::move(previous_cluster_root);
-        cluster_count_pipeline = std::move(previous_cluster_count);
-        cluster_prefix_pipeline = std::move(previous_cluster_prefix);
-        cluster_emit_pipeline = std::move(previous_cluster_emit);
-        cluster_occlusion_pipeline = std::move(previous_cluster_occlusion);
-        cluster_retest_pipeline = std::move(previous_cluster_retest);
-        cluster_scene_pipelines = std::move(previous_cluster_scene);
-        cluster_shadow_pipelines = std::move(previous_cluster_shadow);
-        cluster_visibility_pipelines = std::move(previous_cluster_visibility);
-        cluster_draw_signature = std::move(previous_cluster_draw_signature);
-        cluster_mesh_signature = std::move(previous_cluster_mesh_signature);
-        mesh_pipeline_pairs = std::move(previous_mesh_pipelines);
-        virtual_shadow_indexed_pipelines = std::move(previous_virtual_shadow_indexed);
-        virtual_shadow_mesh_pipelines = std::move(previous_virtual_shadow_mesh);
-        dispatch_signature = std::move(previous_dispatch_signature);
-        ribbon_draw_signature = std::move(previous_ribbon_signature);
-    }
-    else
-    {
-        const auto completed = graph_queue_executor.Completed();
-        if (auto committed = owner.adaptive_shading.Commit(std::move(adaptive), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = owner.screen_overlay.Commit(std::move(screen_overlay), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = owner.decal_surface.Commit(std::move(decals), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = owner.ambient_occlusion.Commit(std::move(ambient), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = owner.subsurface.Commit(std::move(diffusion), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = owner.screen_reflections.Commit(std::move(reflections), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = owner.translucency.Commit(std::move(transparency), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = owner.hdr_post.Commit(std::move(hdr_post), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = owner.light_list.Commit(std::move(light_list), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = owner.virtual_shadows.Commit(std::move(virtual_shadows), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = CommitAdditionalShadows(owner, std::move(additional_shadows)); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = CommitVolumetrics(owner, std::move(volumetrics)); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (auto committed = this->local_probes.Commit(std::move(local_probes), completed); !committed)
-        { frame_submission_faulted = true; return committed; }
-        if (replace_probe)
-            if (auto committed = lighting_probe.Commit(std::move(probe), completed); !committed)
-            { frame_submission_faulted = true; return committed; }
-        if (replace_ltc)
-            if (auto committed = ltc_lut.Commit(std::move(ltc), completed); !committed)
-            { frame_submission_faulted = true; return committed; }
-        if (owner.reconstruction_provider)
-            if (auto committed = owner.reconstruction_guides.Commit(std::move(guides), completed); !committed)
-            { frame_submission_faulted = true; return committed; }
-        if (sdk_presentation.IsEnabled())
-            if (auto committed = presentation_guides.Commit(std::move(presentation), completed); !committed)
-            { frame_submission_faulted = true; return committed; }
-        environment_brdf_lut = std::move(environment_brdf_candidate);
-        WriteEnvironmentBrdfLutDescriptors();
-        if (parameters_changed) CommitMaterialParameters();
-        ++pipeline_revision;
-        for (auto &[id, view] : owned_views) view->ui_draw_content.fill(nullptr);
-        config = std::move(candidate_config);
-        for (auto &[view_id, view] : owned_views)
-        {
-            view->temporal_history_valid = false;
-            view->hzb_history_valid = false;
-        }
-    }
-    return result;
-}
-
-
-#endif
-
 void D3D12Renderer::Impl::FillMaterialFrameConstants(renderer_detail::FrameConstants &constants) const
 {
     static_assert(kAuthoredMaterialNames.size() <= 16);
@@ -1784,7 +1403,6 @@ void D3D12Renderer::Impl::FillMaterialFrameConstants(renderer_detail::FrameConst
         constants.character_material_parameter_bases[group] = {bases[0], bases[1], bases[2], bases[3]};
         constants.character_material_varying_masks[group] = {masks[0], masks[1], masks[2], masks[3]};
     }
-    constants.character_binding_ranges = character_binding_ranges;
     constants.probe_options = lighting_probe.FrameOptions();
     constants.material_sidecar_offsets[0] = {sidecar.offsets[0], sidecar.offsets[1],
                                              sidecar.offsets[2], sidecar.offsets[3]};

@@ -188,6 +188,13 @@ Result D3D12Renderer::Impl::CreatePresentationChain(const RendererConfig &candid
     desc.SampleDesc = {1, 0}; desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.BufferCount = kFrameCount; desc.Scaling = DXGI_SCALING_STRETCH;
     desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD; desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    if (sdk_presentation.PresentationOwner() == SdkPresentationOwner::None)
+    {
+        BOOL allow_tearing = FALSE;
+        if (SUCCEEDED(factory->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,
+                &allow_tearing, sizeof(allow_tearing))) && allow_tearing)
+            desc.Flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+    }
     if (sdk_presentation.PresentationOwner() == SdkPresentationOwner::Streamline)
     {
         if (!streamline_queue_proxy)
@@ -221,6 +228,12 @@ Result D3D12Renderer::Impl::CreatePresentationChain(const RendererConfig &candid
         hr = chain.As(&swap_chain);
         if (FAILED(hr)) return HResultFailure("Query native swap chain", hr);
     }
+    DXGI_SWAP_CHAIN_DESC1 actual_desc{};
+    if (const auto hr = swap_chain->GetDesc1(&actual_desc); FAILED(hr))
+        return HResultFailure("Query created swap chain", hr);
+    swap_chain_flags = actual_desc.Flags;
+    if (const auto hr = factory->MakeWindowAssociation(static_cast<HWND>(candidate.window), DXGI_MWA_NO_ALT_ENTER); FAILED(hr))
+        return HResultFailure("Associate presentation window", hr);
     return ApplyDisplayState(swap_chain.Get(), display);
 }
 
@@ -327,7 +340,6 @@ Result D3D12Renderer::Impl::CreateSwapChainAndTargets(OwnedView &view)
         if (auto created = CreatePresentationChain(config, {view.width, view.height}, candidate_display); !created) return created;
     }
     view.display_state = std::move(candidate_display);
-    factory->MakeWindowAssociation(static_cast<HWND>(config.window), DXGI_MWA_NO_ALT_ENTER);
 
     D3D12_DESCRIPTOR_HEAP_DESC rtv_description{};
     rtv_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
@@ -1596,7 +1608,7 @@ Result D3D12Renderer::Impl::CreateGpuData()
                                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS); !created)
             return created;
     }
-    if (auto prepared = PrepareCharacterBindings(command_list.Get(), geometry_uploads); !prepared) return prepared;
+    if (auto prepared = PrepareMeshMaterialBindings(command_list.Get(), geometry_uploads); !prepared) return prepared;
     result = command_list->Close();
     if (FAILED(result)) return HResultFailure("Close character geometry upload", result);
     return SubmitResidentUtilityUpload(command_list.Get(), frames[0].allocator.Get(), geometry_uploads);
@@ -1918,6 +1930,14 @@ Result D3D12Renderer::Impl::CreateCharacterTextures()
             256, 0, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT,
             graph_owned_vfx_upload_state, nullptr, &vfx_gradient_rows);
         !uploaded) return uploaded;
+    if ((!config.vfx_fresnel_recipes.Rows().empty() &&
+            (!config.vfx_fresnel_recipes.IsAdmitted() ||
+             config.vfx_fresnel_recipes.MaximumGradientRow() >= vfx_gradient_rows)) ||
+        (!config.vfx_mesh_recipes.Rows().empty() &&
+            (!config.vfx_mesh_recipes.IsAdmitted() ||
+             config.vfx_mesh_recipes.MaximumGradientRow() >= vfx_gradient_rows)))
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+            "VFX catalog recipes exceed the resident gradient atlas.");
     vfx_gradient.graph_access = enhanced ? Access::Common : Access::AllShaderRead;
     if (auto uploaded = upload_vfx_package(ribbon_detail, "vfx_ribbon_detail_array.dds",
             256, 64, 9, 8, DXGI_FORMAT_R8_UNORM,

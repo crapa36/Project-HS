@@ -1,4 +1,6 @@
 #include "renderer_local_probe.hpp"
+#include "renderer_probe.hpp"
+#include "renderer_probe_grid_storage.hpp"
 #include "d3d12_resources.hpp"
 
 #include <hs/core/cooked_format.hpp>
@@ -245,8 +247,15 @@ Result LocalProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
 #if !defined(HS_OFFLINE_PROBE_BAKER)
         if(!baked) return Failure(ErrorCode::InvalidArgument,"Runtime requires a baked scene lighting package.");
 #endif
-        for(auto format:{DXGI_FORMAT_R32G32B32A32_FLOAT,DXGI_FORMAT_R32_FLOAT})
+        DXGI_FORMAT cube_format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+#if !defined(HS_OFFLINE_PROBE_BAKER)
+        if(auto r=SelectProbeCubeStorage(device,p.max_radiance,cube_format);!r) return r;
+#endif
+        for(auto format:{cube_format,DXGI_FORMAT_R32_FLOAT})
         {
+#if !defined(HS_OFFLINE_PROBE_BAKER)
+            if(format==cube_format) continue;
+#endif
             D3D12_FEATURE_DATA_FORMAT_SUPPORT support{format}; auto hr=device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,&support,sizeof(support));
             if(FAILED(hr)) return NativeFailure("Query local probe format",hr);
             if(!(support.Support1&D3D12_FORMAT_SUPPORT1_TEXTURECUBE) || !(support.Support1&D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE) ||
@@ -271,11 +280,11 @@ Result LocalProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
             }
         s->capture_end=static_cast<std::uint32_t>(s->probes.size()*6);
 #endif
-        s->sh_bytes=baked?p.cosine_sh.size()+p.cells.size()*80:s->probes.size()*9*16;
         const bool grid_baked=baked && grid.NodeCount();
+        s->sh_bytes=grid_baked?std::size_t(grid.NodeCount())*renderer_detail::kProbeGridPackedCount*sizeof(Float4)+p.cells.size()*80:baked?p.cosine_sh.size():s->probes.size()*9*16;
         const auto layers=static_cast<std::uint32_t>(s->probes.size()*6),edge=s->description.edge;
-        const auto rawDesc=TextureDescription(edge,layers,1,DXGI_FORMAT_R32G32B32A32_FLOAT,(baked?D3D12_RESOURCE_FLAG_NONE:D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET));
-        const auto ggxDesc=TextureDescription(edge,s->reflection_count*6,s->mip_count,DXGI_FORMAT_R32G32B32A32_FLOAT,(baked?D3D12_RESOURCE_FLAG_NONE:D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS));
+        const auto rawDesc=TextureDescription(edge,layers,1,cube_format,(baked?D3D12_RESOURCE_FLAG_NONE:D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET));
+        const auto ggxDesc=TextureDescription(edge,s->reflection_count*6,s->mip_count,cube_format,(baked?D3D12_RESOURCE_FLAG_NONE:D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS));
         const auto distanceDesc=TextureDescription(grid_baked?1:edge,grid_baked?1:layers,1,DXGI_FORMAT_R32_FLOAT,(baked?D3D12_RESOURCE_FLAG_NONE:D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET));
         if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,rawDesc,s->raw);!r) return r;
         if(auto r=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,ggxDesc,s->ggx);!r) return r;
@@ -302,21 +311,19 @@ Result LocalProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
             auto copy=[&](const render_data::TexturePackageView &cube,const CubeUpload &upload) {
                 for(std::size_t i=0;i<cube.subresources.size();++i)
                     for(std::uint32_t y=0;y<cube.subresources[i].height;++y)
-                        std::memcpy(mapped+upload.footprints[i].Offset+std::size_t(y)*upload.footprints[i].Footprint.RowPitch,
-                            cube.subresources[i].bytes.data()+std::size_t(y)*cube.subresources[i].row_pitch,cube.subresources[i].row_pitch);
+                        PackProbeCubeRow(mapped+upload.footprints[i].Offset+std::size_t(y)*upload.footprints[i].Footprint.RowPitch,
+                            cube.subresources[i].bytes.data()+std::size_t(y)*cube.subresources[i].row_pitch,cube.subresources[i].width,cube_format);
             };
             copy(p.radiance,s->raw_upload); copy(p.prefiltered,s->ggx_upload);
             if(!grid_baked) for(std::uint32_t layer=0;layer<layers;++layer) for(std::uint32_t y=0;y<edge;++y)
                 std::memcpy(mapped+s->distance_upload.footprints[layer].Offset+std::size_t(y)*s->distance_upload.footprints[layer].Footprint.RowPitch,
                     p.first_hit_distance.data()+(std::size_t(layer)*edge*edge+std::size_t(y)*edge)*4,std::size_t(edge)*4);
-            auto *sh_data=mapped+s->sh_offset;
-            std::memcpy(sh_data,p.cosine_sh.data(),p.cosine_sh.size());
-            for(std::size_t i=0;i<p.cells.size();++i)
+            if(grid_baked)
             {
-                auto *cell=sh_data+p.cosine_sh.size()+80*i;
-                std::memcpy(cell,p.cells[i].reachable.data(),64);
-                std::memcpy(cell+64,p.cells[i].reflections.data(),8);
+                PackProbeGrid(mapped+s->sh_offset,grid,p.cosine_sh);
+                PackProbeGridCells(mapped+s->sh_offset+std::size_t(grid.NodeCount())*renderer_detail::kProbeGridPackedCount*sizeof(Float4),p.cells);
             }
+            else std::memcpy(mapped+s->sh_offset,p.cosine_sh.data(),p.cosine_sh.size());
         }
         for(std::uint32_t i=0;i<s->probes.size();++i)
         {
@@ -327,11 +334,11 @@ Result LocalProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
                 {v.projection_max.x,v.projection_max.y,v.projection_max.z,v.capture_distance},
                 {float(s->mip_count-1),float(i),1.0f,float(s->reflection_count)},
                 {grid.origin.x,grid.origin.y,grid.origin.z,grid_baked?float(grid.dimensions[0]+256*grid.dimensions[1]+65536*grid.dimensions[2]):0.f},
-                {grid.spacing.x,grid.spacing.y,grid.spacing.z,float(grid.NodeCount())}};
+                {grid.spacing.x,grid.spacing.y,grid.spacing.z,0}};
             std::memcpy(mapped+s->record_offset+std::size_t(i)*kLocalProbeGpuRecordStride,&record,sizeof(record));
         }
         s->upload.resource->Unmap(0,nullptr);
-        D3D12_DESCRIPTOR_HEAP_DESC heap{}; heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; heap.NumDescriptors=10;
+        D3D12_DESCRIPTOR_HEAP_DESC heap{}; heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV; heap.NumDescriptors=kLocalProbeSrvCount*2;
         hr=device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(&s->exports)); if(FAILED(hr)) return NativeFailure("Create local probe exports",hr);
         s->srv_stride=device->GetDescriptorHandleIncrementSize(heap.Type);
         auto cubeView=[&](ID3D12Resource *resource,DXGI_FORMAT format,std::uint32_t mips,D3D12_CPU_DESCRIPTOR_HANDLE handle) {
@@ -344,19 +351,21 @@ Result LocalProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
             v.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; v.Buffer.NumElements=count; v.Buffer.StructureByteStride=stride;
             device->CreateShaderResourceView(resource,&v,handle);
         };
-        cubeView(s->raw.resource.Get(),DXGI_FORMAT_R32G32B32A32_FLOAT,1,s->Export(0));
-        cubeView(s->ggx.resource.Get(),DXGI_FORMAT_R32G32B32A32_FLOAT,s->mip_count,s->Export(1));
+        cubeView(s->raw.resource.Get(),cube_format,1,s->Export(0));
+        cubeView(s->ggx.resource.Get(),cube_format,s->mip_count,s->Export(1));
         bufferView(s->sh.resource.Get(),static_cast<UINT>(s->sh_bytes/16),16,s->Export(2));
         auto distanceView=[&](ID3D12Resource *resource,D3D12_CPU_DESCRIPTOR_HANDLE handle) {
             D3D12_SHADER_RESOURCE_VIEW_DESC v{}; v.Format=DXGI_FORMAT_R32_FLOAT; v.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
             v.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING; v.Texture2DArray.MipLevels=1;
-            v.Texture2DArray.ArraySize=grid_baked?1:layers; device->CreateShaderResourceView(resource,&v,handle);
+            v.Texture2DArray.ArraySize=resource?resource->GetDesc().DepthOrArraySize:1;
+            device->CreateShaderResourceView(resource,&v,handle);
         };
-        distanceView(grid_baked?nullptr:s->distance.resource.Get(),s->Export(3));
+        distanceView(s->distance.resource.Get(),s->Export(3));
         bufferView(s->records.resource.Get(),static_cast<UINT>(s->probes.size()),kLocalProbeGpuRecordStride,s->Export(4));
-        cubeView(nullptr,DXGI_FORMAT_R32G32B32A32_FLOAT,1,s->Export(5)); cubeView(nullptr,DXGI_FORMAT_R32G32B32A32_FLOAT,1,s->Export(6));
-        bufferView(nullptr,1,16,s->Export(7)); distanceView(nullptr,s->Export(8));
-        bufferView(s->disabled_records.resource.Get(),1,kLocalProbeGpuRecordStride,s->Export(9));
+        cubeView(nullptr,cube_format,1,s->Export(kLocalProbeSrvCount));
+        cubeView(nullptr,cube_format,1,s->Export(kLocalProbeSrvCount+1));
+        bufferView(nullptr,1,16,s->Export(kLocalProbeSrvCount+2)); distanceView(nullptr,s->Export(kLocalProbeSrvCount+3));
+        bufferView(s->disabled_records.resource.Get(),1,kLocalProbeGpuRecordStride,s->Export(kLocalProbeSrvCount+4));
 #if defined(HS_OFFLINE_PROBE_BAKER)
         if(!s->package_baked)
             if(auto ready=PrepareCaptureResources(s,reader);!ready) return ready;
@@ -773,7 +782,7 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
         for(UINT i=0;i<count;++i)
             if(retained->passes[i].id!=ids[i]||!graph.BindPass(retained->passes[i].index,ids[i]))
                 return Failure(ErrorCode::InvalidState,"Local probe retained pass sequence changed.");
-        const UINT imports=1+(plan.import_cubes?(s->distance.resource?5:4):0)+(plan.upload?1:0)+(plan.capture_count?1:0);
+        const UINT imports=1+(plan.import_cubes?(4u+bool(s->distance.resource)):0)+(plan.upload?1:0)+(plan.capture_count?1:0);
         for(UINT i=0;i<imports;++i)
             if(!retained->imports[i]||retained->imports[i].value>graph.ResourceCount())
                 return Failure(ErrorCode::InvalidState,"Local probe retained import slot changed.");
@@ -962,7 +971,7 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
     }
 #endif
     if(!retained)graph.SetFinalAccess(disabled,Access::AllShaderRead);
-    for(std::uint32_t i=0;i<kLocalProbeSrvCount;++i) out.srvs[i]=s->Export(5+i);
+    for(std::uint32_t i=0;i<kLocalProbeSrvCount;++i) out.srvs[i]=s->Export(kLocalProbeSrvCount+i);
     out.records=disabled; out.record_resource=s->disabled_records.resource.Get(); out.revisions=in.revisions;
     out.edge=s->description.edge; out.mip_count=s->mip_count; out.total_cube_views=static_cast<std::uint32_t>(s->probes.size()*6);
 #if defined(HS_OFFLINE_PROBE_BAKER)
@@ -971,11 +980,12 @@ Result LocalProbeSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalProbe
     out.update_pending=!plan.published;
     if(plan.published && current)
     {
-        importCubes(); out.radiance=raw; out.prefiltered=ggx; out.irradiance=sh; out.first_hit_distance=distance; out.records=records;
-        out.radiance_resource=s->raw.resource.Get(); out.prefiltered_resource=s->ggx.resource.Get(); out.irradiance_resource=s->sh.resource.Get();
-        out.distance_resource=s->distance.resource.Get(); out.record_resource=s->records.resource.Get();
+        importCubes(); out.radiance=raw; out.prefiltered=ggx; out.sh=sh; out.records=records;
+        out.radiance_resource=s->raw.resource.Get(); out.prefiltered_resource=s->ggx.resource.Get(); out.sh_resource=s->sh.resource.Get();
+        out.record_resource=s->records.resource.Get();
         for(std::uint32_t i=0;i<kLocalProbeSrvCount;++i) out.srvs[i]=s->Export(i);
         out.probe_count=s->reflection_count; out.enabled=true; out.update_pending=false;
+        out.grid_baked=s->package_baked && s->description.grid.NodeCount()!=0;
     }
     if(raw.resource)
     {

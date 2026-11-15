@@ -389,7 +389,7 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
         return HResultFailure("CreateCommandQueue", result);
     }
     if (auto queue_result =
-            graph_queue_executor.Initialize(device.Get(), queue.Get(), kFrameCount,
+            graph_queue_executor.Initialize(device.Get(), queue.Get(), kFrameCount * 2,
                                             copy_queue_timestamp_queries_supported);
         !queue_result)
     {
@@ -651,6 +651,33 @@ Result D3D12Renderer::Impl::PrepareFrameTimestamps(FrameContext &frame, std::uin
     return Result::Success();
 }
 
+#if defined(HS_DEVELOPMENT_TOOLS)
+Result D3D12Renderer::Impl::PrepareTextureUploadTimestamps(FrameContext &frame)
+{
+    auto &timing = frame.texture_upload_timing;
+    if (timing.mapped) return Result::Success();
+    ComPtr<ID3D12QueryHeap> heap;
+    D3D12_QUERY_HEAP_DESC description{};
+    description.Type = D3D12_QUERY_HEAP_TYPE_COPY_QUEUE_TIMESTAMP;
+    description.Count = static_cast<UINT>(timing.passes.size() * 2);
+    auto result = device->CreateQueryHeap(&description, IID_PPV_ARGS(&heap));
+    if (FAILED(result)) return HResultFailure("Create texture upload timestamp heap", result);
+    AllocationResource readback;
+    D3D12MA::ALLOCATION_DESC allocation{};
+    allocation.HeapType = D3D12_HEAP_TYPE_READBACK;
+    if (auto created = CreateAllocation(readback, allocation, BufferDescription(timing.passes.size() * 2 * sizeof(std::uint64_t)),
+            D3D12_RESOURCE_STATE_COPY_DEST); !created) return created;
+    D3D12_RANGE range{0, timing.passes.size() * 2 * sizeof(std::uint64_t)};
+    std::uint64_t *mapped{};
+    result = readback.resource->Map(0, &range, reinterpret_cast<void **>(&mapped));
+    if (FAILED(result)) return HResultFailure("Map texture upload timestamp readback", result);
+    timing.heap = std::move(heap);
+    timing.readback = std::move(readback);
+    timing.mapped = mapped;
+    return Result::Success();
+}
+#endif
+
 GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &frame) const
 {
     GpuPassTimings timings;
@@ -708,6 +735,12 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
         return publish();
     }
 
+#if defined(HS_DEVELOPMENT_TOOLS)
+    const auto regular_pass_count = timings.passes.size();
+    if (frame.texture_upload_timing.recorded)
+        timings.passes.insert(timings.passes.end(), frame.texture_upload_timing.passes.begin(),
+            frame.texture_upload_timing.passes.begin() + frame.texture_upload_timing.count);
+#endif
     constexpr std::uint32_t critical_begin_pass = 37;
     constexpr std::uint32_t critical_end_pass = 38;
     std::size_t begin_slot = timings.passes.size(), end_slot = timings.passes.size();
@@ -751,23 +784,33 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
             continue; // Copy queue timestamps require OPTIONS3 support and Full capture.
         }
         if (!pass.measured) continue;
-        const auto query_slot = frame.timestamp_pass_query_slots[slot];
-        if (query_slot >= frame.timing_layout_capacity)
-        {
-            pass.measured = false;
-            pass_timings_valid = false;
-            continue;
-        }
         const auto queue_index = static_cast<std::size_t>(pass.queue);
-        if (queue_index >= frame.mapped_timestamps.size() || !frame.mapped_timestamps[queue_index])
+        std::uint32_t query_slot{}, capacity = frame.timing_layout_capacity;
+        const std::uint64_t *mapped{};
+        std::uint64_t frequency{};
+#if defined(HS_DEVELOPMENT_TOOLS)
+        if (slot >= regular_pass_count)
+        {
+            query_slot = static_cast<std::uint32_t>(slot - regular_pass_count);
+            capacity = frame.texture_upload_timing.count;
+            mapped = frame.texture_upload_timing.mapped;
+            frequency = pass.timestamp_frequency;
+        }
+        else
+#endif
+        {
+            query_slot = frame.timestamp_pass_query_slots[slot];
+            if (queue_index < frame.mapped_timestamps.size()) mapped = frame.mapped_timestamps[queue_index];
+            frequency = frame.timestamp_frequencies[slot];
+        }
+        if (query_slot >= capacity || !mapped)
         {
             pass.measured = false;
             pass_timings_valid = false;
             continue;
         }
-        const auto begin = frame.mapped_timestamps[queue_index][query_slot * 2];
-        const auto end = frame.mapped_timestamps[queue_index][query_slot * 2 + 1];
-        const auto frequency = frame.timestamp_frequencies[slot];
+        const auto begin = mapped[query_slot * 2];
+        const auto end = mapped[query_slot * 2 + 1];
         pass.begin_ticks = begin;
         pass.end_ticks = end;
         pass.timestamp_frequency = frequency;
@@ -1089,6 +1132,12 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
         for (UINT plane = 0; plane < kTerrainPagePlaneCapacity; ++plane)
             create_null_texture(kTerrainPageDescriptorOffset+HS_TERRAIN_PLANE_SRV+plane,D3D12_SRV_DIMENSION_TEXTURE2D,
                 plane%3==0 ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM);
+        D3D12_UNORDERED_ACCESS_VIEW_DESC terrain_requests_null{};
+        terrain_requests_null.Format=DXGI_FORMAT_R32_UINT;
+        terrain_requests_null.ViewDimension=D3D12_UAV_DIMENSION_BUFFER;
+        terrain_requests_null.Buffer.NumElements=HS_TERRAIN_PAGE_TILE_CAPACITY;
+        device->CreateUnorderedAccessView(nullptr,nullptr,&terrain_requests_null,
+            cpu(kTerrainPageDescriptorOffset+HS_TERRAIN_REQUEST_DESCRIPTOR));
         constexpr std::array post_table_offsets{
             0u, kToneMapInputDescriptorOffset, kFxaaInputDescriptorOffset};
         for (const auto table_offset : post_table_offsets)

@@ -99,7 +99,6 @@ class PresentationGuides
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
     // Called only after all old submissions have reliably completed.
-    void SwapState(PresentationGuides &other) noexcept { impl_.swap(other.impl_); }
   private:
     [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const PresentationGuidesInputs &,
         PresentationGuidesOutputs &,std::uint32_t,std::uint32_t,std::uint32_t,

@@ -383,7 +383,6 @@ class VirtualShadowSystem
     [[nodiscard]] std::array<std::uint32_t,3> ActiveVirtualSides() const noexcept;
     [[nodiscard]] std::array<const AllocationResource *, 5> DiagnosticResources() const noexcept;
     // Called only after all old submissions have reliably completed.
-    void SwapState(VirtualShadowSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
     [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const VirtualShadowInputs &,
         const VirtualShadowFramePlan &,VirtualShadowOutputs &,VirtualShadowLayout *,

@@ -142,7 +142,7 @@ void Atlas(R &r,VfxMeshAtlasDescriptor &v)
 
 std::vector<std::byte> EncodeRendererCatalog(RendererCatalogView v)
 {
-    CanonicalBytes b("project_hs.renderer_catalog",3);
+    CanonicalBytes b("project_hs.renderer_catalog",kRendererCatalogVersion);
     b.Sequence(v.bulks,[](CanonicalBytes &out,const auto &x){out.Scalar(x.asset_id.value);content_identity::Bulk(out,x.range);});
     b.Sequence(v.textures,content_identity::Texture); b.Sequence(v.geometry,content_identity::Geometry);
     b.Sequence(v.materials,content_identity::Material); b.Sequence(v.characters,content_identity::Character);
@@ -252,7 +252,7 @@ Result DecodeRendererCatalog(std::span<const std::byte> bytes,std::uint64_t pack
 {
     try
     {
-        R r(bytes,"project_hs.renderer_catalog",3);
+        R r(bytes,"project_hs.renderer_catalog",kRendererCatalogVersion);
         auto next=std::shared_ptr<RendererCatalogData>(new RendererCatalogData);
         Rows(r,next->bulks,60,[](R &in,RendererBulkDescriptor &x){in.Fields(x.asset_id.value);Bulk(in,x.range);});
         Rows(r,next->texture_storage,48,Texture); Rows(r,next->geometry_storage,100,Geometry);

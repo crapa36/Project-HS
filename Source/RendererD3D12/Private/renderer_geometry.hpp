@@ -62,6 +62,7 @@ struct GpuGeometryDrawRecord
     std::uint32_t page_slot{}, first_index{}, index_count{}, first_meshlet{};
     std::uint32_t meshlet_count{}, visible_base{}, instance_count{}, flags{};
     std::uint32_t triangle_offset{}, remap_offset{}, geometry_generation{}, lod{};
+    // Keep the 64-byte wire record: low8 mesh semantic, high24 material-set header.
     std::uint32_t mesh_id{}, reserved0{}, reserved1{}, reserved2{};
 };
 static_assert(sizeof(GpuGeometryDrawRecord) == 64);

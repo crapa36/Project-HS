@@ -48,7 +48,7 @@ bool Valid(const VfxEntitySurfaceCommand &c) noexcept
 }
 } // namespace
 
-Result EntitySurfaceFrame::Build(VfxEntitySurfaceInputs commands)
+Result EntitySurfaceFrame::Build(VfxEntitySurfaceInputs commands, std::span<const RenderInstance> instances)
 {
     bindings_.clear();
     bytes_.clear();
@@ -57,6 +57,10 @@ Result EntitySurfaceFrame::Build(VfxEntitySurfaceInputs commands)
     ordered.reserve(commands.size());
     for (const auto &command : commands)
     {
+        if (std::ranges::none_of(instances, [&](const auto &instance) {
+                return instance.stable_id == command.render_instance_id &&
+                    instance.mesh >= RenderMesh::BossFiveMinute && instance.mesh <= RenderMesh::BossFinal;
+            })) continue;
         if (!Valid(command)) return Invalid("Invalid actual entity surface command or owner clock.");
         ordered.push_back(&command);
     }

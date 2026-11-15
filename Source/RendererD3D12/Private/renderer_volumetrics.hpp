@@ -22,10 +22,10 @@ using VolumetricFrameTableBuilder = std::function<Result(D3D12_CPU_DESCRIPTOR_HA
 using VolumetricShaderReader = std::function<Result(std::string_view, std::vector<std::byte> &)>;
 // Volume descriptor block, space24: b0 at0, t0..13 at1..14, u0..8 at15..23,
 // hero metadata t14 at24, actual STBN Texture2DArray t15 at25,
-// authored RGBA8 Texture3D t16 at26; local SH and records t2/t4 space23 at27/28.
+// authored RGBA8 Texture3D t16 at26; probe SH/records space23 t2/t4 at27/28.
 inline constexpr std::uint32_t kVolumetricDescriptorCount=VmExternalGradient;
-// Compact per-frame table for the volume-owned root signature. The first 29
-// descriptors retain the suffix layout above; remaining entries are imported
+// Compact per-frame table for the volume-owned root signature. Volume-owned
+// descriptors retain the prefix layout above; remaining entries are imported
 // frame inputs used by the volume shaders.
 inline constexpr std::uint32_t kVolumetricFrameDescriptorCount=VmExternalLocalShadow+VmExternalCountLocalShadow;
 inline constexpr std::uint32_t kVolumetricGradientOffset=VmExternalGradient;
@@ -62,11 +62,10 @@ struct VolumetricHeroState
     VolumetricHeroVolume gpu;
     std::array<float,16> local_to_world;
     std::array<float,6> bounds;
-    std::array<std::uint64_t,3> revisions;
     bool operator==(const VolumetricHeroState &other) const
     {
         return identity==other.identity && std::memcmp(&gpu,&other.gpu,sizeof(gpu))==0 &&
-            local_to_world==other.local_to_world && bounds==other.bounds && revisions==other.revisions;
+            local_to_world==other.local_to_world && bounds==other.bounds;
     }
 };
 class PreparedVfxHeroVolumes
@@ -114,7 +113,7 @@ struct VolumetricInputs
     LightListOutputs lights;
     VirtualShadowOutputs shadows; // If enabled, every one of its five reads is declared.
     LocalShadowOutputs local_shadows; // Actual world-query Point/Spot atlas, all five resources or absent.
-    VolumetricGuide probe_irradiance, probe_records;
+    VolumetricGuide probe_sh, probe_records;
     bool probe_ready{};
     VolumetricCompactShadow compact_shadow;
     std::span<const VolumetricVolume> volumes;
@@ -160,7 +159,7 @@ struct VolumetricLayout
     // Immutable graph declarations only. Native owners, descriptors and callbacks
     // are supplied afresh for each submission.
     std::uint64_t storage_generation{};
-    std::array<ResourceVersion, 24> input_versions{};
+    std::array<ResourceVersion, 22> input_versions{};
     std::array<ResourceHandle, 14> imports{};
     std::array<ResourceVersion, 6> output_versions{};
     std::array<std::uint32_t, 7> pass_index{}; // 170..175, optional 176
@@ -217,7 +216,6 @@ class VolumetricSystem
     void ResetHistory() noexcept;
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
-    void SwapState(VolumetricSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
     [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const VolumetricInputs &,
         VolumetricOutputs &,VolumetricLayout *,const VolumetricLayout *);

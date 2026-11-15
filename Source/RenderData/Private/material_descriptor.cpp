@@ -201,7 +201,7 @@ void ValidateMaterialDescriptor(const MaterialDescriptor &value, std::span<const
     else if (value.kind == MaterialKind::Hero)
     {
         Require(!value.flags && value.textures.empty() && program_mask == (value.domain == CharacterMaterialDomain::Translucent ? (1u<<8) : 240u) &&
-                bool(value.surface.capability_mask & 256u) == (value.domain == CharacterMaterialDomain::Translucent) &&
+                (!(value.surface.capability_mask & 256u) || value.domain == CharacterMaterialDomain::Translucent) &&
                 (value.domain != CharacterMaterialDomain::Translucent || !(value.surface.capability_mask & 128u)), "Hero domain or adapter bindings mismatch");
     }
     else Require(!value.flags && value.domain == CharacterMaterialDomain::Opaque && value.defaults.size() >= 2 &&

@@ -68,7 +68,8 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
     material_parameter_candidate_bases.fill(0);
     for (auto &layout : material_parameter_candidate_layouts) layout.clear();
     material_parameter_upload.Reset();
-    std::vector<render_data::MaterialParameterSlot> slots;
+    auto &slots = material_parameter_candidate_slots;
+    slots.clear();
     try
     {
         const auto material_count = scope == MaterialPreparationScope::StaticEnvironment
@@ -132,20 +133,59 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
         if (scope == MaterialPreparationScope::Resident)
             if (auto prepared = PrepareDecalMaterialParameters(candidate, require_compatible_layout, slots); !prepared)
                 return prepared;
+
+        const auto max_slot_count = scope == MaterialPreparationScope::StaticEnvironment
+            ? 64 * kAuthoredMaterialNames.size()
+            : 64 * (kResidentMaterialCount + render_data::kDecalMaterialNames.size());
+        if (slots.empty() || slots.size() > max_slot_count)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                                   "Invalid material parameter slot count.");
+        material_parameter_candidate_slot_count = static_cast<std::uint32_t>(slots.size());
+        for (std::size_t ordinal = 0; ordinal < kResidentMaterialCount; ++ordinal)
+        {
+            bool changed = true;
+            if (material_parameters.resource &&
+                material_parameter_counts[ordinal] == material_parameter_candidate_counts[ordinal] &&
+                material_parameter_bases[ordinal] == material_parameter_candidate_bases[ordinal] &&
+                material_parameter_layouts[ordinal] == material_parameter_candidate_layouts[ordinal])
+            {
+                const auto old_slots = std::span<const render_data::MaterialParameterSlot>(
+                    material_parameter_slots).subspan(material_parameter_bases[ordinal],
+                        material_parameter_counts[ordinal]);
+                const auto next_slots = std::span<const render_data::MaterialParameterSlot>(
+                    material_parameter_candidate_slots).subspan(material_parameter_candidate_bases[ordinal],
+                        material_parameter_candidate_counts[ordinal]);
+                changed = !std::ranges::equal(old_slots, next_slots);
+            }
+            material_parameter_candidate_changed[ordinal] = changed;
+        }
+        Sha256Stream generation_hash;
+        generation_hash.Add(std::as_bytes(std::span(material_parameter_candidate_bases).first(
+            kAuthoredMaterialNames.size())));
+        generation_hash.Add(std::as_bytes(std::span(material_parameter_candidate_counts).first(
+            kAuthoredMaterialNames.size())));
+        for (std::size_t ordinal = 0; ordinal < kAuthoredMaterialNames.size(); ++ordinal)
+        {
+            const auto &layout = material_parameter_candidate_layouts[ordinal];
+            const auto layout_size = static_cast<std::uint64_t>(layout.size());
+            generation_hash.Add(std::as_bytes(std::span(&layout_size, 1)));
+            generation_hash.Add(std::as_bytes(std::span(layout.data(), layout.size())));
+        }
+        const auto authored_end = material_parameter_candidate_bases[kAuthoredMaterialNames.size() - 1] +
+            material_parameter_candidate_counts[kAuthoredMaterialNames.size() - 1];
+        generation_hash.Add(std::as_bytes(std::span(material_parameter_candidate_slots).first(authored_end)));
+        material_parameter_candidate_generation_digest = generation_hash.Finish();
+        const auto begin = material_parameter_candidate_bases[kTerrainMaterialOrdinal];
+        const auto end = material_parameter_candidate_bases[kTerrainMaterialOrdinal + 1];
+        Sha256Stream hash;
+        hash.Add(std::as_bytes(std::span(material_parameter_candidate_slots).subspan(begin, end - begin)));
+        material_parameter_candidate_terrain_digest = hash.Finish();
     }
     catch (const std::exception &error)
     {
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Invalid material parameter package: " + std::string(error.what()));
     }
-    const auto max_slot_count = scope == MaterialPreparationScope::StaticEnvironment
-        ? 64 * kAuthoredMaterialNames.size()
-        : 64 * (kResidentMaterialCount + render_data::kDecalMaterialNames.size());
-    if (slots.empty() || slots.size() > max_slot_count)
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                               "Invalid material parameter slot count.");
-    material_parameter_candidate_slot_count = static_cast<std::uint32_t>(slots.size());
-    material_parameter_candidate_slots = slots;
     // The render thread owns publication. Drain readers before reusing the
     // initialization command allocator; old table/descriptors stay live.
     if (auto waited = WaitForGpu(); !waited) return waited;
@@ -198,58 +238,21 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
 void D3D12Renderer::Impl::CommitMaterialParameters() noexcept
 {
     for (std::size_t ordinal = 0; ordinal < kResidentMaterialCount; ++ordinal)
-    {
-        bool changed = true;
-        if (material_parameters.resource &&
-            material_parameter_counts[ordinal] == material_parameter_candidate_counts[ordinal] &&
-            material_parameter_bases[ordinal] == material_parameter_candidate_bases[ordinal] &&
-            material_parameter_layouts[ordinal] == material_parameter_candidate_layouts[ordinal])
-        {
-            const auto old_slots = std::span<const render_data::MaterialParameterSlot>(
-                material_parameter_slots).subspan(material_parameter_bases[ordinal],
-                    material_parameter_counts[ordinal]);
-            const auto next_slots = std::span<const render_data::MaterialParameterSlot>(
-                material_parameter_candidate_slots).subspan(material_parameter_candidate_bases[ordinal],
-                    material_parameter_candidate_counts[ordinal]);
-            changed = !std::ranges::equal(old_slots, next_slots);
-        }
-        if (changed)
+        if (material_parameter_candidate_changed[ordinal])
             material_parameter_revisions[ordinal] = material_parameter_revision + 1u;
-    }
-    Sha256Stream generation_hash;
-    generation_hash.Add(std::as_bytes(std::span(material_parameter_candidate_bases).first(
-        kAuthoredMaterialNames.size())));
-    generation_hash.Add(std::as_bytes(std::span(material_parameter_candidate_counts).first(
-        kAuthoredMaterialNames.size())));
-    for (std::size_t ordinal = 0; ordinal < kAuthoredMaterialNames.size(); ++ordinal)
-    {
-        const auto &layout = material_parameter_candidate_layouts[ordinal];
-        const auto layout_size = static_cast<std::uint64_t>(layout.size());
-        generation_hash.Add(std::as_bytes(std::span(&layout_size, 1)));
-        generation_hash.Add(std::as_bytes(std::span(layout.data(), layout.size())));
-    }
-    const auto authored_end = material_parameter_candidate_bases[kAuthoredMaterialNames.size() - 1] +
-        material_parameter_candidate_counts[kAuthoredMaterialNames.size() - 1];
-    generation_hash.Add(std::as_bytes(std::span(material_parameter_candidate_slots).first(authored_end)));
-    const auto generation_parameters = generation_hash.Finish();
     if (!generation_material_parameters_valid)
     {
-        generation_material_parameters = generation_parameters;
+        generation_material_parameters = material_parameter_candidate_generation_digest;
         generation_material_parameters_valid = true;
     }
-    material_parameters_match_generation = generation_parameters == generation_material_parameters;
-
-    const auto begin = material_parameter_candidate_bases[kTerrainMaterialOrdinal];
-    const auto end = material_parameter_candidate_bases[kTerrainMaterialOrdinal + 1];
-    Sha256Stream hash;
-    hash.Add(std::as_bytes(std::span(material_parameter_candidate_slots).subspan(begin, end - begin)));
-    const auto parameters = hash.Finish();
+    material_parameters_match_generation =
+        material_parameter_candidate_generation_digest == generation_material_parameters;
     if (!terrain_generation_parameters_valid)
     {
-        terrain_generation_parameters = parameters;
+        terrain_generation_parameters = material_parameter_candidate_terrain_digest;
         terrain_generation_parameters_valid = true;
     }
-    const bool matches = parameters == terrain_generation_parameters;
+    const bool matches = material_parameter_candidate_terrain_digest == terrain_generation_parameters;
     terrain_parameters_changed |= matches != terrain_parameters_match;
     terrain_parameters_match = matches;
     // Preparation completed and drained all readers. Publishing every frame

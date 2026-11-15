@@ -1,6 +1,7 @@
 #pragma once
 
 #include "render_graph.hpp"
+#include <hs/render_data/scene_probe.hpp>
 
 #include <DirectXMath.h>
 #include <d3d12.h>
@@ -12,6 +13,14 @@
 
 namespace hs
 {
+[[nodiscard]] Result SelectProbeCubeStorage(ID3D12Device *, float max_radiance, DXGI_FORMAT &);
+void PackProbeCubeRow(std::byte *destination, const std::byte *source, std::uint32_t width, DXGI_FORMAT);
+
+void PackProbeGrid(std::byte *destination,
+    const render_data::SceneIrradianceGrid &, std::span<const std::byte> coefficients);
+void PackProbeGridCells(std::byte *destination, std::span<const render_data::SceneProbeCell>);
+
+
 struct LightingProbeStorage;
 class LightingProbeCandidate
 {
@@ -66,7 +75,6 @@ class LightingProbeSystem
     [[nodiscard]] DirectX::XMFLOAT4 FrameOptions() const noexcept;
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
     // Called only after all old submissions have reliably completed.
-    void SwapState(LightingProbeSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
     [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const CompletionSet &,
         LightingProbeOutputs &,LightingProbeLayout *,const LightingProbeLayout *);

@@ -33,8 +33,6 @@ class RendererDiagnosticsRecorder
         std::uint32_t view_id = 0) noexcept;
     void RecordCompleted(const GpuPassTimings &) noexcept;
     [[nodiscard]] bool HasCompleted(std::uint64_t frame_id, std::uint32_t view_id) const noexcept;
-    [[nodiscard]] CompletedRenderCadence RecentCompletedMainCadence(
-        std::uint32_t maximum_intervals) const noexcept;
     // Observe while old and candidate resources coexist. This reports actual
     // observed transaction boundaries, never an interpolated or reserved peak.
     void ObserveTransition(const RendererDiagnosticsMemory &) noexcept;
@@ -57,13 +55,6 @@ class RendererDiagnosticsRecorder
         bool measured{}, clock_calibrated{}, name_truncated{};
     };
     std::array<RendererDiagnosticsFrame, kRendererDiagnosticsFrameCapacity> frames_{};
-    struct MainCadenceSample
-    {
-        std::uint64_t sequence{}, frame_id{}, submit_qpc{}, qpc_frequency{};
-        bool presented{}, validation{}, gpu_validation{};
-    };
-    std::array<MainCadenceSample, kRendererDiagnosticsFrameCapacity> main_cadence_{};
-    std::uint64_t latest_main_cadence_sequence_{};
     std::uint64_t rendered_main_sequence_{};
     std::array<Pass, kRendererDiagnosticsPassCapacity> passes_{};
     std::size_t next_frame_{}, frame_count_{}, pass_count_{};

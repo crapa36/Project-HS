@@ -7,7 +7,8 @@
 
 // The native and shader names share one field order and default contract.
 #define HS_AO_FIELDS(X) \
- X(Matrix,inverse_projection,AoInverseProjection,Zero) \
+ X(Float4,view_xy,AoViewXY,Zero) \
+ X(Float4,view_depth,AoViewDepth,Zero) \
  X(Matrix,world_to_view,AoWorldToView,Zero) \
  X(Matrix,projection,AoProjection,Zero) \
  X(Float4,render_size,AoRenderSize,Zero) \
@@ -103,9 +104,9 @@ inline constexpr UINT kAoRegisterSpace = HS_AO_SPACE, kAoConstantsRegister = HS_
 #define HS_AO_ADAPTIVE_CONSTANTS(name,slot,space,...) inline constexpr UINT kAoAdaptiveRegister = slot, kAoAdaptiveSpace = space, AoSrv##name = slot;
 HS_AO_ADAPTIVE(HS_AO_ADAPTIVE_CONSTANTS)
 #undef HS_AO_ADAPTIVE_CONSTANTS
-static_assert(sizeof(AmbientOcclusionConstants) == 368);
-static_assert(offsetof(AmbientOcclusionConstants, render_size) == 192);
-static_assert(offsetof(AmbientOcclusionConstants, sample_counts) == 336);
+static_assert(sizeof(AmbientOcclusionConstants) == 336);
+static_assert(offsetof(AmbientOcclusionConstants, render_size) == 160);
+static_assert(offsetof(AmbientOcclusionConstants, sample_counts) == 304);
 #else
 #define HS_AO_TYPE_Matrix row_major float4x4
 #define HS_AO_TYPE_Float4 float4

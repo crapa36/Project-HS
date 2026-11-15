@@ -135,7 +135,7 @@ Result SdkPresentation::Resolve(ID3D12Device *device, const RendererPresentation
     };
     const auto wants = [&](std::string_view provider) { return request.provider.value == "auto" || request.provider.value == provider; };
     const auto reflex = [&]() -> Result {
-        if (!sl || !sl->Initialized()) return Failure(ErrorCode::InvalidState, "The shared Reflex session was not initialized before device creation.");
+        if (!sl) return Failure(ErrorCode::InvalidState, "The shared Reflex session was not initialized before device creation.");
         StreamlineReflexState state;
         if (auto result = sl->QueryReflexState(state); !result) return result;
         if (!state.low_latency_available) return Failure(ErrorCode::InvalidState, "Native Reflex state reports low latency unavailable.");
@@ -157,7 +157,7 @@ Result SdkPresentation::Resolve(ID3D12Device *device, const RendererPresentation
     if (request.mode != GraphicsFrameGenerationMode::Off && wants("dlss"))
     {
         StreamlineFrameGenerationCapabilities cap;
-        Result result = sl && sl->Initialized() ? sl->QueryFrameGenerationCapabilities(cap) :
+        Result result = sl ? sl->QueryFrameGenerationCapabilities(cap) :
             Failure(ErrorCode::InvalidState, "DLSS-G shared session was not initialized before device creation.");
         if (result && (display.output_extent.width < cap.minimum_dimension || display.output_extent.height < cap.minimum_dimension ||
             (display.vsync && !cap.vsync_supported) ||
@@ -251,7 +251,8 @@ Result SdkPresentation::Resolve(ID3D12Device *device, const RendererPresentation
         if (!result && (wants("xess") || request.provider.value == "auto")) result = xell(false);
         if (!result)
         {
-            reject(std::string(result.Message()));
+            reject(std::string(result.Message()), next->xell ? next->xell->Availability() :
+                sl ? sl->Availability(StreamlineFeature::Reflex) : ReconstructionAvailability::Unavailable);
             if (next->xell)
             {
                 if (auto reset = next->xell->ResetAfterCompletion(true); !reset) { impl_ = std::move(next); return reset; }
@@ -264,7 +265,7 @@ Result SdkPresentation::Resolve(ID3D12Device *device, const RendererPresentation
         status_.availability = rejectedAvailability;
     if (request.low_latency == GraphicsAutoToggle::On && next->latency == SdkLatencyOwner::None)
     {
-        status_.availability = "unavailable";
+        status_.availability = rejectedAvailability;
         next->owner = SdkPresentationOwner::None; status_.effective_provider.value = "off";
     }
     status_.fallback_reason = std::move(rejected);

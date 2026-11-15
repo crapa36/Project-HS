@@ -90,7 +90,6 @@ RendererOptions ProjectRendererOptions(const GraphicsSettings &graphics,
     options.foliage_quality = graphics.foliage_quality;
     options.material_quality = graphics.material_quality;
     options.pom_quality = graphics.pom_quality;
-    options.lighting_quality = graphics.lighting_quality;
     options.ao_mode = graphics.ao_mode;
     options.ao_quality = graphics.ao_quality;
     options.contact_shadows = graphics.contact_shadows;
@@ -146,7 +145,6 @@ void ApplyProjectedRendererOptions(RendererConfig &config, const RendererOptions
     config.foliage_quality = options.foliage_quality;
     config.material_quality = options.material_quality;
     config.pom_quality = options.pom_quality;
-    config.lighting_quality = options.lighting_quality;
     config.adaptive_shading = options.adaptive_shading;
     config.screen_overlay_intensity = options.screen_overlay_intensity;
     config.ao_mode = options.ao_mode;
@@ -276,7 +274,6 @@ GraphicsSettings ActualAppliedGraphics(const GraphicsSettings &requested,
     actual.foliage_quality = config.foliage_quality;
     actual.material_quality = config.material_quality;
     actual.pom_quality = config.pom_quality;
-    actual.lighting_quality = config.lighting_quality;
     actual.shadow_mode = lighting.active.shadow_mode;
     actual.shadow_quality = config.shadow_quality;
     actual.shadow_distance_m = config.shadow_distance_m;

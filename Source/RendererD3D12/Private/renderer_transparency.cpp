@@ -114,7 +114,7 @@ struct LayeredTranslucencyTargets
     ComPtr<ID3D12Device> device;
     ComPtr<D3D12MA::Allocator> allocator;
     ComPtr<ID3D12RootSignature> root;
-    std::array<ComPtr<ID3D12PipelineState>, 6> pipelines;
+    std::array<ComPtr<ID3D12PipelineState>, 5> pipelines;
 #if defined(HS_DEVELOPMENT_TOOLS)
     std::unique_ptr<TranslucencyDiagnosticsCapture> work;
 #endif
@@ -204,7 +204,7 @@ struct LayeredTranslucencyTargets
         LayeredTranslucencyPhase semantic, ID3D12Resource *background)
     {
         const auto constantSlot = inputs.frame_slot * kLayeredTranslucencyPhaseCount + phase;
-        const std::array<std::uint32_t, 4> values{layer, inputs.single_layer_water ? 1u : layer_count, static_cast<std::uint32_t>(semantic), 0};
+        const std::array<std::uint32_t, 4> values{layer, layer_count, static_cast<std::uint32_t>(semantic), 0};
         std::memcpy(mapped + SIZE_T(constantSlot) * kConstantStride, values.data(), sizeof(values));
         Srv(background, kColor, Cpu(inputs.frame_slot, phase, 1 + HS_TRANSLUCENCY_SRV_BACKGROUND));
         auto destination = inputs.table_cpu;
@@ -223,7 +223,6 @@ struct TranslucencySystem::Impl
     RendererTranslucencyDiagnosticsStatus retired_work;
     std::uint32_t diagnostic_color_index{};
     bool diagnostic_submission_valid{};
-    bool diagnostic_single_layer_water{};
 #endif
     struct Import { AllocationResource *allocation{}; ResourceHandle handle; };
     struct Pending
@@ -258,17 +257,14 @@ std::array<const AllocationResource *, 15> TranslucencySystem::DiagnosticResourc
         &targets.front[0], &targets.guides[1], &targets.guides[2],
         &targets.guides[3], &targets.identity[0], &targets.unpeeled_fragment_count, &targets.guides[5],
         &targets.color[impl_->diagnostic_color_index]};
-    if (!impl_->diagnostic_single_layer_water)
+    if (targets.layer_count > 1)
     {
-        if (targets.layer_count > 1)
-        {
-            resources[8] = &targets.front[1];
-            resources[14] = &targets.identity[1];
-        }
-        for (std::uint32_t layer = 0; layer < targets.layer_count; ++layer)
-            resources[9 + layer] = &targets.optical_component[layer];
-        resources[13] = &targets.exit;
+        resources[8] = &targets.front[1];
+        resources[14] = &targets.identity[1];
     }
+    for (std::uint32_t layer = 0; layer < targets.layer_count; ++layer)
+        resources[9 + layer] = &targets.optical_component[layer];
+    resources[13] = &targets.exit;
     return resources;
 }
 #endif
@@ -388,16 +384,15 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
     for (std::uint32_t index = 0; index < next->pipelines.size(); ++index)
     {
 #if defined(HS_DEVELOPMENT_TOOLS)
-        const auto product = index == 5 ? std::string_view{"render/shader/single_layer_water_ps.dxil"} :
-            (captureTranslucencyDiagnostics ? kWorkPixelProducts[index] : kPixelProducts[index]);
+        const auto product = captureTranslucencyDiagnostics ? kWorkPixelProducts[index] : kPixelProducts[index];
 #else
-        const auto product = index == 5 ? std::string_view{"render/shader/single_layer_water_ps.dxil"} : kPixelProducts[index];
+        const auto product = kPixelProducts[index];
 #endif
         std::vector<std::byte> pixel;
         if (auto read = readShader(product, pixel); !read) return read;
         if (pixel.empty()) return Failure(ErrorCode::TaskFailed, "Translucency transparency pixel product is empty: " + std::string(product));
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pipeline{};
-        const auto &phase_vertex = index == 3 || index == 5 ? vertex : current_vertex;
+        const auto &phase_vertex = index == 3 ? vertex : current_vertex;
         pipeline.pRootSignature = root; pipeline.VS = {phase_vertex.data(), phase_vertex.size()}; pipeline.PS = {pixel.data(), pixel.size()};
         pipeline.SampleMask = UINT_MAX; pipeline.SampleDesc.Count = 1;
         pipeline.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
@@ -465,17 +460,6 @@ Result TranslucencySystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
                 pipeline.BlendState.RenderTarget[1 + target].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
             }
             pipeline.BlendState.IndependentBlendEnable = TRUE;
-        }
-        else if (index == 5)
-        {
-            pipeline.DepthStencilState.DepthEnable = TRUE;
-            pipeline.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
-            pipeline.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_GREATER;
-            pipeline.DSVFormat = DXGI_FORMAT_D32_FLOAT;
-            pipeline.NumRenderTargets = 2 + static_cast<UINT>(kCompositeGuideIndices.size());
-            pipeline.RTVFormats[0] = kColor; pipeline.RTVFormats[1] = DXGI_FORMAT_R32G32_UINT;
-            for (std::uint32_t target = 0; target < kCompositeGuideIndices.size(); ++target)
-                pipeline.RTVFormats[2 + target] = kGuideFormats[kCompositeGuideIndices[target]];
         }
         else { pipeline.NumRenderTargets = 1; pipeline.RTVFormats[0] = kColor; }
         if (index == 3 || index == 4)
@@ -599,7 +583,6 @@ Result TranslucencySystem::Commit(LayeredTranslucencyCandidate &&candidate, cons
 #if defined(HS_DEVELOPMENT_TOOLS)
     impl_->diagnostic_color_index = 0;
     impl_->diagnostic_submission_valid = false;
-    impl_->diagnostic_single_layer_water = false;
 #endif
     return Result::Success();
 }
@@ -639,8 +622,6 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
 #else
     constexpr bool capture_work = false;
 #endif
-    if (inputs.single_layer_water && (capture_work || use_occupancy))
-        return Failure(ErrorCode::InvalidArgument, "Single-layer water cannot use layered diagnostics or occupancy queries.");
     const auto same_version = [](ResourceVersion a, ResourceVersion b) {
         return a.resource.value == b.resource.value && a.resource.kind == b.resource.kind &&
             a.ordinal == b.ordinal;
@@ -660,7 +641,6 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         if (retained->target_generation != storage->generation ||
             retained->layer_count != storage->layer_count ||
             retained->capture_work != capture_work ||
-            retained->single_layer_water != inputs.single_layer_water ||
             retained->occupancy != use_occupancy ||
             !same_version(inputs.previous_instances, retained->previous_instances) ||
             !same_version(inputs.previous_skin, retained->previous_skin) ||
@@ -674,11 +654,11 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             return index < graph.PassCount() && graph.DeclaredPassId(index) == id &&
                 graph.BindPass(index, id).has_value();
         };
-        for (std::uint32_t layer = 0; !inputs.single_layer_water && layer < storage->layer_count; ++layer)
+        for (std::uint32_t layer = 0; layer < storage->layer_count; ++layer)
             if (!pass_matches(retained->front_pass[layer], 90 + layer * 2))
                 return Failure(ErrorCode::InvalidState, "Translucency retained peel pass changed.");
-        if ((!inputs.single_layer_water && (!pass_matches(retained->exit_pass, 97) ||
-            !pass_matches(retained->tail_pass, 99))) ||
+        if (!pass_matches(retained->exit_pass, 97) ||
+            !pass_matches(retained->tail_pass, 99) ||
             !pass_matches(retained->unpeeled_fragment_count_clear_pass, 98))
             return Failure(ErrorCode::InvalidState, "Translucency retained unpeeled_fragment_count pass changed.");
     }
@@ -718,7 +698,6 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         layout->target_generation = storage->generation;
         layout->layer_count = storage->layer_count;
         layout->capture_work = capture_work;
-        layout->single_layer_water = inputs.single_layer_water;
         layout->inputs = {inputs.opaque_depth.version, inputs.hdr.version,
             inputs.accumulation.version, inputs.revealage.version};
         layout->peel_reads.assign(inputs.peel_reads.begin(), inputs.peel_reads.end());
@@ -780,13 +759,11 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
             layout->identity[layer] = pending.identity[layer].resource;
             layout->optical_component[layer] = pending.optical_component[layer].resource;
         }
-        if (!inputs.single_layer_water)
-            storage->FillTable(inputs, layer, layer, LayeredTranslucencyPhase::Front, inputs.hdr.resource);
+        storage->FillTable(inputs, layer, layer, LayeredTranslucencyPhase::Front, inputs.hdr.resource);
     }
     pending.exit = import(storage->exit, "Translucency.ExitDepth", retained ? retained->exit : TextureHandle{});
     if (layout) layout->exit = pending.exit.resource;
-    if (!inputs.single_layer_water)
-        storage->FillTable(inputs, 4, 0, LayeredTranslucencyPhase::Exit, inputs.hdr.resource);
+    storage->FillTable(inputs, 4, 0, LayeredTranslucencyPhase::Exit, inputs.hdr.resource);
     for (std::uint32_t index = 0; index < storage->color.size(); ++index)
     {
         pending.color[index] = import(storage->color[index], "Translucency.CompositeHDR",
@@ -822,18 +799,15 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
         }
     if (!imports_valid)
         return Failure(ErrorCode::InvalidState, "Translucency retained import bindings changed.");
-    const auto clear_phase = inputs.single_layer_water ? kCompositePhase : kTailPhase;
-    storage->FillTable(inputs, clear_phase, 0,
-        inputs.single_layer_water ? LayeredTranslucencyPhase::Composite : LayeredTranslucencyPhase::Tail,
-        inputs.hdr.resource);
+    constexpr auto clear_phase = kTailPhase;
+    storage->FillTable(inputs, clear_phase, 0, LayeredTranslucencyPhase::Tail, inputs.hdr.resource);
     auto readScene = [&](PassBuilder &pass, bool shading, Access depthAccess = Access::ShaderRead) {
         pass.Read(inputs.opaque_depth.version, depthAccess);
         for (const auto &read : shading ? std::span<const LayeredTranslucencySceneRead>(pending.scene_reads) : inputs.peel_reads)
             pass.Read(read.version, read.access);
     };
-    if (!inputs.single_layer_water)
     {
-        for (std::uint32_t layer = 0; layer < storage->layer_count; ++layer)
+    for (std::uint32_t layer = 0; layer < storage->layer_count; ++layer)
         {
             if (layout) layout->front_pass[layer] = graph.PassCount();
             auto front = retained
@@ -961,9 +935,8 @@ Result TranslucencySystem::RegisterLayersImpl(RenderGraphBuilder &graph,
     });
     outputs.accumulation = inputs.accumulation.version;
     outputs.revealage = inputs.revealage.version;
-    if (!inputs.single_layer_water)
     {
-        if (layout) layout->tail_pass = graph.PassCount();
+    if (layout) layout->tail_pass = graph.PassCount();
         auto tail = retained ? *graph.BindPass(retained->tail_pass, 99)
             : graph.AddPass(99, "Translucency.AccumulateUnpeeled", QueueHint::Direct);
         if (!retained)
@@ -1047,7 +1020,7 @@ Result TranslucencySystem::BindRetainedComposition(RenderGraphBuilder &graph,
     return RegisterCompositionImpl(graph, background, outputs, nullptr, &layout);
 }
 bool TranslucencySystem::MatchesShape(const LayeredTranslucencyLayout &layout,
-    bool use_occupancy_queries, std::size_t diagnostic_contributor_count, bool single_layer_water) const noexcept
+    bool use_occupancy_queries, std::size_t diagnostic_contributor_count) const noexcept
 {
     const auto storage = impl_->targets;
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -1059,8 +1032,6 @@ bool TranslucencySystem::MatchesShape(const LayeredTranslucencyLayout &layout,
         !layout.target_generation || layout.target_generation != storage->generation ||
         layout.layer_count != storage->layer_count ||
         layout.capture_work != capture_work ||
-        layout.single_layer_water != single_layer_water ||
-        (single_layer_water && capture_work) ||
         layout.occupancy != (use_occupancy_queries && storage->occupancy_queries.Get()))
         return false;
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -1092,7 +1063,7 @@ Result TranslucencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph,
 #endif
     if (layout && (layout->target_generation != storage->generation ||
             layout->layer_count != storage->layer_count || layout->occupancy != use_occupancy ||
-            layout->capture_work != capture_work || layout->single_layer_water != inputs.single_layer_water))
+            layout->capture_work != capture_work))
         return Failure(ErrorCode::InvalidState, "Translucency composition layout variant changed.");
     if (retained)
     {
@@ -1101,12 +1072,11 @@ Result TranslucencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph,
             retained->layer_count != storage->layer_count ||
             retained->occupancy != use_occupancy ||
             retained->capture_work != capture_work ||
-            retained->single_layer_water != inputs.single_layer_water ||
             expected.resource.value != background.version.resource.value ||
             expected.resource.kind != background.version.resource.kind ||
             expected.ordinal != background.version.ordinal)
             return Failure(ErrorCode::InvalidState, "Translucency retained background or variant changed.");
-        for (std::uint32_t step = 0; step < (inputs.single_layer_water ? 1u : storage->layer_count); ++step)
+        for (std::uint32_t step = 0; step < storage->layer_count; ++step)
             if (!graph.BindPass(retained->copy_pass[step], 101 + step * 2) ||
                 !graph.BindPass(retained->composite_pass[step], 102 + step * 2))
                 return Failure(ErrorCode::InvalidState, "Translucency retained composition pass changed.");
@@ -1114,70 +1084,6 @@ Result TranslucencySystem::RegisterCompositionImpl(RenderGraphBuilder &graph,
     if (!Fits(background, inputs.render_active, kColor))
         return Failure(ErrorCode::InvalidArgument, "Translucency composition requires an initialized RGBA16F background at the active extent.");
     if (layout) layout->background = background.version;
-    if (inputs.single_layer_water)
-    {
-        if (background.resource == storage->color[0].resource.Get())
-            return Failure(ErrorCode::InvalidArgument, "Single-layer water background aliases its output.");
-        constexpr auto phase = kCompositePhase;
-        storage->FillTable(inputs, phase, 0, LayeredTranslucencyPhase::Composite, background.resource);
-        if (layout) layout->copy_pass[0] = graph.PassCount();
-        auto copy = retained ? *graph.BindPass(retained->copy_pass[0], 101)
-            : graph.AddPass(101, "Water.CopyBackground", QueueHint::Direct);
-        if (!retained) copy.Read(background.version, Access::CopySource);
-        pending.color[0] = retained ? ResourceVersion{pending.color[0].resource, 1}
-            : copy.Write(pending.color[0], Access::CopyDest);
-        copy.SetExecute([storage, background, active = inputs.render_active](RenderPassContext &context) {
-            auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-            D3D12_TEXTURE_COPY_LOCATION destination{}, source{};
-            destination.pResource = storage->color[0].resource.Get(); destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-            source.pResource = background.resource; source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-            const D3D12_BOX box{0, 0, 0, active.width, active.height, 1};
-            commands->CopyTextureRegion(&destination, 0, 0, 0, &source, &box);
-        });
-        if (layout) layout->composite_pass[0] = graph.PassCount();
-        auto water = retained ? *graph.BindPass(retained->composite_pass[0], 102)
-            : graph.AddPass(102, "Water.SingleLayer", QueueHint::Direct);
-        if (!retained)
-        {
-            water.Read(background.version, Access::ShaderRead);
-            water.Read(inputs.opaque_depth.version, Access::ShaderRead);
-            for (const auto &read : pending.scene_reads) water.Read(read.version, read.access);
-            ReadMotion(water, inputs);
-        }
-        pending.color[0] = retained ? ResourceVersion{pending.color[0].resource, 2}
-            : water.ReadWrite(pending.color[0], Access::RenderTarget);
-        pending.front[0] = retained ? ResourceVersion{pending.front[0].resource, 1}
-            : water.Write(pending.front[0], Access::DepthWrite);
-        pending.identity[0] = retained ? ResourceVersion{pending.identity[0].resource, 1}
-            : water.Write(pending.identity[0], Access::RenderTarget);
-        for (const auto index : kCompositeGuideIndices)
-            pending.guides[index] = retained ? ResourceVersion{pending.guides[index].resource, 1}
-                : water.Write(pending.guides[index], Access::RenderTarget);
-        water.SetExecute([storage, inputs](RenderPassContext &context) {
-            auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-            constexpr float zero[]{0, 0, 0, 0};
-            const auto depth = storage->Dsv(0);
-            std::array<D3D12_CPU_DESCRIPTOR_HANDLE, 2 + kCompositeGuideIndices.size()> targets{};
-            targets[0] = storage->Rtv(13); targets[1] = storage->Rtv(0);
-            commands->ClearDepthStencilView(depth, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0, 0, nullptr);
-            commands->ClearRenderTargetView(targets[1], zero, 0, nullptr);
-            for (std::uint32_t index = 0; index < kCompositeGuideIndices.size(); ++index)
-            {
-                targets[index + 2] = storage->GuideRtv(kCompositeGuideIndices[index]);
-                commands->ClearRenderTargetView(targets[index + 2], zero, 0, nullptr);
-            }
-            commands->OMSetRenderTargets(static_cast<UINT>(targets.size()), targets.data(), FALSE, &depth);
-            inputs.draw(commands, storage->pipelines[5].Get(), LayeredTranslucencyPhase::Composite, 0, storage->Gpu(inputs, phase));
-        });
-        outputs.depth = pending.front[0]; outputs.metadata = pending.identity[0];
-        outputs.motion = pending.guides[1]; outputs.history = pending.guides[2];
-        outputs.classification = pending.guides[3]; outputs.transport = pending.guides[5];
-        outputs.corrected = pending.color[0]; outputs.corrected_resource = storage->color[0].resource.Get();
-        outputs.corrected_srv = storage->Export(7);
-        if (layout) layout->corrected_version = outputs.corrected;
-        pending.composed = true;
-        return Result::Success();
-    }
     auto source = background.version;
     auto *sourceResource = background.resource;
     // Occupancy is available from this frame's front peel only. A missing
@@ -1319,8 +1225,7 @@ Result TranslucencySystem::CompleteSubmission(const RenderGraphBuilder &graph, c
     impl_->diagnostic_submission_valid = success && pending.composed;
     if (impl_->diagnostic_submission_valid)
     {
-        impl_->diagnostic_single_layer_water = pending.inputs.single_layer_water;
-        impl_->diagnostic_color_index = pending.inputs.single_layer_water ? 0u : (storage->layer_count - 1u) % 2u;
+        impl_->diagnostic_color_index = (storage->layer_count - 1u) % 2u;
     }
 #endif
     pending = {};
@@ -1340,7 +1245,6 @@ Result TranslucencySystem::ResetAfterCompletion(const CompletionSet &completed)
     impl_->targets.reset();
 #if defined(HS_DEVELOPMENT_TOOLS)
     impl_->diagnostic_submission_valid = false;
-    impl_->diagnostic_single_layer_water = false;
     impl_->diagnostic_color_index = 0;
 #endif
     return Result::Success();

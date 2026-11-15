@@ -2,18 +2,20 @@
 
 namespace hs
 {
-Result D3D12Renderer::Impl::PrepareCharacterBindings(ID3D12GraphicsCommandList *list,
+Result D3D12Renderer::Impl::PrepareMeshMaterialBindings(ID3D12GraphicsCommandList *list,
     std::vector<AllocationResource> &uploads)
 {
-    std::vector<DirectX::XMUINT2> slots;
-    for (std::size_t asset = 0; asset < character_binding_ranges.size(); ++asset)
+    std::vector<DirectX::XMUINT2> slots{{0, 0}};
+    for (std::size_t asset = 0; asset < monster_assets.size() + 1; ++asset)
     {
         const auto count = asset == 0 ? archer_material_count : monster_assets[asset - 1].material_count;
         const auto &bindings = asset == 0 ? archer_material_bindings : monster_assets[asset - 1].material_bindings;
-        const auto first = static_cast<std::uint32_t>(slots.size());
+        const auto binding_set = static_cast<std::uint32_t>(slots.size());
+        slots.push_back({binding_set + 1u, count});
+        const auto first = slots.size();
+        slots.resize(slots.size() + count, {UINT32_MAX, UINT32_MAX});
         std::uint32_t opaque_binding_count{};
         std::uint32_t translucent_binding_count{};
-        slots.resize(slots.size() + count, {UINT32_MAX, UINT32_MAX});
         for (const auto &binding : bindings)
         {
             if (binding.slot >= count || binding.hero_ordinal >= kCharacterMaterialNames.size())
@@ -30,13 +32,25 @@ Result D3D12Renderer::Impl::PrepareCharacterBindings(ID3D12GraphicsCommandList *
                 ++translucent_binding_count;
             }
         }
-        for (std::uint32_t slot = first; slot < slots.size(); ++slot)
+        for (std::size_t slot = first; slot < slots.size(); ++slot)
             if (slots[slot].x == UINT32_MAX && slots[slot].y == UINT32_MAX)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Character slot has no character material binding.");
-        character_binding_ranges[asset] = {first, count, opaque_binding_count, translucent_binding_count};
+        const GeometryMaterialDomains domains{opaque_binding_count != 0, translucent_binding_count != 0,
+            binding_set};
+        if (asset == 0) geometry_material_domains[kArcherGeometryPage] = domains;
+        else
+        {
+            const auto family = asset - 1;
+            geometry_material_domains[kMonsterGeometryPage + family] = domains;
+            geometry_material_domains[kMonsterGeometryPage + 6 + family * 2] = domains;
+            geometry_material_domains[kMonsterGeometryPage + 7 + family * 2] = domains;
+        }
     }
-    if (slots.empty())
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Native character material table is empty.");
+    procedural_water_material = {false, true, static_cast<std::uint32_t>(slots.size())};
+    slots.push_back({static_cast<std::uint32_t>(slots.size()) + 1u, 1u});
+    slots.push_back({UINT32_MAX, HS_MATERIAL_PROGRAM_WATER});
+    if (slots.size() > (UINT32_MAX >> HS_GEOMETRY_MATERIAL_SET_SHIFT))
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Native mesh material binding set index capacity exceeded.");
     const auto bytes = slots.size() * sizeof(DirectX::XMUINT2);
     D3D12MA::ALLOCATION_DESC allocation{};
     allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
@@ -72,6 +86,9 @@ Result D3D12Renderer::Impl::PrepareCharacterBindings(ID3D12GraphicsCommandList *
         handle.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + kCharacterBindingDescriptorOffset) * srv_stride;
         device->CreateShaderResourceView(mesh_material_bindings_gpu.resource.Get(), &view, handle);
     }
+#if defined(HS_DEVELOPMENT_TOOLS)
+    mesh_material_bindings_cpu = std::move(slots);
+#endif
     return Result::Success();
 }
 } // namespace hs

@@ -142,24 +142,11 @@ bool CandidateValid(ClusterCandidate candidate, out InstanceData instance)
 {
     instance = (InstanceData)0;
     uint4 h0, h1, h2, h3;
-    if (!Range(candidate.FirstGroup, candidate.GroupCount, GroupCount) || candidate.GroupCount == 0u ||
-        (candidate.ViewMask & ~15u) != 0u || (candidate.PolicyFlags & ~FineOnlyDeformationBound) != 0u ||
-        candidate.FirstRoot < candidate.FirstGroup || candidate.FirstRoot - candidate.FirstGroup >= candidate.GroupCount ||
-        candidate.Reserved != 0u || candidate.InstanceIndex >= HistoryInstanceCapacity ||
-        !isfinite(candidate.DeformationRadius) || candidate.DeformationRadius < 0.0 ||
+    // Candidate/catalog constants are admitted before this owner's first upload.
+    if (candidate.InstanceIndex >= HistoryInstanceCapacity ||
         !HsGpuSceneSlotValid(candidate.InstanceIndex, h0, h1, h2, h3))
     {
         Fault(FailureCatalog); return false;
-    }
-    const ClusterGroup root = Groups[candidate.FirstRoot];
-    if (root.Parent != Invalid || root.CatalogIndex != candidate.CatalogIndex ||
-        root.Generation != ContentGeneration)
-    {
-        Fault(FailureCatalog); return false;
-    }
-    if ((root.Flags & ReferencePose) != 0u && (candidate.PolicyFlags & FineOnlyDeformationBound) == 0u)
-    {
-        Fault(FailureErrorDomain); return false;
     }
     const uint address = h1.x + candidate.InstanceIndex * h2.z;
     if (HsGpuSceneTables.Load(address + 20u) != candidate.InstanceGeneration)
@@ -184,22 +171,6 @@ bool GroupValid(uint id, ClusterCandidate candidate, out ClusterGroup group)
     // Generation table construction admits the immutable child, cluster and page spans.
     return true;
 }
-bool ClusterValid(uint id, uint group_id, ClusterGroup group, out ClusterRecord cluster)
-{
-    if (id < CatalogClusterBase || id - CatalogClusterBase >= CatalogClusterCount)
-    {
-        cluster = (ClusterRecord)0; Fault(FailureCatalog); return false;
-    }
-    cluster = Clusters[id];
-    if (cluster.GroupIndex != group_id || cluster.MaterialPartition != group.MaterialPartition ||
-        cluster.MaterialSelector != group.MaterialSelector || cluster.PageSlot >= PageCount ||
-        cluster.IndexCount == 0u || cluster.IndexCount % 3u != 0u || cluster.FirstIndex % 3u != 0u ||
-        cluster.MeshletCount == 0u)
-    {
-        Fault(FailureCatalog); return false;
-    }
-    return true;
-}
 bool Resident(uint page_slot)
 {
     const ClusterPage page = Pages[page_slot];
@@ -209,13 +180,6 @@ bool Resident(uint page_slot)
         Fault(FailureCatalog); return false;
     }
     return page.Generation == ContentGeneration && page.Resident == 1u;
-}
-bool CompleteRepresentation(ClusterGroup group)
-{
-    bool complete = true;
-    for (uint offset = 0u; offset < group.RepresentationPages.y; ++offset)
-        complete = Resident(RepresentationPages[group.RepresentationPages.x + offset]) && complete;
-    return complete;
 }
 bool DemandRepresentation(ClusterGroup group, float priority)
 {
@@ -450,9 +414,9 @@ bool SameSelectedHistory(uint cluster_id, ClusterRecord cluster, ClusterCandidat
 void EmitCluster(uint selection, uint cluster_id, uint group_id, ClusterGroup group,
     ClusterRecord cluster, ClusterCandidate candidate, float4 sphere, uint mask)
 {
-    if (selection >= CutStatus.Load(20u) || selection >= OutputCapacity || !Resident(cluster.PageSlot))
+    if (selection >= CutStatus.Load(20u) || selection >= OutputCapacity)
     {
-        Fault(FailureCapacity | FailureMissingPage); return;
+        Fault(FailureCapacity); return;
     }
     const ClusterPage page = Pages[cluster.PageSlot];
     const uint record_id = GeometryDrawBase + selection;
@@ -508,14 +472,14 @@ void EmitCuts(uint3 dispatch : SV_DispatchThreadID)
 {
     const uint candidate_index = LinearThread(dispatch);
     if (candidate_index >= CandidateCount || CutStatus.Load(16u) != 0u) return;
+    const uint2 expected = CutCounts[candidate_index];
+    // Count validated the immutable cut; an empty cut has no records or history to emit.
+    if (all(expected == uint2(0u, 0u))) return;
     ClusterCandidate candidate = Candidates[candidate_index];
     InstanceData instance;
     if (!CandidateValid(candidate, instance)) return;
     const uint2 base = CutOffsets[candidate_index];
     if (base.y != 0u) { Fault(FailureCapacity); return; }
-    const uint2 expected = CutCounts[candidate_index];
-    // Count validated the immutable cut; an empty cut has no records or history to emit.
-    if (all(expected == uint2(0u, 0u))) return;
     const float scale = max(abs(instance.Scale.x), max(abs(instance.Scale.y), abs(instance.Scale.z)));
     float sine_yaw, cosine_yaw;
     sincos(instance.Yaw, sine_yaw, cosine_yaw);
@@ -536,20 +500,15 @@ void EmitCuts(uint3 dispatch : SV_DispatchThreadID)
         const uint2 selection = CutCounts[cache_base + selected_index];
         const uint id = selection.x;
         const uint mask = selection.y;
-        ClusterGroup group;
-        if (!GroupValid(id, candidate, group)) return;
+        // Count already admitted this immutable selected group.
+        const ClusterGroup group = Groups[id];
         if (mask == 0u || (mask & ~candidate.ViewMask) != 0u || group.ClusterCount > expected.x - count)
         { Fault(FailureCatalog); return; }
-        if (!CompleteRepresentation(group) || ((group.Flags & ReferencePose) != 0u && group.ChildCount != 0u))
-        {
-            Fault(FailureMissingPage | FailureErrorDomain); return;
-        }
         const float4 sphere = WorldSphere(group, candidate, instance, scale, sine_yaw, cosine_yaw);
         for (uint cluster_offset = 0u; cluster_offset < group.ClusterCount; ++cluster_offset)
         {
-            ClusterRecord cluster;
             const uint cluster_id = group.FirstCluster + cluster_offset;
-            if (!ClusterValid(cluster_id, id, group, cluster)) return;
+            const ClusterRecord cluster = Clusters[cluster_id];
             EmitCluster(base.x + count, cluster_id, id, group, cluster, candidate, sphere, mask);
             ++count;
         }

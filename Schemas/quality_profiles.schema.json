@@ -47,15 +47,12 @@
             "ssr_refine_steps",
             "froxel_stride",
             "froxel_slices",
-            "volumetric_area_samples",
             "hero_refraction_layers",
             "pom_max_steps",
             "pom_refinement_steps",
             "local_shadow_max_lights",
             "local_shadow_resolution",
-            "local_shadow_area_samples",
             "local_shadow_budget_mib",
-            "lighting_cluster_capacity",
             "gi_logical_cascades",
             "gi_internal_resolution_percent",
             "vfx_light_fraction",
@@ -113,12 +110,12 @@
             "ao_directions": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 16
+              "maximum": 8
             },
             "ao_steps": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 32
+              "maximum": 8
             },
             "contact_shadow_steps": {
               "type": "integer",
@@ -160,11 +157,6 @@
               "minimum": 8,
               "maximum": 128
             },
-            "volumetric_area_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 16
-            },
             "hero_refraction_layers": {
               "type": "integer",
               "minimum": 0,
@@ -190,25 +182,10 @@
               "minimum": 64,
               "maximum": 1024
             },
-            "local_shadow_area_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 4,
-              "enum": [
-                1,
-                2,
-                4
-              ]
-            },
             "local_shadow_budget_mib": {
               "type": "integer",
               "minimum": 1,
               "maximum": 4096
-            },
-            "lighting_cluster_capacity": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 128
             },
             "gi_logical_cascades": {
               "type": "integer",
@@ -280,15 +257,12 @@
             "ssr_refine_steps",
             "froxel_stride",
             "froxel_slices",
-            "volumetric_area_samples",
             "hero_refraction_layers",
             "pom_max_steps",
             "pom_refinement_steps",
             "local_shadow_max_lights",
             "local_shadow_resolution",
-            "local_shadow_area_samples",
             "local_shadow_budget_mib",
-            "lighting_cluster_capacity",
             "gi_logical_cascades",
             "gi_internal_resolution_percent",
             "vfx_light_fraction",
@@ -346,12 +320,12 @@
             "ao_directions": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 16
+              "maximum": 8
             },
             "ao_steps": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 32
+              "maximum": 8
             },
             "contact_shadow_steps": {
               "type": "integer",
@@ -393,11 +367,6 @@
               "minimum": 8,
               "maximum": 128
             },
-            "volumetric_area_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 16
-            },
             "hero_refraction_layers": {
               "type": "integer",
               "minimum": 0,
@@ -423,25 +392,10 @@
               "minimum": 64,
               "maximum": 1024
             },
-            "local_shadow_area_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 4,
-              "enum": [
-                1,
-                2,
-                4
-              ]
-            },
             "local_shadow_budget_mib": {
               "type": "integer",
               "minimum": 1,
               "maximum": 4096
-            },
-            "lighting_cluster_capacity": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 128
             },
             "gi_logical_cascades": {
               "type": "integer",
@@ -513,15 +467,12 @@
             "ssr_refine_steps",
             "froxel_stride",
             "froxel_slices",
-            "volumetric_area_samples",
             "hero_refraction_layers",
             "pom_max_steps",
             "pom_refinement_steps",
             "local_shadow_max_lights",
             "local_shadow_resolution",
-            "local_shadow_area_samples",
             "local_shadow_budget_mib",
-            "lighting_cluster_capacity",
             "gi_logical_cascades",
             "gi_internal_resolution_percent",
             "vfx_light_fraction",
@@ -579,12 +530,12 @@
             "ao_directions": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 16
+              "maximum": 8
             },
             "ao_steps": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 32
+              "maximum": 8
             },
             "contact_shadow_steps": {
               "type": "integer",
@@ -626,11 +577,6 @@
               "minimum": 8,
               "maximum": 128
             },
-            "volumetric_area_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 16
-            },
             "hero_refraction_layers": {
               "type": "integer",
               "minimum": 0,
@@ -656,25 +602,10 @@
               "minimum": 64,
               "maximum": 1024
             },
-            "local_shadow_area_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 4,
-              "enum": [
-                1,
-                2,
-                4
-              ]
-            },
             "local_shadow_budget_mib": {
               "type": "integer",
               "minimum": 1,
               "maximum": 4096
-            },
-            "lighting_cluster_capacity": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 128
             },
             "gi_logical_cascades": {
               "type": "integer",
@@ -746,15 +677,12 @@
             "ssr_refine_steps",
             "froxel_stride",
             "froxel_slices",
-            "volumetric_area_samples",
             "hero_refraction_layers",
             "pom_max_steps",
             "pom_refinement_steps",
             "local_shadow_max_lights",
             "local_shadow_resolution",
-            "local_shadow_area_samples",
             "local_shadow_budget_mib",
-            "lighting_cluster_capacity",
             "gi_logical_cascades",
             "gi_internal_resolution_percent",
             "vfx_light_fraction",
@@ -812,12 +740,12 @@
             "ao_directions": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 16
+              "maximum": 8
             },
             "ao_steps": {
               "type": "integer",
               "minimum": 1,
-              "maximum": 32
+              "maximum": 8
             },
             "contact_shadow_steps": {
               "type": "integer",
@@ -859,11 +787,6 @@
               "minimum": 8,
               "maximum": 128
             },
-            "volumetric_area_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 16
-            },
             "hero_refraction_layers": {
               "type": "integer",
               "minimum": 0,
@@ -889,25 +812,10 @@
               "minimum": 64,
               "maximum": 1024
             },
-            "local_shadow_area_samples": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 4,
-              "enum": [
-                1,
-                2,
-                4
-              ]
-            },
             "local_shadow_budget_mib": {
               "type": "integer",
               "minimum": 1,
               "maximum": 4096
-            },
-            "lighting_cluster_capacity": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 128
             },
             "gi_logical_cascades": {
               "type": "integer",

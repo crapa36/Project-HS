@@ -20,9 +20,9 @@ namespace
 {
 using Microsoft::WRL::ComPtr;
 constexpr std::uint32_t kTilePixels = 16, kSlices = 24;
-constexpr std::uint32_t kMaxLights = 128, kMaskWords = kMaxLights / 32;
+constexpr std::uint32_t kMaxLights = 128;
 static_assert(kLightShadowRequested == 1u); // Packed metadata.z reserves higher bits for record+1.
-constexpr std::uint32_t kDescriptorCount = 4, kHeaderBytes = sizeof(LightListConstants);
+constexpr std::uint32_t kDescriptorCount = kLightListResourceCount, kHeaderBytes = sizeof(LightListConstants);
 constexpr std::uint64_t kMaxBufferBytes = UINT64(UINT32_MAX) & ~UINT64(3);
 
 Result LightFailure(ErrorCode code, std::string message)
@@ -57,17 +57,16 @@ Result EncodeLight(const LightView &light, GpuLightRecord &record)
         (light.shadow_flags & ~kLightShadowRequested))
         return LightFailure(ErrorCode::InvalidArgument, "Invalid light identity, revision, quantity, color or shadow flags.");
     const bool directional = light.type == LightType::Directional;
-    const bool area = light.type == LightType::Rectangle || light.type == LightType::Disk;
-    if (!directional && !area && light.type != LightType::Point && light.type != LightType::Spot)
+    if (!directional && light.type != LightType::Point && light.type != LightType::Spot)
         return LightFailure(ErrorCode::InvalidArgument, "Unsupported light type.");
     const bool radiantPoint = light.type == LightType::Point && light.unit == LightUnit::RadiantIntensity;
-    if ((!radiantPoint && light.unit != (directional ? LightUnit::Lux : area ? LightUnit::Luminance : LightUnit::Lumen)) ||
-        (light.legacy_attenuation && light.type != LightType::Point) || (light.two_sided && !area))
+    if ((!radiantPoint && light.unit != (directional ? LightUnit::Lux : LightUnit::Lumen)) ||
+        (light.legacy_attenuation && light.type != LightType::Point))
         return LightFailure(ErrorCode::InvalidArgument, "Light type/unit or legacy Point attenuation contract does not match.");
 
     double intensity = radiantPoint ? double(light.quantity) : double(light.quantity) / kRgbReferenceLumensPerWatt;
     record = {};
-    if (!directional && !area)
+    if (!directional)
     {
         const double rangeSquared = double(light.range) * light.range;
         const double radiusSquared = double(light.emitter_radius) * light.emitter_radius;
@@ -82,47 +81,15 @@ Result EncodeLight(const LightView &light, GpuLightRecord &record)
         if (light.type == LightType::Point && !radiantPoint)
             intensity /= 4.0 * std::numbers::pi_v<double>;
     }
-    if (directional || area || light.type == LightType::Spot)
+    if (directional || light.type == LightType::Spot)
     {
         const double lengthSquared = double(light.direction.x) * light.direction.x +
             double(light.direction.y) * light.direction.y + double(light.direction.z) * light.direction.z;
         if (!Finite(light.direction) || lengthSquared <= 0 || !std::isfinite(lengthSquared))
-            return LightFailure(ErrorCode::InvalidArgument, "Directional, Spot and area lights need a finite propagation direction.");
+            return LightFailure(ErrorCode::InvalidArgument, "Directional and Spot lights need a finite propagation direction.");
         const double inverseLength = 1.0 / std::sqrt(lengthSquared);
         record.direction_cos_outer = {float(light.direction.x * inverseLength),
             float(light.direction.y * inverseLength), float(light.direction.z * inverseLength), -1.0f};
-    }
-    if (area)
-    {
-        const double width=double(light.shape.x)*(light.type==LightType::Rectangle?0.5:1.0);
-        const double height=double(light.shape.y)*(light.type==LightType::Rectangle?0.5:1.0);
-        const double emitterArea=width*height*(light.type==LightType::Rectangle?4.0:std::numbers::pi_v<double>);
-        const double bound=light.type==LightType::Rectangle?std::hypot(width,height):std::max(width,height);
-        const double influenceBound=double(light.range)+bound;
-        if (!Finite(light.position) || !Finite(light.area_tangent) || !std::isfinite(light.range) || light.range<=0 ||
-            !std::isfinite(width) || !std::isfinite(height) || width<=0 || height<=0 ||
-            emitterArea<std::numeric_limits<float>::min() || emitterArea>std::numeric_limits<float>::max() ||
-            influenceBound*influenceBound>std::numeric_limits<float>::max() ||
-            double(light.range)*light.range<std::numeric_limits<float>::min())
-            return LightFailure(ErrorCode::InvalidArgument, "Area light needs finite positive dimensions/range and an authored tangent.");
-        // Cross the original float inputs in double before normalization. A
-        // parallel authored tangent stays exactly degenerate instead of turning
-        // float normal-rounding residue into an invented emitter orientation.
-        const double bx=double(light.direction.y)*light.area_tangent.z-double(light.direction.z)*light.area_tangent.y;
-        const double by=double(light.direction.z)*light.area_tangent.x-double(light.direction.x)*light.area_tangent.z;
-        const double bz=double(light.direction.x)*light.area_tangent.y-double(light.direction.y)*light.area_tangent.x;
-        const double length=std::hypot(bx,by,bz);
-        if (!(length>0) || !std::isfinite(length))
-            return LightFailure(ErrorCode::InvalidArgument, "Area tangent must span the authored emitter plane.");
-        const double directionLength=std::hypot(double(light.direction.x),double(light.direction.y),double(light.direction.z));
-        const double nx=light.direction.x/directionLength,ny=light.direction.y/directionLength,nz=light.direction.z/directionLength;
-        const double ux=bx/length,uy=by/length,uz=bz/length;
-        record.area_tangent_half_width={float(uy*nz-uz*ny),float(uz*nx-ux*nz),float(ux*ny-uy*nx),float(width)};
-        record.area_bitangent_half_height={float(ux),float(uy),float(uz),float(height)};
-        record.position_range={light.position.x,light.position.y,light.position.z,light.range};
-        record.shape_cone={float(emitterArea),float(bound),0,0};
-        // Luminance/683 is emitted radiance per square meter per steradian.
-        // Area geometry supplies its own projected solid angle, not 1/r^2 at center.
     }
     if (light.type == LightType::Spot)
     {
@@ -149,7 +116,7 @@ Result EncodeLight(const LightView &light, GpuLightRecord &record)
         double(light.color.y) * intensity > std::numeric_limits<float>::max() ||
         double(light.color.z) * intensity > std::numeric_limits<float>::max())
         return LightFailure(ErrorCode::InvalidArgument, "Converted radiometric light quantity exceeds the GPU ABI.");
-    if (!directional && !area && !light.legacy_attenuation)
+    if (!directional && !light.legacy_attenuation)
     {
         const double maximumIncident = intensity * std::max({double(light.color.x),
             double(light.color.y), double(light.color.z)}) / record.shape_cone.x;
@@ -160,7 +127,7 @@ Result EncodeLight(const LightView &light, GpuLightRecord &record)
     record.identity = {std::uint32_t(light.stable_id), std::uint32_t(light.stable_id >> 32),
         light.generation, std::uint32_t(light.type)};
     record.metadata = {std::uint32_t(light.revision), std::uint32_t(light.revision >> 32),
-        light.shadow_flags, (light.legacy_attenuation ? 1u : 0u) | (light.two_sided ? 4u : 0u)};
+        light.shadow_flags, light.legacy_attenuation ? 1u : 0u};
     return Result::Success();
 }
 Result CreateBuffer(D3D12MA::Allocator *allocator, std::uint64_t bytes, bool upload, bool uav,
@@ -214,14 +181,14 @@ struct LightListTargets
     ComPtr<ID3D12DescriptorHeap> descriptors, export_descriptors;
     struct Frame
     {
-        std::array<AllocationResource, 4> buffers;
+        std::array<AllocationResource, kLightListResourceCount> buffers;
         CompletionSet completion;
     };
     std::vector<Frame> frames;
     AllocationResource upload;
     std::byte *mapped{};
     ViewExtent capacity;
-    std::uint32_t max_lights{}, inline_capacity{}, spill_capacity{}, descriptor_stride{};
+    std::uint32_t max_lights{}, descriptor_stride{};
     std::uint64_t upload_stride{}, bytes{};
     CompletionSet completion;
     bool usable{true};
@@ -250,7 +217,7 @@ struct LightListSystem::Impl
     {
         const RenderGraphBuilder *graph{};
         std::shared_ptr<LightListTargets> targets;
-        std::array<Import, 4> imports{};
+        std::array<Import, kLightListResourceCount> imports{};
         std::uint32_t slot{};
     } pending;
 };
@@ -276,27 +243,22 @@ LightListDiagnostics LightListSystem::DiagnosticResources() const noexcept
 
 Result LightListSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *allocator,
     ViewExtent capacity, std::uint32_t maxLights, std::uint32_t slots,
-    const ShaderReader &readShader, LightListCandidate &candidate, std::uint32_t clusterCapacity) const
+    const ShaderReader &readShader, LightListCandidate &candidate) const
 {
     if (!device || !allocator || !ValidExtent(capacity) || !maxLights || maxLights > kMaxLights || !slots || !readShader ||
-        !clusterCapacity || clusterCapacity > 128 ||
         slots > D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_1 / kDescriptorCount)
         return LightFailure(ErrorCode::InvalidArgument, "Invalid light-list device, capacity, light count, frame slots or shader reader.");
     const std::uint64_t cells = UINT64((capacity.width + kTilePixels - 1) / kTilePixels) *
         ((capacity.height + kTilePixels - 1) / kTilePixels) * kSlices;
-    // Overflow keeps the existing exact world query. Quality changes the real
-    // cluster backing and fast-path capacity without discarding accepted lights.
-    const auto inlineCapacity = std::min(clusterCapacity, maxLights);
-    const auto spillCapacity = std::min(clusterCapacity, maxLights - inlineCapacity);
-    const std::array<std::uint64_t, 4> widths{UINT64(maxLights) * sizeof(GpuLightRecord),
-        kHeaderBytes + cells * 16, cells * kMaskWords * sizeof(std::uint32_t), 4};
+    const std::array<std::uint64_t, kLightListResourceCount> widths{
+        UINT64(maxLights) * sizeof(GpuLightRecord), kHeaderBytes + cells * 16};
     const std::uint64_t uploadStride = (kHeaderBytes + widths[0] + 255) & ~UINT64(255);
     if (std::ranges::any_of(widths, [](std::uint64_t size) { return size > kMaxBufferBytes; }) ||
         uploadStride > std::numeric_limits<SIZE_T>::max() / slots)
         return LightFailure(ErrorCode::InvalidArgument, "Light-list capacity exceeds raw/index buffer addressing or host upload limits.");
     auto next = std::make_shared<LightListTargets>();
     next->device = device; next->allocator = allocator; next->capacity = capacity;
-    next->max_lights = maxLights; next->inline_capacity = inlineCapacity; next->spill_capacity = spillCapacity;
+    next->max_lights = maxLights;
     next->upload_stride = uploadStride; next->frames.resize(slots);
     next->descriptor_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     for (auto &frame : next->frames)
@@ -324,15 +286,15 @@ Result LightListSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *alloca
     {
         const auto &buffers = next->frames[slot].buffers;
         CreateSrv(device, buffers[0].resource.Get(), sizeof(GpuLightRecord), next->Cpu(slot, 0));
-        for (std::uint32_t index = 0; index < 4; ++index)
+        for (std::uint32_t index = 0; index < kLightListResourceCount; ++index)
         {
-            const std::uint32_t stride = index == 0 ? sizeof(GpuLightRecord) : index == 1 ? 0 : sizeof(std::uint32_t);
+            const std::uint32_t stride = index == 0 ? sizeof(GpuLightRecord) : 0;
             CreateSrv(device, buffers[index].resource.Get(), stride, next->Cpu(slot, index, true));
             if (index) CreateUav(device, buffers[index].resource.Get(), stride, next->Cpu(slot, index));
         }
     }
     D3D12_DESCRIPTOR_RANGE ranges[2]{{D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 19, 0},
-        {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0, 19, 1}};
+        {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 19, 1}};
     D3D12_ROOT_PARAMETER parameters[2]{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; parameters[0].Descriptor = {0, 19};
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
@@ -376,11 +338,11 @@ Result LightListSystem::Register(RenderGraphBuilder &graph, const LightListInput
 {
     return RegisterFrame(graph,inputs,outputs,layout,nullptr);
 }
-bool LightListSystem::MatchesLayout(const LightListLayout &layout)const noexcept
+bool LightListSystem::MatchesLayout(const LightListLayout &layout, bool clustered)const noexcept
 {
     const auto &s=impl_->targets;
     return layout.valid&&s&&layout.capacity.width==s->capacity.width&&layout.capacity.height==s->capacity.height&&
-        layout.max_lights==s->max_lights&&layout.inline_capacity==s->inline_capacity&&layout.spill_capacity==s->spill_capacity;
+        layout.max_lights==s->max_lights&&layout.clustered==clustered;
 }
 Result LightListSystem::BindRetained(RenderGraphBuilder &graph,const LightListInputs &inputs,
     const LightListLayout &layout,LightListOutputs &outputs)
@@ -392,7 +354,6 @@ Result LightListSystem::RegisterFrame(RenderGraphBuilder &graph,const LightListI
 {
     outputs = {};
     if(capture)*capture={};
-    if(retained&&!MatchesLayout(*retained))return LightFailure(ErrorCode::InvalidState,"Light-list retained topology changed.");
     auto storage = impl_->targets;
     if (!storage || impl_->pending.graph || !storage->usable)
         return LightFailure(ErrorCode::InvalidState, "Light-list targets are absent, pending or a previous graph failed.");
@@ -494,6 +455,9 @@ Result LightListSystem::RegisterFrame(RenderGraphBuilder &graph,const LightListI
         }
     }
     assert(recordIndex == sorted.size());
+    const bool clustered = directionalCount != sorted.size();
+    if (retained && !MatchesLayout(*retained, clustered))
+        return LightFailure(ErrorCode::InvalidState, "Light-list retained topology changed.");
     LightListConstants constants{};
     DirectX::XMStoreFloat4x4(&constants.world_to_view, DirectX::XMMatrixTranspose(DirectX::XMLoadFloat4x4(&rotation)));
     DirectX::XMStoreFloat4x4(&constants.projection, DirectX::XMMatrixTranspose(projectionMatrix));
@@ -505,7 +469,7 @@ Result LightListSystem::RegisterFrame(RenderGraphBuilder &graph,const LightListI
     constants.extent_far_log = {float(inputs.render_active.width), float(inputs.render_active.height), inputs.far_plane, logarithmicRange};
     constants.grid = {(inputs.render_active.width + kTilePixels - 1) / kTilePixels,
         (inputs.render_active.height + kTilePixels - 1) / kTilePixels, kSlices, directionalCount};
-    constants.limits = {UINT(sorted.size()), storage->inline_capacity, storage->spill_capacity,
+    constants.limits = {UINT(sorted.size()), 0, 0,
         constants.grid.x * constants.grid.y * kSlices};
     const auto slot = inputs.frame_slot;
     const auto uploadOffset = UINT64(slot) * storage->upload_stride;
@@ -513,9 +477,9 @@ Result LightListSystem::RegisterFrame(RenderGraphBuilder &graph,const LightListI
     std::memcpy(storage->mapped + uploadOffset + kHeaderBytes, records.data(), records.size() * sizeof(GpuLightRecord));
     auto &frame = storage->frames[slot];
     Impl::Pending pending; pending.graph = &graph; pending.targets = storage; pending.slot = slot;
-    std::array<ResourceVersion, 4> versions;
-    constexpr std::array<std::string_view, 4> names{"LightList.Records", "LightList.GridAndRanges", "LightList.Inline", "LightList.Spill"};
-    for (std::uint32_t index = 0; index < 4; ++index)
+    std::array<ResourceVersion, kLightListResourceCount> versions;
+    constexpr std::array<std::string_view, kLightListResourceCount> names{"LightList.Records", "LightList.Grid"};
+    for (std::uint32_t index = 0; index < kLightListResourceCount; ++index)
     {
         auto &resource = frame.buffers[index];
         if(auto checked=resource.EnsureNativeContract(storage->device.Get());!checked)return checked;
@@ -541,42 +505,42 @@ Result LightListSystem::RegisterFrame(RenderGraphBuilder &graph,const LightListI
         commands->CopyBufferRegion(buffers[1].resource.Get(), 0, storage->upload.resource.Get(), uploadOffset, kHeaderBytes);
         return Result::Success();
     });
-    if(capture)capture->passes[1]=graph.PassCount();
-    auto clusterBinding=retained?graph.BindPass(retained->passes[1],131):
-        std::optional<PassBuilder>{graph.AddPass(131,"LightListClusters",QueueHint::Direct)};
-    if(!clusterBinding)return LightFailure(ErrorCode::InvalidState,"Light-list retained cluster pass is missing.");
-    auto &cluster=*clusterBinding;
-    if(retained)versions=retained->outputs;
-    else
+    if (clustered)
     {
-        cluster.Read(versions[0],Access::ComputeRead);
-        versions[1]=cluster.ReadWrite(versions[1],Access::UnorderedWrite);
-        versions[2]=cluster.Write(versions[2],Access::UnorderedWrite);
-        versions[3]=cluster.Write(versions[3],Access::UnorderedWrite);
+        if(capture)capture->passes[1]=graph.PassCount();
+        auto clusterBinding=retained?graph.BindPass(retained->passes[1],131):
+            std::optional<PassBuilder>{graph.AddPass(131,"LightListClusters",QueueHint::Direct)};
+        if(!clusterBinding)return LightFailure(ErrorCode::InvalidState,"Light-list retained cluster pass is missing.");
+        auto &cluster=*clusterBinding;
+        if(retained)versions=retained->outputs;
+        else
+        {
+            cluster.Read(versions[0],Access::ComputeRead);
+            versions[1]=cluster.ReadWrite(versions[1],Access::UnorderedWrite);
+        }
+        cluster.SetExecuteChecked([storage, slot, uploadOffset, cells = constants.limits.w](RenderPassContext &context) -> Result {
+            auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            ID3D12DescriptorHeap *heaps[]{storage->descriptors.Get()}; commands->SetDescriptorHeaps(1, heaps);
+            commands->SetComputeRootSignature(storage->root.Get()); commands->SetPipelineState(storage->pipeline.Get());
+            commands->SetComputeRootConstantBufferView(0, storage->upload.resource->GetGPUVirtualAddress() + uploadOffset);
+            commands->SetComputeRootDescriptorTable(1, storage->Gpu(slot));
+            const std::uint32_t groups = (cells + 63) / 64;
+            commands->Dispatch(std::min(groups, 65535u), (groups + 65534u) / 65535u, 1);
+            return Result::Success();
+        });
     }
-    cluster.SetExecuteChecked([storage, slot, uploadOffset, cells = constants.limits.w](RenderPassContext &context) -> Result {
-        auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        ID3D12DescriptorHeap *heaps[]{storage->descriptors.Get()}; commands->SetDescriptorHeaps(1, heaps);
-        commands->SetComputeRootSignature(storage->root.Get()); commands->SetPipelineState(storage->pipeline.Get());
-        commands->SetComputeRootConstantBufferView(0, storage->upload.resource->GetGPUVirtualAddress() + uploadOffset);
-        commands->SetComputeRootDescriptorTable(1, storage->Gpu(slot));
-        const std::uint32_t groups = (cells + 63) / 64;
-        commands->Dispatch(std::min(groups, 65535u), (groups + 65534u) / 65535u, 1);
-        return Result::Success();
-    });
-    for (std::uint32_t index = 0; index < 4; ++index)
+    for (std::uint32_t index = 0; index < kLightListResourceCount; ++index)
     {
         outputs.resources[index] = frame.buffers[index].resource.Get(); outputs.srvs[index] = storage->Cpu(slot, index, true);
         if(!retained)graph.SetFinalAccess(versions[index], Access::AllShaderRead);
     }
-    outputs.lights = versions[0]; outputs.ranges = versions[1];
-    outputs.inline_indices = versions[2]; outputs.spill_indices = versions[3];
+    outputs.lights = versions[0]; outputs.grid = versions[1];
     outputs.light_count = UINT(sorted.size()); outputs.directional_count = directionalCount;
     impl_->pending = std::move(pending);
     if(capture)
     {
         capture->capacity=storage->capacity;capture->max_lights=storage->max_lights;
-        capture->inline_capacity=storage->inline_capacity;capture->spill_capacity=storage->spill_capacity;
+        capture->clustered=clustered;
         capture->outputs=versions;capture->valid=true;
     }
     return Result::Success();

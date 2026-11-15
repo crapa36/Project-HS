@@ -89,7 +89,6 @@ class SubsurfaceSystem
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
     // Called only after all old submissions have reliably completed.
-    void SwapState(SubsurfaceSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
     [[nodiscard]] Result RegisterFrame(RenderGraphBuilder &, const SubsurfaceInputs &,
         SubsurfaceConstants, SubsurfaceOutputs &, SubsurfaceLayout *, const SubsurfaceLayout *);

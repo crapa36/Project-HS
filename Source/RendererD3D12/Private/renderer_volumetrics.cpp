@@ -1,5 +1,6 @@
 #include "renderer_volumetrics.hpp"
 #include "renderer_pipeline_cache.hpp"
+#include "renderer_probe.hpp"
 #include "d3d12_resources.hpp"
 
 #include <D3D12MemAlloc.h>
@@ -31,7 +32,9 @@ Result Native(std::string_view operation,HRESULT hr)
 Result CreateVolumetricRootSignature(ID3D12Device *device,RendererPipelineCache *cache,
     ComPtr<ID3D12RootSignature> &root)
 {
-    D3D12_DESCRIPTOR_RANGE1 ranges[11]{};
+#define HS_VM_COUNT_RANGE(name,index,count,base,space,offset) + 1
+    D3D12_DESCRIPTOR_RANGE1 ranges[4 HS_VM_EXTERNAL_RANGES(HS_VM_COUNT_RANGE)]{};
+#undef HS_VM_COUNT_RANGE
     ranges[0]={D3D12_DESCRIPTOR_RANGE_TYPE_CBV,1,HS_VM_CONSTANT_REGISTER,HS_VM_SPACE,
         D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE,0};
     ranges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,VmSrvHeroes-VmSrvDepth,VmSrvDepth,HS_VM_SPACE,
@@ -79,7 +82,7 @@ Result CreateVolumetricRootSignature(ID3D12Device *device,RendererPipelineCache 
 }
 bool Extent(ViewExtent extent)
 {return extent.width&&extent.height&&extent.width<=D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION&&extent.height<=D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION;}
-struct Budget { UINT stride{},slices{},area_samples{}; };
+struct Budget { UINT stride{},slices{}; };
 ViewExtent FroxelExtent(ViewExtent render,UINT stride)
 {return {(render.width+stride-1)/stride,(render.height+stride-1)/stride};}
 DirectX::XMFLOAT4 Size(ViewExtent e)
@@ -175,7 +178,6 @@ Result HeroRecords(VfxVolumeInputs inputs,std::vector<HeroState> &states)
            input.steps!=(crown?18u:12u)||std::uint32_t(input.shape)>std::uint32_t(VfxVolumeShape::BoundedCrown)||
            input.noise!=(crown?VfxVolumeNoise::None:VfxVolumeNoise::Fbm3D)||input.half_resolution>1||
            !std::isfinite(input.elapsed_seconds)||input.elapsed_seconds<0||!std::isfinite(input.source_age)||input.source_age<0||input.source_age>1||
-           !std::isfinite(input.authored_scale)||input.authored_scale<=0||!std::isfinite(input.hdr)||input.hdr<0||
            !std::isfinite(input.source_envelope)||input.source_envelope<0||input.source_envelope>1||
            !std::isfinite(input.density)||input.density<0||!std::isfinite(input.alpha)||input.alpha<0||input.alpha>1||
            !std::isfinite(input.extinction)||input.extinction<0||!std::isfinite(input.anisotropy)||std::abs(input.anisotropy)>=1||
@@ -208,7 +210,7 @@ Result HeroRecords(VfxVolumeInputs inputs,std::vector<HeroState> &states)
         state.gpu.effect_source={UINT(id.effect_id),UINT(id.effect_id>>32),id.source_id,id.source_index};
         state.gpu.owner_event={UINT(id.owner_id),UINT(id.owner_id>>32),UINT(id.event_sequence),UINT(id.event_sequence>>32)};
         state.gpu.episode_output={UINT(id.episode_generation),UINT(id.episode_generation>>32),id.output_index,id.effect_handle};
-        state.local_to_world=input.local_to_world;state.revisions={input.transform_revision,input.density_revision,input.appearance_revision};
+        state.local_to_world=input.local_to_world;
         states.push_back(state);
     }
     std::sort(states.begin(),states.end(),[](const auto &a,const auto &b){return HeroKey(a.identity)<HeroKey(b.identity);});
@@ -302,17 +304,17 @@ struct VolumetricStorage
 };
 namespace
 {
-std::array<ResourceVersion,24> InputVersions(const VolumetricInputs &in)
+std::array<ResourceVersion,22> InputVersions(const VolumetricInputs &in)
 {
     return {in.depth.version,in.hdr.version,
-        in.lights.lights,in.lights.ranges,in.lights.inline_indices,in.lights.spill_indices,
+        in.lights.lights,in.lights.grid,
         in.shadows.metadata,in.shadows.page_table,in.shadows.static_bank,
         in.shadows.dynamic_bank,in.shadows.draw_records,in.shadows.root_static,
         in.shadows.root_dynamic,in.local_shadows.metadata,in.local_shadows.records,
         in.local_shadows.static_bank,in.local_shadows.dynamic_bank,
         in.local_shadows.draw_records,in.compact_shadow.atlas.version,
         in.hero_blue_noise.version,in.hero_gradient.version,in.hero_noise_volume.version,
-        in.probe_irradiance.version,in.probe_records.version};
+        in.probe_sh.version,in.probe_records.version};
 }
 bool HeroHistoryMatches(VfxVolumeInputs inputs,const std::vector<HeroState> &previous) noexcept
 {
@@ -341,7 +343,6 @@ bool HeroHistoryMatches(VfxVolumeInputs inputs,const std::vector<HeroState> &pre
         current.local_to_world=in.local_to_world;
         current.bounds={in.bounds_min.x,in.bounds_min.y,in.bounds_min.z,
             in.bounds_max.x,in.bounds_max.y,in.bounds_max.z};
-        current.revisions={in.transform_revision,in.density_revision,in.appearance_revision};
         if(!(current==*found))return false;
     }
     return true;
@@ -422,7 +423,7 @@ Result VolumetricSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloca
     GraphicsOptionalQuality quality,const render_data::QualityProfile &profile,ViewExtent capacity,UINT frames,UINT maxVolumes,const VolumetricShaderReader &reader,
     VolumetricCandidate &candidate,RendererPipelineCache *cache,bool heroEnabled)const
 {
-    const bool enabled=quality!=GraphicsOptionalQuality::Off;const Budget budget=enabled?Budget{profile.froxel_stride,profile.froxel_slices,profile.volumetric_area_samples}:Budget{};
+    const bool enabled=quality!=GraphicsOptionalQuality::Off;const Budget budget=enabled?Budget{profile.froxel_stride,profile.froxel_slices}:Budget{};
     if(!Extent(capacity)||!frames||frames>UINT_MAX/kVolumetricDescriptorCount||
        (enabled&&UINT64(maxVolumes)>UINT64(SIZE_MAX)/(UINT64(frames)*sizeof(VolumetricVolume)))||
        (enabled&&heroEnabled&&UINT64(maxVolumes)>UINT64(SIZE_MAX)/(UINT64(frames)*sizeof(VolumetricHeroVolume)))||
@@ -594,16 +595,16 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
                 return Fail(ErrorCode::InvalidArgument,"Local volume world-to-local transform must be nonsingular affine.");
         }
     }
-    const ResourceVersion lightVersions[]{in.lights.lights,in.lights.ranges,in.lights.inline_indices,in.lights.spill_indices};
-    for(UINT i=0;i<4;++i)if(!ResourceRead(graph,lightVersions[i],in.lights.resources[i]))
-        return Fail(ErrorCode::InvalidArgument,"Volumetric world-light query requires all four authoritative LightList resources.");
-    for(const auto &probe:{in.probe_irradiance,in.probe_records})
+    const ResourceVersion lightVersions[]{in.lights.lights,in.lights.grid};
+    for(UINT i=0;i<std::size(lightVersions);++i)if(!ResourceRead(graph,lightVersions[i],in.lights.resources[i]))
+        return Fail(ErrorCode::InvalidArgument,"Volumetric world-light query requires both authoritative LightList resources.");
+    for(const auto &probe:{in.probe_sh,in.probe_records})
         if(in.probe_ready?!ResourceRead(graph,probe.version,probe.resource):
             (probe.resource!=nullptr||bool(probe.version.resource)))
-            return Fail(ErrorCode::InvalidArgument,"Volumetric baked irradiance requires both current probe buffers or neither.");
+            return Fail(ErrorCode::InvalidArgument,"Volumetric baked irradiance requires all current probe resources or none.");
     if(in.probe_ready)
     {
-        const auto sh=in.probe_irradiance.resource->GetDesc(),records=in.probe_records.resource->GetDesc();
+        const auto sh=in.probe_sh.resource->GetDesc(),records=in.probe_records.resource->GetDesc();
         if(sh.Dimension!=D3D12_RESOURCE_DIMENSION_BUFFER||records.Dimension!=D3D12_RESOURCE_DIMENSION_BUFFER||
             sh.Width<16||sh.Width%16||sh.Width/16>UINT_MAX||records.Width<128||records.Width%128||records.Width/128>UINT_MAX)
             return Fail(ErrorCode::InvalidArgument,"Volumetric baked irradiance buffers do not match their structured SRV ABI.");
@@ -715,7 +716,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
     c.origin_near={in.camera.origin.x,in.camera.origin.y,in.camera.origin.z,in.camera.near_plane};
     c.previous_origin_near={previous.origin.x,previous.origin.y,previous.origin.z,previous.near_plane};
     c.depth_range={in.camera.far_plane,std::log2(in.camera.far_plane/in.camera.near_plane),previous.far_plane,std::log2(previous.far_plane/previous.near_plane)};
-    c.shadow_identity=in.compact_shadow.identity;c.frame_info={UINT(p.frame),UINT(p.frame>>32),p.history?1u:0u,s->budget.area_samples};
+    c.shadow_identity=in.compact_shadow.identity;c.frame_info={UINT(p.frame),UINT(p.frame>>32),p.history?1u:0u,0u};
     c.counts={UINT(in.volumes.size()),s->budget.slices,shadows?1u:0u,in.probe_ready?1u:0u};
     c.hero_info={UINT(p.heroes_state.size()),s->hero_enabled?1u:0u,localShadows?1u:0u,0u};
     if(in.compact_shadow.identity.w)
@@ -768,14 +769,14 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
                                         &noiseVolume,s->Cpu(p.slot,VmSrvDescriptorNoiseVolume));
     for(UINT i=0;i<2;++i)
     {
-        auto *resource=i==0?in.probe_irradiance.resource:in.probe_records.resource;
+        auto *resource=i==0?in.probe_sh.resource:in.probe_records.resource;
         const UINT stride=i==0?16u:128u;
         D3D12_SHADER_RESOURCE_VIEW_DESC view{};
         view.Format=DXGI_FORMAT_UNKNOWN;view.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
         view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         view.Buffer.StructureByteStride=stride;
         view.Buffer.NumElements=resource?static_cast<UINT>(resource->GetDesc().Width/stride):1u;
-        s->device->CreateShaderResourceView(resource,&view,s->Cpu(p.slot,VmExternalProbeIrradiance+i));
+        s->device->CreateShaderResourceView(resource,&view,s->Cpu(p.slot,VmExternalProbeSh+i));
     }
     VolumetricShaderBinder binder;if(auto result=in.make_bindings(s->Cpu(p.slot,0),kVolumetricDescriptorCount,binder);!result)return result;
     if(!binder)return Fail(ErrorCode::InvalidArgument,"Volumetric frame table builder returned no compute binder.");
@@ -784,7 +785,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
     retain(in.depth.resource);retain(in.hdr.resource);if(in.compact_shadow.identity.w)retain(in.compact_shadow.atlas.resource);
     for(auto *resource:in.lights.resources)retain(resource);for(auto *resource:in.shadows.resources)retain(resource);
     for(auto *resource:in.local_shadows.resources)retain(resource);
-    retain(in.probe_irradiance.resource);retain(in.probe_records.resource);
+    retain(in.probe_sh.resource);retain(in.probe_records.resource);
     if(!p.heroes_state.empty()){retain(in.hero_blue_noise.resource);retain(in.hero_gradient.resource);
         retain(in.hero_noise_volume.resource);}
     auto execute=[s,binder,froxel=p.froxel,active=p.active](UINT stage)
@@ -857,7 +858,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
         HS_VM_LIGHTING_READS(HS_VM_READ)
 #undef HS_VM_READ
 #define HS_VM_EXTERNAL_Lights for(auto version:lightVersions)lighting.Read(version,Access::ComputeRead);
-#define HS_VM_EXTERNAL_Probes if(in.probe_ready){lighting.Read(in.probe_irradiance.version,Access::ComputeRead);lighting.Read(in.probe_records.version,Access::ComputeRead);}
+#define HS_VM_EXTERNAL_Probes if(in.probe_ready){lighting.Read(in.probe_sh.version,Access::ComputeRead);lighting.Read(in.probe_records.version,Access::ComputeRead);}
 #define HS_VM_EXTERNAL_Shadows if(shadows)for(const auto &read:shadowReads)if(read.resource)lighting.Read(read.version,read.access);
 #define HS_VM_EXTERNAL_LocalShadows if(localShadows)for(auto version:localShadowVersions)lighting.Read(version,Access::AllShaderRead);
 #define HS_VM_EXTERNAL_CompactShadow if(in.compact_shadow.identity.w)lighting.Read(*srv_versions[VmSrvCompactShadow],Access::ComputeRead);

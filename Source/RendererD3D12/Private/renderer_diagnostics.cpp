@@ -158,9 +158,10 @@ void RendererDiagnosticsRecorder::RecordRenderedFrame(std::uint64_t id, std::uin
     if (!id || id < last_rendered_id_) { ++rejected_; return; }
     if (id == last_rendered_id_) { ++duplicates_; return; }
     std::uint64_t view_sequence{};
-    for (const auto &recorded : frames_)
-        if (recorded.rendered_frame_id && recorded.view_id == view_id)
-            view_sequence = std::max(view_sequence, recorded.view_render_sequence);
+    if (view_id != kMainRenderViewId.value)
+        for (const auto &recorded : frames_)
+            if (recorded.rendered_frame_id && recorded.view_id == view_id)
+                view_sequence = std::max(view_sequence, recorded.view_render_sequence);
     auto &frame = frames_[next_frame_];
     frame = {};
     frame.rendered_frame_id = id;
@@ -197,16 +198,6 @@ void RendererDiagnosticsRecorder::RecordCompleted(const GpuPassTimings &timings)
     if (entry == frames_.end()) { ++rejected_; return; }
     if (entry->fence_completed) { ++duplicates_; return; }
     entry->fence_completed = true;
-    if (entry->view_id == kMainRenderViewId.value)
-    {
-        // Independent retention prevents preview/capture submissions from
-        // evicting the base-cadence window used by the sole presentation owner.
-        main_cadence_[entry->view_render_sequence % main_cadence_.size()] = {
-            entry->view_render_sequence, entry->rendered_frame_id, entry->submit_qpc,
-            entry->qpc_frequency, entry->presented, entry->validation_enabled,
-            entry->gpu_validation_enabled};
-        latest_main_cadence_sequence_ = std::max(latest_main_cadence_sequence_, entry->view_render_sequence);
-    }
     entry->cpu_recording_available = timings.cpu_recording_valid && std::isfinite(timings.cpu_recording_ms) && timings.cpu_recording_ms >= 0.0;
     entry->cpu_recording_ms = entry->cpu_recording_available ? timings.cpu_recording_ms : 0.0;
     entry->gpu_critical_path_available = timings.critical_path_valid && std::isfinite(timings.critical_path_ms) && timings.critical_path_ms > 0.0;
@@ -260,34 +251,6 @@ bool RendererDiagnosticsRecorder::HasCompleted(std::uint64_t frame_id, std::uint
         return frame.rendered_frame_id == frame_id && frame.view_id == view_id &&
                frame.fence_completed;
     });
-}
-
-CompletedRenderCadence RendererDiagnosticsRecorder::RecentCompletedMainCadence(
-    std::uint32_t maximum_intervals) const noexcept
-{
-    CompletedRenderCadence result;
-    const MainCadenceSample *newer{};
-    double seconds{};
-    for (std::uint64_t offset = 0; offset < main_cadence_.size() && offset < latest_main_cadence_sequence_ &&
-         result.intervals < maximum_intervals; ++offset)
-    {
-        const auto sequence = latest_main_cadence_sequence_ - offset;
-        const auto &frame = main_cadence_[sequence % main_cadence_.size()];
-        if (frame.sequence != sequence) break;
-        if (!frame.presented || !frame.submit_qpc || !frame.qpc_frequency) break;
-        if (newer)
-        {
-            if (newer->qpc_frequency != frame.qpc_frequency || newer->submit_qpc <= frame.submit_qpc ||
-                newer->validation != frame.validation || newer->gpu_validation != frame.gpu_validation) break;
-            seconds += static_cast<double>(newer->submit_qpc - frame.submit_qpc) /
-                       static_cast<double>(frame.qpc_frequency);
-            ++result.intervals;
-        }
-        else result.newest_frame_id = frame.frame_id;
-        newer = &frame;
-    }
-    if (seconds > 0.0) result.fps = static_cast<double>(result.intervals) / seconds;
-    return result;
 }
 
 RendererDiagnosticsSnapshot RendererDiagnosticsRecorder::Snapshot() const
@@ -446,36 +409,27 @@ RendererDiagnosticsMemory D3D12Renderer::Impl::DiagnosticsMemory() const
     };
     for (const auto &entry : owned_views) add_guides(*entry.second);
     for (const auto &owner : unresolved_view_candidates) add_guides(*owner);
-    for (const auto &resident : unresolved_resident_candidates)
-    {
-        for (const auto &entry : resident->owned_views) add_guides(*entry.second);
-        for (const auto &owner : resident->unresolved_view_candidates) add_guides(*owner);
-    }
     return output;
 }
-#endif
-
 RendererDiagnosticsSnapshot D3D12Renderer::GetDiagnostics() const
 {
-#if defined(HS_DEVELOPMENT_TOOLS)
     if (!impl_) return {};
     // Refresh completed slots on a copy so capture can include the final frames
     // after a GPU wait without mutating the recorder through this const API.
     auto recorder = impl_->diagnostics;
-    for (const auto &frame : impl_->frames)
-        if (frame.timestamps_recorded && !recorder.HasCompleted(frame.submitted_frame_id, frame.submitted_view_id) &&
-            frame.completion.IsSatisfiedBy(impl_->graph_queue_executor.Completed()))
-            recorder.RecordCompleted(impl_->ReadFrameGpuTimings(frame));
+    if (impl_->config.capture_timing_stream)
+        for (const auto &frame : impl_->frames)
+            if (frame.timestamps_recorded && !recorder.HasCompleted(frame.submitted_frame_id, frame.submitted_view_id) &&
+                frame.completion.IsSatisfiedBy(impl_->graph_queue_executor.Completed()))
+                recorder.RecordCompleted(impl_->ReadFrameGpuTimings(frame));
     auto output = recorder.Snapshot();
     output.current_memory = impl_->DiagnosticsMemory();
     output.streaming = ResidencyStats();
     output.presentation = GetPresentationStatus();
     output.reconstruction = GetReconstructionStatus();
     return output;
-#else
-    return {};
-#endif
 }
+#endif
 
 Result D3D12Renderer::Impl::CheckDevice(HRESULT result, std::string_view operation)
 {

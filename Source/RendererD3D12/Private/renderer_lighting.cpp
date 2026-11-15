@@ -76,7 +76,7 @@ RendererFeaturePlan D3D12Renderer::Impl::ResolveFeatures(const RendererConfig &r
         (request.product_paths.contains("render/shader/adaptive_shading_rate_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_shading_rate_cs.dxil"));
     available.adaptive_compute_consumer = available.adaptive_compute_consumer &&
         (request.product_paths.contains("render/shader/adaptive_shading_classify_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_shading_classify_cs.dxil")) &&
-        (request.product_paths.contains("render/shader/adaptive_gtao_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_gtao_cs.dxil"));
+        (request.product_paths.contains(kAoAdaptiveShaderProduct) || FindRendererBulk(request, kAoAdaptiveShaderProduct));
     return ResolveRendererFeatures({request.ao_mode,
         request.gi_mode, request.reflection_mode, request.shadow_mode, request.adaptive_shading}, available);
 }
@@ -96,7 +96,7 @@ Result D3D12Renderer::Impl::PrepareLightList(const OwnedView &owner, const Rende
             RendererAssetSource path;
             if (auto resolved = ResolveRendererAsset(candidate_config, logical_id, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
-        }, candidate, QualityProfileFor(candidate_config.lighting_quality).lighting_cluster_capacity);
+        }, candidate);
 }
 Result D3D12Renderer::Impl::PrepareVirtualShadows(const OwnedView &owner, const RendererConfig &candidate_config,
     ViewExtent capacity, VirtualShadowCandidate &candidate) const
@@ -183,7 +183,6 @@ Result D3D12Renderer::Impl::PrepareAdditionalShadows(const OwnedView &owner, con
     local.filter_samples = quality.shadow_filter_samples;
     local.maximum_lights = quality.local_shadow_max_lights;
     local.face_resolution = quality.local_shadow_resolution;
-    local.area_samples = quality.local_shadow_area_samples;
     local.byte_budget = UINT64(quality.local_shadow_budget_mib) * mib;
     local.max_casters = 65536; local.max_draw_groups = 128; local.command_capacity = 65536;
     local.frame_slots = kFrameCount;
@@ -206,16 +205,6 @@ Result D3D12Renderer::Impl::PrepareLightingProbe(const RendererConfig &candidate
     std::vector<std::byte> bytes;
     if (auto read = ReadBinary(path, bytes); !read) return read;
     return lighting_probe.Prepare(device.Get(), allocator, bytes, candidate);
-}
-Result D3D12Renderer::Impl::PrepareLtcLut(const RendererConfig &candidate_config,
-    LtcLutCandidate &candidate) const
-{
-    RendererAssetSource path;
-    if (auto resolved = ResolveRendererAsset(candidate_config, "render/lighting/default_ltc.rpkg", path); !resolved)
-        return resolved;
-    std::vector<std::byte> bytes;
-    if (auto read = ReadBinary(path, bytes); !read) return read;
-    return ltc_lut.Prepare(device.Get(), allocator, bytes, candidate);
 }
 Result D3D12Renderer::Impl::PrepareAdaptiveShading(const OwnedView &owner, const RendererConfig &candidate_config,
     ViewExtent capacity, AdaptiveShadingCandidate &candidate) const

@@ -216,7 +216,7 @@ struct RendererPsoCacheStats
 // operations are nested subsets, including overlaps. Neither measures driver/GPU busy time.
 enum class RendererStartupStep : std::uint8_t
 {
-    QualityProfiles, Configuration, Device, MaterialSurfaceProfile, AdaptiveMaterialPolicies, TransientPools, SwapchainTargets, DepthShadow, UiTexture, PostProcessTargets, MainPipeline, CharacterGeometryAnimation, CharacterTextures, EnvironmentTextures, EnvironmentBrdfLut, EnvironmentBrdfDescriptors, MaterialParameters, EnvironmentMeshes, HardwareTextureStreaming, PresentationGuides, ClusterResources, VirtualShadows, AdditionalShadows, AdaptiveShading, AmbientOcclusion, SurfaceLighting, LayeredTranslucency, LightingProbe, LtcLut, ScreenOverlay, HdrPost, LightList, Volumetrics, LocalProbes, ReconstructionGuides, Devtools, InitialGraphicsSettings, Count
+    QualityProfiles, Configuration, Device, MaterialSurfaceProfile, AdaptiveMaterialPolicies, TransientPools, SwapchainTargets, DepthShadow, UiTexture, PostProcessTargets, MainPipeline, CharacterGeometryAnimation, CharacterTextures, EnvironmentTextures, EnvironmentBrdfLut, EnvironmentBrdfDescriptors, MaterialParameters, EnvironmentMeshes, HardwareTextureStreaming, PresentationGuides, ClusterResources, VirtualShadows, AdditionalShadows, AdaptiveShading, AmbientOcclusion, SurfaceLighting, LayeredTranslucency, LightingProbe, ScreenOverlay, HdrPost, LightList, Volumetrics, LocalProbes, ReconstructionGuides, Devtools, InitialGraphicsSettings, Count
 };
 inline constexpr std::array<std::string_view, static_cast<std::size_t>(RendererStartupStep::Count)> kRendererStartupStepNames{
     "quality_profiles",
@@ -247,7 +247,6 @@ inline constexpr std::array<std::string_view, static_cast<std::size_t>(RendererS
     "surface_lighting",
     "hero_transparency",
     "lighting_probe",
-    "ltc_lut",
     "screen_overlay",
     "hdr_post",
     "light_list",
@@ -333,7 +332,6 @@ struct RendererConfig
     GraphicsQuality foliage_quality{GraphicsQuality::Medium};
     GraphicsQuality material_quality{GraphicsQuality::Medium};
     GraphicsOptionalQuality pom_quality{GraphicsOptionalQuality::Medium};
-    GraphicsQuality lighting_quality{GraphicsQuality::Medium};
     GraphicsAutoToggle adaptive_shading{GraphicsAutoToggle::Auto};
     GraphicsAoMode ao_mode{GraphicsAoMode::GTAO};
     GraphicsQuality ao_quality{GraphicsQuality::Medium};
@@ -359,6 +357,9 @@ struct RendererConfig
     // Optional canonical startup request. When present, Initialize projects
     // this full snapshot before native device and pipeline preparation.
     std::optional<GraphicsSettings> requested_graphics;
+    // Immutable catalog backing outlives the renderer and its joined callbacks.
+    PreparedVfxMeshRecipeView vfx_mesh_recipes;
+    PreparedVfxFresnelRecipeView vfx_fresnel_recipes;
     ParticleSpriteBinding bleed_status_sprite{};
     ParticleSpriteBinding burn_status_sprite{};
     ParticleSpriteBinding slow_status_sprite{};
@@ -484,8 +485,6 @@ struct RendererFrameResult
     std::uint8_t debug_command{};
     std::uint64_t debug_value{};
     std::uint32_t debug_secondary{};
-    std::uint32_t typed_vfx_event_count{};
-    std::uint32_t typed_vfx_persistent_count{};
     std::uint32_t typed_vfx_ground_count{};
     std::uint32_t typed_vfx_flash_count{};
     std::uint32_t typed_vfx_mesh_count{};
@@ -501,7 +500,6 @@ struct RendererFrameResult
     RenderViewInput rendered_view;
     std::uint64_t view_history_generation{};
     std::array<float, 16> unjittered_view_projection{};
-    std::vector<RenderViewFrameResult> views;
     RendererCpuTimings cpu_timings;
     RendererStreamlinePresentCount streamline_present;
     // World mutation accepted by GPU queues, including a later view/Present failure.
@@ -514,6 +512,11 @@ struct RendererFrameResult
     // At least one view accepted its graph/service submissions, even if Present failed.
     bool render_history_committed{};
     PreviewEditValues preview;
+};
+
+struct RendererToolFrameResult : RendererFrameResult
+{
+    std::vector<RenderViewFrameResult> views;
 };
 
 struct RendererOptions;
@@ -769,33 +772,16 @@ class D3D12Renderer
     [[nodiscard]] Result RequestGraphicsSettings(const GraphicsSettingsRequest &);
     [[nodiscard]] SettingsApplyResult GetGraphicsSettingsStatus() const;
     [[nodiscard]] GraphicsCapabilitiesView GetGraphicsCapabilities() const;
-#if defined(HS_DEVELOPMENT_TOOLS)
-    // Render-thread transaction. The caller validates payload digests and keeps
-    // both Generation reader leases alive until this operation returns.
-    // Reflected parameter defaults may change with an identical layout; such
-    // adoption publishes a new GPU table without replacing any PSO.
-    [[nodiscard]] Result ReloadShaderGeneration(
-        const std::string &generation_id,
-        const std::unordered_map<std::string, std::filesystem::path> &product_paths,
-        const std::unordered_map<std::string, std::string> &product_digests);
-    // Caller validates the selected immutable manifest/products. Preparation
-    // keeps its actual reader lease; publication occurs after all queue uses drain.
-    // resident_replaced is false on failure/no-op/narrow and true after a full commit;
-    // allow_resident_replacement=false rejects only the full path before preparation.
-    [[nodiscard]] Result ReloadContentGeneration(
-        const std::string &generation_id,
-        const std::unordered_map<std::string, std::filesystem::path> &product_paths,
-        const std::unordered_map<std::string, std::string> &product_digests,
-        std::shared_ptr<const void> reader_lease,
-        const RendererVfxSpriteBindings *sprite_bindings = nullptr,
-        bool *resident_replaced = nullptr,
-        bool allow_resident_replacement = true);
-#endif
     [[nodiscard]] std::uint64_t MaterialParameterRevision() const noexcept;
     [[nodiscard]] std::uint64_t PipelineRevision() const noexcept;
     void HandleWindowMessage(const NativeWindowMessage &message) noexcept;
     [[nodiscard]] RenderViewInput MainViewInput(const CameraView &) const;
     [[nodiscard]] Result Render(const RenderPackage &, RendererFrameResult &);
+#if defined(HS_DEVELOPMENT_TOOLS) || defined(HS_OFFLINE_PROBE_BAKER)
+    [[nodiscard]] Result ConfigureView(const RenderViewConfiguration &);
+    [[nodiscard]] Result RenderViews(const RenderPackage &, std::span<const RenderViewSample>,
+                                     RendererToolFrameResult &);
+#endif
     [[nodiscard]] Result Capture(const CaptureRequest &);
     // Offline and synchronous; Initialize is sufficient without a Render call.
     // First publication policy: describe all three levels, bake only coarse level 2.
@@ -823,7 +809,9 @@ class D3D12Renderer
             render_data::TextureDescription, std::array<std::byte,32>)> &begin,
         const std::function<Result(std::uint32_t, std::span<const std::byte>)> &section_sink);
 #endif
+#if defined(HS_DEVELOPMENT_TOOLS) || defined(HS_OFFLINE_PROBE_BAKER)
     [[nodiscard]] Result ReleaseView(ViewId);
+#endif
 
     [[nodiscard]] Result Shutdown();
     [[nodiscard]] bool UsesEnhancedBarriers() const noexcept;
@@ -868,8 +856,10 @@ class D3D12Renderer
 #endif
     [[nodiscard]] RendererPsoCacheStats GetPipelineCacheStats() const;
     [[nodiscard]] RendererStartupTimings GetStartupTimings() const noexcept;
+#if defined(HS_DEVELOPMENT_TOOLS)
     // Call on the renderer owner thread; the returned bounded value owns its data.
     [[nodiscard]] RendererDiagnosticsSnapshot GetDiagnostics() const;
+#endif
 
   private:
 #if defined(HS_OFFLINE_PROBE_BAKER)
@@ -887,7 +877,9 @@ class D3D12Renderer
     [[nodiscard]] Result ApplyOptions(const RendererOptions &options);
     [[nodiscard]] Result InitializeGraphicsSettings(const GraphicsSettings &);
     struct CanonicalFrame;
-    [[nodiscard]] Result RenderView(const CanonicalFrame &, const RenderViewInput &,
+    [[nodiscard]] Result RenderFrame(const RenderPackage &, std::span<const RenderViewSample>,
+                                     std::vector<RenderViewFrameResult> *, RendererFrameResult &);
+    [[nodiscard]] Result RenderView(const CanonicalFrame &, const RenderViewSample &,
                                     bool consume_scene_inputs, float view_delta_seconds, RendererFrameResult &);
     struct Impl;
     std::unique_ptr<Impl> impl_;

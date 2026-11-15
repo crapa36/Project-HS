@@ -32,17 +32,12 @@ float3 AoViewPosition(int2 pixel, float depth)
 {
     float2 uv = (float2(pixel) + 0.5) * AoRenderSize.zw;
     float2 ndc = uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
-    if (AoParameters.w > 0.5)
-    {
-        float4 view;
-        view.x = mad(ndc.x, AoInverseProjection[0][0], AoInverseProjection[3][0]);
-        view.y = mad(ndc.y, AoInverseProjection[1][1], AoInverseProjection[3][1]);
-        view.z = mad(depth, AoInverseProjection[2][2], AoInverseProjection[3][2]);
-        view.w = mad(depth, AoInverseProjection[2][3], AoInverseProjection[3][3]);
-        return view.xyz * rcp(view.w);
-    }
-    float4 view = mul(float4(ndc, depth, 1.0), AoInverseProjection);
-    return view.xyz / view.w;
+    float4 view;
+    view.x = mad(ndc.x, AoViewXY.x, AoViewXY.z);
+    view.y = mad(ndc.y, AoViewXY.y, AoViewXY.w);
+    view.z = mad(depth, AoViewDepth.x, AoViewDepth.y);
+    view.w = mad(depth, AoViewDepth.z, AoViewDepth.w);
+    return view.xyz * rcp(view.w);
 }
 struct AoGuide
 {
@@ -76,9 +71,9 @@ bool AoLoadHorizonPosition(int2 pixel, out float3 position)
         const float inverseW = asfloat(packedInverseW);
         const float2 uv = (float2(pixel) + 0.5) * AoRenderSize.zw;
         const float2 ndc = uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
-        position.x = mad(ndc.x, AoInverseProjection[0][0], AoInverseProjection[3][0]) * inverseW;
-        position.y = mad(ndc.y, AoInverseProjection[1][1], AoInverseProjection[3][1]) * inverseW;
-        position.z = AoInverseProjection[3][2] * inverseW;
+        position.x = mad(ndc.x, AoViewXY.x, AoViewXY.z) * inverseW;
+        position.y = mad(ndc.y, AoViewXY.y, AoViewXY.w) * inverseW;
+        position.z = AoViewDepth.y * inverseW;
         // The full-resolution producer validated this exact position before publishing inverse-W.
         return true;
     }
@@ -104,10 +99,10 @@ void AoPrepareInverseWCS(uint3 dispatch : SV_DispatchThreadID)
     }
     const float2 uv = (float2(pixel) + 0.5) * AoRenderSize.zw;
     const float2 ndc = uv * float2(2.0, -2.0) + float2(-1.0, 1.0);
-    const float viewX = mad(ndc.x, AoInverseProjection[0][0], AoInverseProjection[3][0]);
-    const float viewY = mad(ndc.y, AoInverseProjection[1][1], AoInverseProjection[3][1]);
-    const float viewNumeratorZ = mad(depth, AoInverseProjection[2][2], AoInverseProjection[3][2]);
-    const float viewW = mad(depth, AoInverseProjection[2][3], AoInverseProjection[3][3]);
+    const float viewX = mad(ndc.x, AoViewXY.x, AoViewXY.z);
+    const float viewY = mad(ndc.y, AoViewXY.y, AoViewXY.w);
+    const float viewNumeratorZ = mad(depth, AoViewDepth.x, AoViewDepth.y);
+    const float viewW = mad(depth, AoViewDepth.z, AoViewDepth.w);
     const float inverseW = rcp(viewW);
     const float3 position = float3(viewX, viewY, viewNumeratorZ) * inverseW;
     if (!all(isfinite(position)) || position.z <= 0.0 || !isfinite(inverseW) || inverseW <= 0.0)

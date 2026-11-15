@@ -10,6 +10,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <string_view>
 
 namespace hs
 {
@@ -110,80 +111,72 @@ Result D3D12Renderer::Impl::PrepareTerrainPages(const std::shared_ptr<const Stat
         if(!std::isfinite(section.x)||!std::isfinite(section.z)||!std::isfinite(section.span_x)||
             !std::isfinite(section.span_z)||!std::isfinite(section.cosine)||!std::isfinite(section.sine))
             return TerrainFailure("Nonfinite terrain page transform.");
-    const bool archive_present=RendererIsAdmittedRuntimeProduct(config,kTerrainArchive);
-    const std::string archive_digest=archive_present?RendererProductDigest(config,kTerrainArchive):std::string{};
+    const bool registered_archive=!terrain_plane_stream_ids.empty();
+    const bool archive_present=registered_archive || RendererIsAdmittedRuntimeProduct(config,kTerrainArchive);
+    const std::string unregistered_archive_digest=archive_present && !registered_archive
+        ? RendererProductDigest(config,kTerrainArchive) : std::string{};
+    const std::string_view archive_digest=registered_archive
+        ? std::string_view(terrain_planes_archive_digest) : std::string_view(unregistered_archive_digest);
     if(archive_present && archive_digest.empty()) return TerrainFailure("Missing terrain archive digest.");
     const UINT first_mip=QualityProfileFor(config.texture_quality).texture_finest_mip;
-    bool recheck=scene_changed || terrain_parameters_changed || terrain_archive_digest!=archive_digest;
-    const auto segment=ResidencySegmentForHeap(D3D12_HEAP_TYPE_DEFAULT);
-    bool budget_updated=false;
+    bool recheck=scene_changed || terrain_parameters_changed ||
+        (!registered_archive && terrain_archive_digest!=archive_digest);
     if(!recheck && terrain_retry_budget_bytes)
-    {
-        if(auto r=UpdateResidencyBudget();!r) return r;
-        budget_updated=true;
-        recheck=residency.CanAdmit(terrain_retry_budget_bytes,10,segment);
-    }
+        recheck=!config.texture_budget_mib ||
+            UINT64(config.texture_budget_mib)*1024*1024>=terrain_retry_budget_bytes;
     UINT64 retry_budget_bytes=recheck?0:terrain_retry_budget_bytes;
     render_data::TerrainSurfacePackageView archive;
     std::vector<render_data::TerrainSurfaceTile> tiles;
     bool use_pages=recheck?false:terrain_static_pages_current;
     if(recheck && terrain_parameters_match && archive_present && !sections.empty())
     {
-#if defined(HS_DEVELOPMENT_TOOLS)
-        ++terrain_archive_reads;
-#endif
-        RendererAssetSource source;std::vector<std::byte> bytes;
-        if(auto r=ResolveRendererAsset(config,kTerrainArchive,source);!r) return r;
-        if(auto r=ReadBinary(source,bytes);!r) return r;
-        try{archive=render_data::ReadTerrainSurfacePackage(bytes,MakeAssetId(kTerrainArchive));}
-        catch(const std::exception &e){return TerrainFailure(e.what());}
-        // A scene outside the fixed cache domain continues through its source material.
+        // Registered planes retain this generation's admitted page layout.
         try{tiles=render_data::BuildTerrainSurfaceTiles(sections);}
         catch(const std::runtime_error &){tiles.clear();}
-        if(archive.layout_version==render_data::kTerrainSurfaceLayoutVersion &&
-            archive.sections.size()==tiles.size() && !tiles.empty())
+        if(registered_archive)
+            use_pages=!tiles.empty() && tiles.size()==terrain_tiles.size() &&
+                std::equal(tiles.begin(),tiles.end(),terrain_tiles.begin(),
+                    [](const auto &a,const auto &b){return a.section==b.section;});
+        else
         {
-            use_pages=true;
-            for(std::size_t i=0;i<tiles.size();++i)
-                if(archive.sections[i]!=tiles[i].section){use_pages=false;break;}
-            if(use_pages)
+#if defined(HS_DEVELOPMENT_TOOLS)
+            ++terrain_archive_reads;
+#endif
+            RendererAssetSource source;std::vector<std::byte> bytes;
+            if(auto r=ResolveRendererAsset(config,kTerrainArchive,source);!r) return r;
+            if(auto r=ReadBinary(source,bytes);!r) return r;
+            try{archive=render_data::ReadTerrainSurfacePackage(bytes,MakeAssetId(kTerrainArchive));}
+            catch(const std::exception &e){return TerrainFailure(e.what());}
+            if(archive.layout_version==render_data::kTerrainSurfaceLayoutVersion &&
+                archive.sections.size()==tiles.size() && !tiles.empty())
             {
-                std::array<std::byte,32> identity{};
-                if(auto r=TerrainPageSourceIdentity(identity);!r) return r;
-                use_pages=identity==archive.source_identity;
+                use_pages=true;
+                for(std::size_t i=0;i<tiles.size();++i)
+                    if(archive.sections[i]!=tiles[i].section){use_pages=false;break;}
+                if(use_pages)
+                {
+                    std::array<std::byte,32> identity{};
+                    if(auto r=TerrainPageSourceIdentity(identity);!r) return r;
+                    use_pages=identity==archive.source_identity;
+                }
             }
         }
     }
-    if(recheck && use_pages)
+    if(recheck && use_pages && first_mip>=render_data::kTerrainSurfacePageMips)
+        return TerrainFailure("Terrain plane directory texture shape mismatch.");
+    if(recheck && use_pages && !registered_archive)
     {
         const auto &d=archive.description;
         if(d.width!=render_data::kTerrainSurfacePageEdge || d.height!=d.width || d.format!=render_data::kTextureFormatBc7 ||
-            d.mip_count!=render_data::kTerrainSurfacePageMips || first_mip>=d.mip_count ||
-            d.array_size!=archive.sections.size()*3 || archive.section_products.size()!=archive.sections.size())
-            return TerrainFailure("Terrain tile index texture shape mismatch.");
+            d.mip_count!=render_data::kTerrainSurfacePageMips ||
+            d.array_size!=archive.sections.size()*3 || archive.section_products.size()!=d.array_size)
+            return TerrainFailure("Terrain plane directory texture shape mismatch.");
         if(d.array_size>kTerrainPagePlaneCapacity) use_pages=false;
         if(use_pages && terrain_planes_archive_digest!=archive_digest)
         {
             if(resource_generation_id.empty() || !resident_generation_lease)
                 return TerrainFailure("Terrain streaming requires its actual resident generation lease.");
-            std::vector<std::string> plane_ids;
-            plane_ids.reserve(d.array_size);
-            for(std::size_t i=0;i<archive.section_products.size();++i)
-            {
-                const auto &id=archive.section_products[i]; RendererAssetSource source; std::vector<std::byte> bytes;
-                if(auto r=ResolveRendererAsset(config,id,source);!r) return r;
-                if(auto r=ReadBinary(source,bytes);!r) return r;
-                render_data::TerrainSurfacePackageView leaf;
-                try { leaf=render_data::ReadTerrainSurfacePackage(bytes,MakeAssetId(id)); }
-                catch(const std::exception &e) { return TerrainFailure(e.what()); }
-                auto expected=d; expected.array_size=3;
-                if(leaf.layout_version!=render_data::kTerrainSurfaceLeafLayoutVersion ||
-                    leaf.sections.size()!=1 || leaf.sections[0]!=archive.sections[i] ||
-                    !SameTextureShape(leaf.description,expected) || leaf.section_products.size()!=3 ||
-                    leaf.source_identity!=archive.source_identity)
-                    return TerrainFailure("Terrain tile plane directory mismatch.");
-                plane_ids.insert(plane_ids.end(),leaf.section_products.begin(),leaf.section_products.end());
-            }
+            const auto &plane_ids=archive.section_products;
             std::vector<render_data::TextureHandle> handles;
             std::vector<RendererAssetSource> sources;
             handles.reserve(plane_ids.size()); sources.reserve(plane_ids.size());
@@ -207,177 +200,42 @@ Result D3D12Renderer::Impl::PrepareTerrainPages(const std::shared_ptr<const Stat
                 catch(const std::exception &e) { return TerrainFailure(e.what()); }
                 handles.push_back(handle); sources.push_back(std::move(source));
             }
-            D3D12_RESOURCE_DESC tail_desc{}; tail_desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-            tail_desc.Width=std::max(1u,d.width>>4); tail_desc.Height=std::max(1u,d.height>>4);
-            tail_desc.DepthOrArraySize=1; tail_desc.MipLevels=static_cast<UINT16>(d.mip_count-4);
-            tail_desc.Format=DXGI_FORMAT_BC7_TYPELESS; tail_desc.SampleDesc.Count=1;
-            const auto color_bytes=device->GetResourceAllocationInfo(0,1,&tail_desc).SizeInBytes;
-            tail_desc.Format=DXGI_FORMAT_BC7_UNORM;
-            const auto linear_bytes=device->GetResourceAllocationInfo(0,1,&tail_desc).SizeInBytes;
-            const UINT64 color_count=plane_ids.size()/3, linear_count=plane_ids.size()-color_count;
-            if(!color_bytes || color_bytes==UINT64_MAX || !linear_bytes || linear_bytes==UINT64_MAX ||
-                (color_count && color_bytes>UINT64_MAX/color_count) ||
-                (linear_count && linear_bytes>UINT64_MAX/linear_count))
-                return TerrainFailure("Invalid terrain tail allocation size.");
-            const UINT64 color_total=color_bytes*color_count, linear_total=linear_bytes*linear_count;
-            if(color_total>UINT64_MAX-linear_total) return TerrainFailure("Terrain tail allocation size overflow.");
-            const UINT64 tail_total=color_total+linear_total;
-            if(!budget_updated)
-            {
-                if(auto r=UpdateResidencyBudget();!r) return r;
-                budget_updated=true;
-            }
-            if(!residency.CanAdmit(tail_total,10,segment))
-            {
-                retry_budget_bytes=tail_total;
-                use_pages=false;
-            }
-            if(use_pages)
-            {
             if(!terrain_plane_stream_ids.empty())
                 return TerrainFailure("Terrain plane owner differs from its resident generation.");
             std::vector<TextureStreamRegistration> registrations;
-            std::vector<std::shared_ptr<TerrainPlaneBacking>> backings;
             std::vector<TextureStreamId> streams(plane_ids.size());
-            registrations.reserve(plane_ids.size()); backings.reserve(plane_ids.size());
-            ComPtr<ID3D12CommandAllocator> command_allocator;
-            ComPtr<ID3D12GraphicsCommandList> list;
-            std::vector<AllocationResource> retained;
-            std::vector<std::byte> tail_bytes;
-            const UINT count=tail_desc.MipLevels;
-            std::vector<D3D12_PLACED_SUBRESOURCE_FOOTPRINT> footprints(count);
-            std::vector<UINT> rows(count);
-            std::vector<UINT64> row_bytes(count);
-            UINT64 upload_size{};
-            device->GetCopyableFootprints(&tail_desc,0,count,0,footprints.data(),rows.data(),row_bytes.data(),&upload_size);
-            constexpr UINT64 max_upload_batch=32ull*1024*1024;
-            if(!upload_size || upload_size>max_upload_batch) return TerrainFailure("Invalid terrain tail footprint.");
-            constexpr UINT64 align=D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT;
-            const UINT64 stride=(upload_size+align-1)/align*align;
-            const auto planes_per_batch=static_cast<std::size_t>(max_upload_batch/stride);
-            const auto flush=[&]() -> Result {
-                if(!list) return Result::Success();
-                const auto closed=list->Close();
-                if(FAILED(closed)) return HResultFailure("Close terrain tail list",closed);
-                if(auto r=SubmitResidentUtilityUpload(list.Get(),command_allocator.Get(),retained);!r) return r;
-                retained.clear(); list.Reset(); command_allocator.Reset();
-                return Result::Success();
-            };
+            registrations.reserve(plane_ids.size());
             for(std::size_t plane=0;plane<plane_ids.size();++plane)
             {
-                const auto &id=plane_ids[plane];
-                const auto handle=handles[plane];
-                const auto &descriptor=config.packed_textures[handle.value];
-                auto expected=d; expected.array_size=1;
-                const auto &source=sources[plane];
-                auto backing=std::make_shared<TerrainPlaneBacking>();
-                backing->generation_lease=resident_generation_lease;
-                constexpr UINT tail=4;
-                auto desc=tail_desc;
-                if(plane%3==0) desc.Format=DXGI_FORMAT_BC7_TYPELESS;
-                D3D12MA::ALLOCATION_DESC allocation{}; allocation.HeapType=D3D12_HEAP_TYPE_DEFAULT;
-                if(auto r=CreateAllocation(backing->fallback,allocation,desc,D3D12_RESOURCE_STATE_COPY_DEST);!r) return r;
-                const auto batch_plane=plane%planes_per_batch;
-                if(batch_plane==0)
-                {
-                    if(auto r=flush();!r) return r;
-                    const auto batch_count=std::min(planes_per_batch,plane_ids.size()-plane);
-                    retained.emplace_back();
-                    allocation.HeapType=D3D12_HEAP_TYPE_UPLOAD;
-                    if(auto r=CreateAllocation(retained.front(),allocation,BufferDescription(batch_count*stride),
-                        D3D12_RESOURCE_STATE_GENERIC_READ);!r) return r;
-                    auto result=device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&command_allocator));
-                    if(FAILED(result)) return HResultFailure("Create terrain tail allocator",result);
-                    result=device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,command_allocator.Get(),nullptr,IID_PPV_ARGS(&list));
-                    if(FAILED(result)) return HResultFailure("Create terrain tail list",result);
-                }
-                const UINT64 upload_offset=batch_plane*stride;
-                // The admitted descriptor lays out the mip suffix contiguously.
-                const auto &first=descriptor.subresources[tail];
-                const auto &last=descriptor.subresources.back();
-                tail_bytes.resize(static_cast<std::size_t>(last.offset-first.offset+last.byte_count));
-                ShippedContentOwner loose_file;
-                const ShippedContentOwner *file{};
-                UINT64 file_offset=first.offset;
-                if(source.IsPacked())
-                {
-                    file=source.Packed().owner.get();
-                    file_offset+=source.Packed().range.offset;
-                }
-                else
-                {
-                    if(auto r=ShippedContentOwner::Open(source.Loose().path,loose_file);!r) return r;
-                    file=&loose_file;
-                }
-                if(auto r=file->ReadExact(file_offset,tail_bytes);!r) return r;
-                for(UINT mip=0;mip<count;++mip)
-                {
-                    const auto &input=descriptor.subresources[mip+tail];
-                    const auto bytes=std::span(tail_bytes).subspan(input.offset-first.offset,input.byte_count);
-                    if(row_bytes[mip]!=input.row_pitch || UINT64(rows[mip])*input.row_pitch!=input.byte_count ||
-                        Sha256(bytes)!=input.digest)
-                        return TerrainFailure("Terrain tail payload or upload footprint mismatch.");
-                }
-                void *address{}; D3D12_RANGE empty{};
-                auto hr=retained.front().resource->Map(0,&empty,&address);
-                if(FAILED(hr)) return HResultFailure("Map terrain tail upload",hr);
-                for(UINT mip=0;mip<count;++mip)
-                {
-                    const auto &input=descriptor.subresources[mip+tail];
-                    const auto *bytes=tail_bytes.data()+(input.offset-first.offset);
-                    auto *out=static_cast<std::byte *>(address)+upload_offset+footprints[mip].Offset;
-                    const auto pitch=footprints[mip].Footprint.RowPitch;
-                    if(pitch==input.row_pitch)
-                        std::memcpy(out,bytes,input.byte_count);
-                    else for(UINT row=0;row<rows[mip];++row)
-                        std::memcpy(out+UINT64(row)*pitch,bytes+UINT64(row)*input.row_pitch,input.row_pitch);
-                }
-                retained.front().resource->Unmap(0,nullptr);
-                for(UINT mip=0;mip<count;++mip)
-                {
-                    D3D12_TEXTURE_COPY_LOCATION to{},from{}; to.pResource=backing->fallback.resource.Get();
-                    to.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; to.SubresourceIndex=mip;
-                    from.pResource=retained.front().resource.Get(); from.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-                    from.PlacedFootprint=footprints[mip]; from.PlacedFootprint.Offset+=upload_offset;
-                    from.PlacedFootprint.Footprint.Format=desc.Format;
-                    list->CopyTextureRegion(&to,0,0,0,&from,nullptr);
-                }
-                Transition(list.Get(),backing->fallback.resource.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COMMON);
-                retained.emplace_back(); retained.back().resource=backing->fallback.resource;
-                retained.back().allocation=backing->fallback.allocation; retained.back().allocation->AddRef();
-                backing->fallback.graph_access=Access::Common;
-                if(auto r=backing->fallback.EnsureNativeContract(device.Get());!r) return r;
                 TextureStreamRegistration registration;
-                registration.generation=resource_generation_id; registration.logical_id=id;
-                registration.source=source; registration.generation_lease=backing;
-                registration.description=expected; registration.compiled_texture=handle;
-                registration.fallback=backing->fallback.resource;
-                registration.fallback_contract=*backing->fallback.NativeContract();
-                registration.fallback_graph_access=Access::Common; registration.fallback_first_mip=tail;
-                registration.fallback_allocation_bytes=backing->fallback.allocation->GetSize();
+                registration.generation=resource_generation_id; registration.logical_id=plane_ids[plane];
+                registration.source=std::move(sources[plane]); registration.generation_lease=resident_generation_lease;
+                registration.description=d; registration.description.array_size=1;
+                registration.compiled_texture=handles[plane];
+                // Unpublished pages use the existing source material, without a second native mip suffix.
+                registration.fallback_mode=TextureStreamFallback::SourceMaterial;
+                registration.fallback_first_mip=4;
                 registration.opacity_sampling=false; registration.srgb_view=plane%3==0;
                 registration.sampler_feedback=false;
                 registrations.push_back(std::move(registration));
-                backings.push_back(std::move(backing));
             }
-            if(auto r=flush();!r) return r;
             bool admitted=false;
-            if(auto r=texture_streaming.RegisterBatch(registrations,residency,streams,admitted);!r) return r;
+            if(auto r=texture_streaming.RegisterBatch(registrations,residency,streams,admitted,
+                    &retry_budget_bytes);!r) return r;
             if(admitted)
             {
-                terrain_plane_backings=std::move(backings);
                 terrain_plane_stream_ids=std::move(streams);
                 terrain_planes_archive_digest=archive_digest;
+                retry_budget_bytes=0;
             }
-            else { use_pages=false; retry_budget_bytes=tail_total; }
-            }
+            else use_pages=false;
         }
-        if(use_pages)
-        {
-            terrain_tiles=std::move(tiles);
-            terrain_tile_counts.assign(sections.size(),{});
-            for(const auto &tile:terrain_tiles) terrain_tile_counts[tile.source_index]={tile.count_x,tile.count_y};
-        }
+    }
+    if(recheck && use_pages)
+    {
+        terrain_tiles=std::move(tiles);
+        terrain_tile_counts.assign(sections.size(),{});
+        for(const auto &tile:terrain_tiles) terrain_tile_counts[tile.source_index]={tile.count_x,tile.count_y};
     }
     const bool rebuild_static=scene_changed || use_pages!=terrain_static_pages_current || (recheck && use_pages);
     if(rebuild_static) terrain_slot_static_sections_valid.fill(false);
@@ -468,26 +326,25 @@ Result D3D12Renderer::Impl::PrepareTerrainPages(const std::shared_ptr<const Stat
         static_terrain_source_indices=std::move(next_static_source_indices);
         static_terrain_sections=std::move(next_static);terrain_scene=scene;
     }
-    terrain_static_pages_current=use_pages;terrain_archive_digest=archive_digest;
+    terrain_static_pages_current=use_pages;
+    if(!registered_archive) terrain_archive_digest=archive_digest;
     terrain_retry_budget_bytes=retry_budget_bytes;
     terrain_slot_static_sections_valid[frame_slot]=dynamic_count==0;
     terrain_parameters_changed=false;
     return Result::Success();
 }
 
-void D3D12Renderer::Impl::DemandTerrainPages(std::span<const RenderViewInput> views,std::uint64_t frame_number)
+void D3D12Renderer::Impl::DemandTerrainPages(std::span<const RenderViewSample> views,std::uint64_t frame_number)
 {
     terrain_plane_needed.assign(terrain_plane_stream_ids.size(),0);
     if(!terrain_static_pages_current) return;
-    const UINT finest=QualityProfileFor(config.texture_quality).texture_finest_mip;
     const auto detail_end = DirectX::PackedVector::XMConvertHalfToFloat(
         DirectX::PackedVector::XMConvertFloatToHalf(QualityProfileFor(config.material_quality).terrain_detail_fade_end_m));
     for (const auto &view : views)
     {
         using namespace DirectX;
         const auto &camera = view.camera;
-        const auto eye = XMVectorSet(float(camera.position.x-view.scene_origin.x),
-            float(camera.position.y-view.scene_origin.y), float(camera.position.z-view.scene_origin.z), 1);
+        const auto eye = XMVectorSet(camera.position.x, camera.position.y, camera.position.z, 1);
         const auto direction = XMVectorSet(float(camera.target.x-camera.position.x),
             float(camera.target.y-camera.position.y), float(camera.target.z-camera.position.z), 0);
         const auto world_to_view = XMMatrixLookToLH(eye, direction,
@@ -530,7 +387,8 @@ void D3D12Renderer::Impl::DemandTerrainPages(std::span<const RenderViewInput> vi
             for (std::size_t plane = index*3; plane < index*3+plane_count; ++plane)
             {
                 terrain_plane_needed[plane] = 1;
-                texture_streaming.Demand(terrain_plane_stream_ids[plane], finest, priority, frame_number);
+                // Bootstrap only the tail; completed shader footprints merge finer demand before Pump.
+                texture_streaming.Demand(terrain_plane_stream_ids[plane], UINT_MAX, priority, frame_number);
             }
         }
     }

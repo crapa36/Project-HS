@@ -51,13 +51,13 @@ struct CharacterDescriptor
     std::span<const std::uint16_t> parents;
     std::span<const std::array<float, 16>> inverse_bind_matrices;
     std::span<const float> upper_body_weights;
-    BulkRange transforms;
+    BulkRange transforms; // Relative to this character package.
     std::uint32_t deformation_abi{}, deformation_flags{};
     std::array<std::byte, 32> skeleton_binding{};
     float numerical_margin{}, bubble_amplitude{};
     std::span<const GeometryMetadata> lods;
     std::span<const CharacterIntervalBound> interval_bounds;
-    BulkRange final_matrices;
+    BulkRange final_matrices; // Relative to this character package.
 };
 
 struct AnimationClipDescriptor
@@ -86,7 +86,7 @@ struct AnimationDescriptor
     std::span<const std::array<float, 16>> inverse_bind_matrices;
     std::span<const AnimationClipDescriptor> clips;
     std::span<const AnimationSocketDescriptor> sockets;
-    BulkRange transforms;
+    BulkRange transforms; // Relative to this animation package.
 };
 
 struct CharacterDescriptorStorage

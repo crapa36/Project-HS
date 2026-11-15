@@ -5,6 +5,7 @@
 #include <hs/render_data/geometry_hierarchy.hpp>
 #include <hs/render_data/material_descriptor.hpp>
 #include <hs/render_data/character_animation_extension.hpp>
+#include <hs/render_data/quality_profiles.hpp>
 
 #include <algorithm>
 #include <array>
@@ -28,7 +29,9 @@ constexpr std::size_t kDirectoryStride = 80;
 constexpr std::uint64_t kMaxPackageBytes = 64ull * 1024 * 1024;
 constexpr std::uint64_t kMaxChunkBytes = 32ull * 1024 * 1024;
 constexpr std::uint32_t kMaxChunks = 64;
-constexpr std::uint32_t kMaxDependencies = 64;
+constexpr std::uint32_t kMaxDependencies = 192;
+static_assert(kHeaderSize + kMaxDependencies * (2 + 128) + kMaxChunks * kDirectoryStride <=
+    kRenderPackageMetadataPrefixBytes);
 
 void Require(bool condition, std::string_view message)
 {
@@ -157,20 +160,21 @@ constexpr auto kLastKnownChunk = static_cast<std::uint32_t>(ChunkType::TerrainSu
 bool Known(std::uint32_t type)
 {
     return type >= static_cast<std::uint32_t>(ChunkType::ExpandedVertices) &&
-           type <= kLastKnownChunk && (type < 41 || type > 42);
+           type <= kLastKnownChunk && (type < 29 || type > 31) && (type < 41 || type > 42);
 }
 
 bool SupportedVersion(std::uint32_t type, std::uint16_t version)
 {
+    if (type == static_cast<std::uint32_t>(ChunkType::QualityProfiles))
+        return version == 4;
     if(type == static_cast<std::uint32_t>(ChunkType::TerrainSurfaceSections))
-        return version >= 1 && version <= 3;
+        return version >= 1 && version <= 4;
     if (type == static_cast<std::uint32_t>(ChunkType::GeometryVertices) ||
         type == static_cast<std::uint32_t>(ChunkType::MaterialSurfaceLayout))
         return version == 1 || version == 2;
     return type == static_cast<std::uint32_t>(ChunkType::TextureMetadata)
                 ? (version == 1 || version == 2)
-                : version == (type == static_cast<std::uint32_t>(ChunkType::QualityProfiles) ||
-                               type == static_cast<std::uint32_t>(ChunkType::DecalMaterialMetadata) ? 2 : 1);
+                : version == (type == static_cast<std::uint32_t>(ChunkType::DecalMaterialMetadata) ? 2 : 1);
 }
 
 void ValidateKnown(std::uint32_t type, std::uint16_t version,
@@ -260,11 +264,6 @@ void ValidateKnown(std::uint32_t type, std::uint16_t version,
                 size == CheckedMul(count, stride), "invalid lighting probe radiance chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::LightingProbeIrradiance))
         Require(stride == 16 && count == 9 && size == 144, "invalid lighting probe irradiance chunk");
-    else if (type == static_cast<std::uint32_t>(ChunkType::LtcLutMetadata))
-        Require(stride == 64 && count == 1 && size == stride, "invalid LTC metadata chunk");
-    else if (type == static_cast<std::uint32_t>(ChunkType::LtcLutMatrix) ||
-             type == static_cast<std::uint32_t>(ChunkType::LtcLutAmplitude))
-        Require(stride == 16 && count == 4096 && size == count * stride, "invalid LTC LUT chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::VolumetricVolumes))
         Require(stride == 112 && count <= 256 && size == count * stride, "invalid volumetric medium chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::CharacterDeformationMetadata))
@@ -276,12 +275,12 @@ void ValidateKnown(std::uint32_t type, std::uint16_t version,
     else if (type == static_cast<std::uint32_t>(ChunkType::CharacterLodDirectory))
         Require(stride == kGeometryMetadataStride && count > 0 && count <= 16 && size == count * stride, "invalid character LOD directory chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::QualityProfiles))
-        Require(stride == 140 && count == 4 && size == count * stride, "invalid quality profiles chunk");
+        Require(stride == kQualityProfileStride && count == 4 && size == count * stride, "invalid quality profiles chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::AutoFgCadence))
-        Require(stride == 12 && count == 1 && size == stride, "invalid Auto FG cadence chunk");
+        Require(stride == kAutoFgCadenceStride && count == 1 && size == stride, "invalid Auto FG cadence chunk");
     else if (type == static_cast<std::uint32_t>(ChunkType::TerrainSurfaceSections))
-        Require(stride == 1 && count >= (version == 2 ? 112 : 104) &&
-            count <= 68 + 64 * (version == 2 ? 44 : 36) && size == count,
+        Require(stride == 1 && count >= (version == 2 || version == 4 ? 112 : 104) &&
+            count <= 68 + 64 * (version == 2 || version == 4 ? 44 : 36) && size == count,
                 "invalid terrain surface sections chunk");
     else if (type == 13)
         Require(stride == kGeometryMetadataStride && count == 1 && size == stride,
@@ -388,10 +387,6 @@ std::vector<std::byte> BuildPackage(AssetId asset_id,
                           chunk.bytes.size(), chunk.count, chunk.stride);
             if (chunk.type == static_cast<std::uint32_t>(ChunkType::ExpandedVertices) || chunk.type == 14)
                 ValidateEncodedVertices(chunk.bytes, chunk.version);
-            else if (chunk.type == static_cast<std::uint32_t>(ChunkType::GeometryHierarchyReference))
-                (void)DecodeGeometryHierarchyReference(chunk.bytes, dependencies);
-            else if (chunk.type == static_cast<std::uint32_t>(ChunkType::GeometryMaterialReference))
-                (void)DecodeGeometryMaterialReference(chunk.bytes, dependencies);
         }
         total = CheckedAdd(total, chunk.bytes.size());
     }
@@ -598,18 +593,6 @@ PackageView ReadPackage(std::span<const std::byte> bytes, AssetId expected_asset
         if ((type == static_cast<std::uint32_t>(ChunkType::ExpandedVertices) || type == 14) &&
             mode == PackageReadMode::FullValidation)
             ValidateEncodedVertices(chunk_bytes, version);
-        else if (type == static_cast<std::uint32_t>(ChunkType::MaterialMetadata))
-            (void)DecodeRockMaterial(chunk_bytes, view.dependencies);
-        else if (type == static_cast<std::uint32_t>(ChunkType::MaterialProgram))
-            (void)DecodeMaterialPrograms(chunk_bytes, view.dependencies);
-        else if (type == static_cast<std::uint32_t>(ChunkType::MaterialParameters))
-            (void)DecodeMaterialParameters(chunk_bytes);
-        else if (type == static_cast<std::uint32_t>(ChunkType::MaterialSurfaceLayout))
-            (void)DecodeMaterialSurfaceLayout(chunk_bytes);
-        else if (type == static_cast<std::uint32_t>(ChunkType::GeometryHierarchyReference))
-            (void)DecodeGeometryHierarchyReference(chunk_bytes, view.dependencies);
-        else if (type == static_cast<std::uint32_t>(ChunkType::GeometryMaterialReference))
-            (void)DecodeGeometryMaterialReference(chunk_bytes, view.dependencies);
         view.chunks.push_back({static_cast<ChunkType>(type), version, flags == 1, chunk_bytes,
                                item_count, item_stride});
     }

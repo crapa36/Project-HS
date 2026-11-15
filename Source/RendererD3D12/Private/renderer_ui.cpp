@@ -273,7 +273,6 @@ struct D3D12Renderer::Impl::UiTextRenderer final : IDWriteTextRenderer
 Result D3D12Renderer::Impl::PrepareUiDraw(OwnedView &owner, std::uint32_t frame_index,
                                          const std::shared_ptr<const UiDrawContent> &content)
 {
-    if (!content) return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "UI draw content is required.");
     auto &ui = owner.ui;
     const auto &models = content->models;
     UiTextRenderer draw(*this, owner);

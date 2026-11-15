@@ -248,15 +248,14 @@ void PopulateRenderInstanceRevisions(RenderInstance &instance) noexcept;
 
 enum class LightType : std::uint32_t
 {
-    Directional, Point, Spot, Rectangle, Disk,
+    Directional, Point, Spot,
 };
 
 enum class LightUnit : std::uint32_t
 {
     Lux,       // Directional illuminance.
     Lumen,     // Total Point/Spot luminous flux.
-    Luminance, // Rectangle/Disk emitted luminance in cd/m^2, per emitting side.
-    RadiantIntensity, // Prepared Point intensity in W/sr; no photometric round trip.
+    RadiantIntensity = 3, // Prepared Point intensity in W/sr; no photometric round trip.
 };
 
 // RGB reference for conversion to the renderer's radiometric units, not a solar spectrum calibration.
@@ -275,14 +274,11 @@ struct LightView
     LightUnit unit{LightUnit::Lux};
     Float3 position{};  // Absolute world position, meters.
     float range{};     // Finite local influence radius from emitter center, meters.
-    Float2 shape{};    // Rectangle full width/height or Disk ellipse radii, meters.
     float emitter_radius{}; // Positive finite Point/Spot radius for inverse-square clamping.
     float inner_cone_radians{}; // Spot half angles: 0 <= inner < outer < pi/2.
     float outer_cone_radians{};
     std::uint32_t shadow_flags{};
     bool legacy_attenuation{}; // Explicit migration: 1/(1+d^2) instead of inverse square.
-    Float3 area_tangent{}; // Authored width/radius-X direction; projected orthogonal to direction.
-    bool two_sided{}; // Area only. Each side emits the authored luminance, no flux rescaling.
 };
 
 struct UiModel
@@ -379,9 +375,10 @@ struct RenderSnapshot
 
 struct RenderSnapshotPair
 {
+    // Empty scenes still have a current value; publication availability belongs to the exchange.
     RenderSnapshot previous{}, current{};
     Sequence previous_publication_sequence{}, current_publication_sequence{};
-    bool has_previous{}, has_current{};
+    bool has_previous{};
 };
 
 [[nodiscard]] inline CameraView InterpolateRenderCamera(const RenderSnapshotPair &pair, float alpha) noexcept

@@ -45,9 +45,10 @@ Result D3D12Renderer::Impl::BeginGeometryDrawRecords(std::uint32_t frame_slot)
 Result D3D12Renderer::Impl::AddGeometryDrawRecord(
     std::uint32_t frame_slot, const GeometryPageGpu &page, std::uint32_t visible_base,
     std::uint32_t instance_count, std::uint32_t flags, std::uint32_t view,
-    std::uint32_t mesh_id, std::uint32_t &packed_pass)
+    std::uint32_t mesh_id, std::uint32_t &packed_pass, std::uint32_t material_binding_set)
 {
     if (frame_slot >= kFrameCount || view > 3 || page.page_slot >= kGeometryPageCapacity ||
+        mesh_id > HS_GEOMETRY_MESH_ID_MASK ||
         !page.storage.resource || (flags & ~(kGeometryGpuSceneRefs | kGeometryMeshEligible |
             kGeometryStaticInstances | kGeometryPreviousPage | kGeometryBuiltin |
             kGeometryExplicitMaterialBinding)) != 0 ||
@@ -69,7 +70,8 @@ Result D3D12Renderer::Impl::AddGeometryDrawRecord(
     records.push_back({page.page_slot, 0, page.index_count, 0,
         page.meshlet_count, visible_base, instance_count, flags,
         page.triangle_offset, page.remap_offset, page.generation, page.metadata.lod,
-        mesh_id, std::bit_cast<std::uint32_t>(page.metadata.geometric_error), 0, 0});
+        mesh_id | (material_binding_set << HS_GEOMETRY_MATERIAL_SET_SHIFT),
+        std::bit_cast<std::uint32_t>(page.metadata.geometric_error), 0, 0});
     return Result::Success();
 }
 

@@ -7,25 +7,14 @@
 static const uint HsCharacterMaterialIdBase = 0x20000000u;
 static const uint HsCharacterInvalidOrdinal = 0xffffffffu;
 
-// Each authored FBX slot has an opaque ordinal and an optional transparent
-// ordinal. The native package loader validates the slot/domain identities.
+// Set headers and slot pairs share the immutable native material table.
 StructuredBuffer<uint2> MeshMaterialBindings : register(t1, space8);
 
-uint HsCharacterAssetIndex(uint mesh)
+uint2 HsMeshMaterialOrdinals(uint binding_set, uint slot)
 {
-    if (mesh == 0u) return 0u;
-    if (mesh >= 10u && mesh <= 15u) return mesh - 9u;
-    return HsCharacterInvalidOrdinal;
-}
-
-uint2 HsCharacterBindingOrdinals(uint mesh, uint slot)
-{
-    const uint asset = HsCharacterAssetIndex(mesh);
-    if (asset == HsCharacterInvalidOrdinal) return HsCharacterInvalidOrdinal.xx;
-    const uint4 range = CharacterBindingRanges[asset];
-    // Ranges and the SRV are published together from one admitted binding table.
-    if (slot >= range.y)
-        return HsCharacterInvalidOrdinal.xx;
+    if (binding_set == 0u) return HsCharacterInvalidOrdinal.xx;
+    const uint2 range = MeshMaterialBindings[binding_set];
+    if (slot >= range.y) return HsCharacterInvalidOrdinal.xx;
     return MeshMaterialBindings[range.x + slot];
 }
 
@@ -44,13 +33,6 @@ bool HsCharacterTranslucentOrdinalValid(uint ordinal)
 uint HsCharacterOrdinal(uint material_id)
 {
     return material_id - HsCharacterMaterialIdBase;
-}
-
-uint HsCharacterOpaqueMaterialId(uint mesh, uint slot)
-{
-    const uint ordinal = HsCharacterBindingOrdinals(mesh, slot).x;
-    return HsCharacterOpaqueOrdinalValid(ordinal)
-        ? HsCharacterMaterialIdBase + ordinal : HsCharacterInvalidOrdinal;
 }
 
 // The existing material producer supplies all seven validated context evaluators.

@@ -373,22 +373,12 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
             }
             else
             {
-                // shortcut: authenticated packed ranges are read serially per owner; upgrade when the retained pack transport can batch discontiguous verified reads.
                 bytes.resize(static_cast<std::size_t>(expected));
-                const auto base = source.IsPacked() ? source.Packed().range.offset : 0;
-                std::size_t destination{};
-                for (const auto &range : ranges)
+                if (!cancellation->load(std::memory_order_acquire))
                 {
-                    if (cancellation->load(std::memory_order_acquire)) break;
-                    if (base > UINT64_MAX - range.offset)
-                        throw std::runtime_error("Immutable asset range offset overflow.");
-                    auto output = std::span<std::byte>(bytes).subspan(destination, range.byte_count);
-                    if (auto result = source.ReadRange(base + range.offset, output, range.digest); !result)
+                    if (auto result = source.ReadRanges(ranges, bytes, cancellation.get()); !result)
                         throw std::runtime_error(std::string(result.Message()));
-                    destination += range.byte_count;
                 }
-                if (!cancellation->load(std::memory_order_acquire) && destination != bytes.size())
-                    throw std::runtime_error("Immutable asset ranges did not fill their admitted payload.");
             }
             if (prepare && !cancellation->load(std::memory_order_acquire)) prepare(bytes);
             return bytes;

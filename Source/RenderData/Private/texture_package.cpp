@@ -326,8 +326,6 @@ TexturePackageView BindTextureDescriptor(std::span<const std::byte> bytes, const
         const auto &record = descriptor.subresources[i];
         Require(record.offset <= bytes.size() && record.byte_count <= bytes.size() - record.offset,
                 "bound texture subresource exceeds bytes");
-        Require(Sha256(bytes.subspan(static_cast<std::size_t>(record.offset), record.byte_count)) == record.digest,
-                "bound texture subresource digest mismatch");
         const auto mip = static_cast<std::uint32_t>(i % view.description.mip_count);
         view.subresources.push_back({static_cast<std::uint32_t>(i / view.description.mip_count), mip,
             std::max(1u, view.description.width >> mip), std::max(1u, view.description.height >> mip),

@@ -16,8 +16,7 @@ enum LocalShadowSrvSlot : std::uint32_t {
 };
 static_assert(LocalShadowSrvDrawRecords + 1 == kLocalShadowDescriptorCount);
 inline constexpr std::uint32_t kLocalShadowGuard = 2;
-inline constexpr std::uint32_t kLocalShadowMaximumSamples = 4;
-inline constexpr std::uint32_t kLocalShadowMaximumFaces = 6 * kLocalShadowMaximumSamples;
+inline constexpr std::uint32_t kLocalShadowMaximumFaces = 6;
 
 inline bool LocalShadowCasterChanged(const VirtualShadowCaster &c, bool current_static, bool previous_static) noexcept
 {
@@ -42,7 +41,6 @@ struct LocalShadowProfile
     std::uint32_t maximum_lights{}, face_resolution{}, max_casters{}, max_draw_groups{};
     std::uint32_t filter_samples{};
     std::uint32_t command_capacity{}, frame_slots{3};
-    std::uint32_t area_samples{1}; // Actual authored-plane samples: 1, 2 or 4. The physical tile pool stays maximum_lights*6.
     float normal_bias_m{0.002f}, depth_bias{0.0001f};
 };
 struct alignas(16) LocalShadowMetadata
@@ -55,20 +53,17 @@ struct alignas(16) LocalShadowMetadata
 struct alignas(16) GpuLocalShadowRecord
 {
     DirectX::XMUINT4 identity{}; // Full stable ID lo/hi, generation, LightType.
-    DirectX::XMUINT4 revision{}; // Full light revision lo/hi, sample count, face count.
+    DirectX::XMUINT4 revision{}; // Full light revision lo/hi, reserved, face count.
     DirectX::XMFLOAT4 position_range{}, direction_cos_outer{}, parameters{};
     // Absolute-world, untransposed DirectX row-vector matrices. HLSL uses row_major.
     std::array<DirectX::XMFLOAT4X4,kLocalShadowMaximumFaces> world_to_clip{};
     std::array<DirectX::XMFLOAT4,kLocalShadowMaximumFaces> atlas_tiles{}; // Actual, possibly noncontiguous tile origin XY, inner resolution, guard.
-    std::array<DirectX::XMFLOAT4,kLocalShadowMaximumSamples> sample_positions{}; // Absolute authored-plane point, W reserved.
-    DirectX::XMFLOAT4 emitter_normal_two_sided{}; // Unit emission normal; W is the authored two-sided flag.
     DirectX::XMUINT4 state{}; // Published face mask, selected, reserved, reserved.
 };
 static_assert(sizeof(LocalShadowMetadata)==HS_LOCAL_SHADOW_METADATA_BYTES);
 static_assert(offsetof(LocalShadowMetadata,counts)==HS_LOCAL_SHADOW_METADATA_COUNTS);
 static_assert(offsetof(LocalShadowMetadata,bank)==HS_LOCAL_SHADOW_METADATA_BANK);
-// Above the native 2048B structured-element limit: t1 is a raw SRV, with exact
-// byte offsets decoded by local_shadow.hlsli, never a structured stride2096.
+// t1 is a raw SRV with byte offsets decoded by local_shadow.hlsli.
 static_assert(sizeof(GpuLocalShadowRecord)==HS_LOCAL_SHADOW_RECORD_BYTES);
 static_assert(offsetof(GpuLocalShadowRecord,identity)==HS_LOCAL_SHADOW_RECORD_IDENTITY);
 static_assert(offsetof(GpuLocalShadowRecord,revision)==HS_LOCAL_SHADOW_RECORD_REVISION);
@@ -77,8 +72,6 @@ static_assert(offsetof(GpuLocalShadowRecord,direction_cos_outer)==HS_LOCAL_SHADO
 static_assert(offsetof(GpuLocalShadowRecord,parameters)==HS_LOCAL_SHADOW_RECORD_PARAMETERS);
 static_assert(offsetof(GpuLocalShadowRecord,world_to_clip)==HS_LOCAL_SHADOW_RECORD_MATRICES);
 static_assert(offsetof(GpuLocalShadowRecord,atlas_tiles)==HS_LOCAL_SHADOW_RECORD_TILES);
-static_assert(offsetof(GpuLocalShadowRecord,sample_positions)==HS_LOCAL_SHADOW_RECORD_SAMPLES);
-static_assert(offsetof(GpuLocalShadowRecord,emitter_normal_two_sided)==HS_LOCAL_SHADOW_RECORD_EMITTER);
 static_assert(offsetof(GpuLocalShadowRecord,state)==HS_LOCAL_SHADOW_RECORD_STATE);
 static_assert(sizeof(DirectX::XMFLOAT4X4)==HS_LOCAL_SHADOW_MATRIX_BYTES);
 static_assert(sizeof(DirectX::XMFLOAT4)==HS_LOCAL_SHADOW_VECTOR_BYTES);
@@ -178,8 +171,7 @@ class LocalShadowCandidate
     friend class LocalShadowSystem;
 };
 // Passes220..223. Each selected Point owns six guarded faces, Spot one actual
-// cone projection. Rectangle/ellipse Disk own 1/2/4 actual plane samples, each
-// with six cube faces admitted together from the same fixed physical tile pool.
+// cone projection, admitted from the same fixed physical tile pool.
 // Unknown/unpublished/overflow faces resolve to unshadowed
 // lighting; status reports that bounded fallback. Static depth is invalidated
 // by old AND new caster bounds/revisions; dynamic depth retains unchanged faces.
@@ -209,7 +201,6 @@ class LocalShadowSystem
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
     [[nodiscard]] LocalShadowStatus Status() const;
     // Called only after all old submissions have reliably completed.
-    void SwapState(LocalShadowSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
     [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const LocalShadowInputs &,
         LocalShadowFramePlan &,LocalShadowOutputs &,LocalShadowLayout *,

@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstring>
@@ -23,6 +24,7 @@
 #include <string>
 #include <tuple>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace hs
@@ -208,10 +210,42 @@ struct Pass
         }
         return uses;
     }
-    std::move_only_function<void(RenderPassContext &)> execute;
-    std::shared_ptr<ExternalOperation> external;
-    std::move_only_function<Result(RenderPassContext &)> owner_execute;
-    bool execute_on_owner{};
+    using VoidRecord = std::move_only_function<void(RenderPassContext &)>;
+    using CheckedRecord = std::move_only_function<Result(RenderPassContext &)>;
+    struct OwnerRecord { CheckedRecord execute; };
+    // Keep the existing cache kinds: empty, worker void/result, owner, external.
+    std::variant<std::monostate, VoidRecord, CheckedRecord, OwnerRecord,
+                 std::shared_ptr<ExternalOperation>> execution;
+
+    [[nodiscard]] ExternalOperation *External() const noexcept
+    {
+        const auto *owner = std::get_if<4>(&execution);
+        return owner ? owner->get() : nullptr;
+    }
+    [[nodiscard]] const std::shared_ptr<ExternalOperation> &ExternalOwner() const
+    { return std::get<4>(execution); }
+    [[nodiscard]] bool RecordsOnOwner() const noexcept { return execution.index() == 3; }
+    [[nodiscard]] bool HasRecord() const noexcept
+    {
+        switch (execution.index())
+        {
+        case 1: return static_cast<bool>(std::get<1>(execution));
+        case 2: return static_cast<bool>(std::get<2>(execution));
+        case 3: return static_cast<bool>(std::get<3>(execution).execute);
+        default: return false;
+        }
+    }
+    Result Record(RenderPassContext &context)
+    {
+        switch (execution.index())
+        {
+        case 1: std::get<1>(execution)(context); return Result::Success();
+        case 2: return std::get<2>(execution)(context);
+        case 3: return std::get<3>(execution).execute(context);
+        default: return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+                                        "RenderGraph pass has no execute callback.");
+        }
+    }
     const std::string *cached_name{};
     const std::vector<ResourceUse> *cached_uses{};
 };
@@ -251,7 +285,7 @@ bool SameDescriptor(const D3D12_RESOURCE_DESC &a, const D3D12_RESOURCE_DESC &b) 
 
 unsigned ExecutionKind(const Pass &pass) noexcept
 {
-    return pass.external ? 4u : pass.execute_on_owner ? 3u : pass.owner_execute ? 2u : pass.execute ? 1u : 0u;
+    return static_cast<unsigned>(pass.execution.index());
 }
 
 // Declaration values and compiled logical facts survive Reset. Current native
@@ -335,10 +369,10 @@ struct TopologyValues
             if (!restored_declarations &&
                 !std::equal(a.uses.begin(), a.uses.end(), b.Uses().begin(), b.Uses().end(), SameUse))
                 return {MismatchKind::PassUses, i};
-            if (!b.external) continue;
-            if (a.external_queue != b.external->binding.queue_type) return {MismatchKind::ExternalQueue, i};
-            if (!std::equal(a.boundaries.begin(), a.boundaries.end(), b.external->accesses.begin(),
-                    b.external->accesses.end(), [](const auto &left, const auto &right) {
+            if (!b.External()) continue;
+            if (a.external_queue != b.External()->binding.queue_type) return {MismatchKind::ExternalQueue, i};
+            if (!std::equal(a.boundaries.begin(), a.boundaries.end(), b.External()->accesses.begin(),
+                    b.External()->accesses.end(), [](const auto &left, const auto &right) {
                         return left.resource.value == right.resource.value && left.resource.kind == right.resource.kind &&
                             left.incoming == right.incoming && left.outgoing == right.outgoing;
                     })) return {MismatchKind::ExternalBoundaries, i};
@@ -414,25 +448,32 @@ struct TopologyValues
         resources.clear(); resources.reserve(current_resources.size());
         passes.clear(); passes.reserve(current_passes.size());
         for (const auto &r : current_resources)
-            resources.push_back({r.cached_name ? r.Name() : std::string{}, r.kind, r.imported, r.final_set, r.texture, r.buffer,
-                r.imported ? r.native_description : NativeDesc(r.kind, r.texture, r.buffer),
-                r.fixed_buffer_heap, r.final_set ? r.final : Access::Undefined, r.final_version});
+        {
+            auto &stored = resources.emplace_back();
+            if (r.cached_name) stored.name = r.Name();
+            stored.kind = r.kind; stored.imported = r.imported; stored.final_set = r.final_set;
+            stored.texture = r.texture; stored.buffer = r.buffer;
+            stored.descriptor = r.imported ? r.native_description : NativeDesc(r.kind, r.texture, r.buffer);
+            stored.fixed_heap = r.fixed_buffer_heap;
+            stored.final = r.final_set ? r.final : Access::Undefined;
+            stored.final_version = r.final_version;
+        }
         for (const auto &p : current_passes)
         {
             auto &stored = passes.emplace_back();
             stored.id = p.id; if (p.cached_name) stored.name = p.Name(); stored.queue = p.queue;
             stored.execution_kind = ExecutionKind(p);
             if (p.cached_uses) stored.uses = p.Uses();
-            if (p.external) { stored.external_queue = p.external->binding.queue_type; stored.boundaries = p.external->accesses; }
+            if (p.External()) { stored.external_queue = p.External()->binding.queue_type; stored.boundaries = p.External()->accesses; }
             stored.execution_resources.reserve(p.Uses().size());
-            if (p.external) stored.execution_uses.reserve(p.Uses().size());
+            if (p.External()) stored.execution_uses.reserve(p.Uses().size());
             for (const auto &use : p.Uses())
             {
                 stored.execution_resources.push_back(use.predecessor.resource.value - 1);
-                if (p.external)
+                if (p.External())
                 {
                     PassValues::ExecutionUse fact{use.access, use.access};
-                    for (const auto &boundary : p.external->accesses)
+                    for (const auto &boundary : p.External()->accesses)
                         if (boundary.resource.value == use.predecessor.resource.value &&
                             boundary.resource.kind == use.predecessor.resource.kind)
                         { fact = {boundary.incoming, boundary.outgoing}; break; }
@@ -440,7 +481,7 @@ struct TopologyValues
                 }
             }
             // Owner/provider callbacks can bridge read-only resources through COMMON.
-            if (p.external || p.execute_on_owner)
+            if (p.External() || p.RecordsOnOwner())
                 for (const auto &use : p.Uses())
                     resources[use.predecessor.resource.value - 1].excludes_shared_reads = true;
         }
@@ -1062,9 +1103,6 @@ struct RenderGraphBuilder::Impl
     };
     // Current topology is newest; previous plans are ordered from most to least recently used.
     std::array<PreviousPlan, RenderGraphBuilder::RetainedPlanCapacity - 1> previous_plans;
-    std::uint64_t plan_input_builds{};
-    std::uint64_t plan_compilations{};
-    std::uint64_t plan_reuses{};
     std::uint64_t next_plan_handle{1};
     bool restored_plan{};
     bool binding_failed{};
@@ -1249,6 +1287,8 @@ Result RenderGraphQueueExecutor::Initialize(ID3D12Device *device,
             }
         }
 
+        HS_RENDERER_SET_DEBUG_NAME(state.queue.Get(), queue_hint == QueueHint::Direct
+            ? L"HS Graph Direct" : queue_hint == QueueHint::Compute ? L"HS Graph Compute" : L"HS Graph Copy");
         const auto fence_result =
             device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&state.fence));
         if (FAILED(fence_result))
@@ -1683,10 +1723,10 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         {
             const auto &use = uses[use_index];
             const auto resource = execution.execution_resources[use_index];
-            const auto incoming = pass.external ? execution.execution_uses[use_index].incoming : use.access;
-            const auto outgoing = pass.external ? execution.execution_uses[use_index].outgoing : use.access;
+            const auto incoming = pass.External() ? execution.execution_uses[use_index].incoming : use.access;
+            const auto outgoing = pass.External() ? execution.execution_uses[use_index].outgoing : use.access;
             auto &state = states[resource];
-            const bool shared_read = shared_readers && shareable[resource] && !pass.external && use.reads && !use.writes &&
+            const bool shared_read = shared_readers && shareable[resource] && !pass.External() && use.reads && !use.writes &&
                 incoming == Access::ComputeRead && outgoing == Access::ComputeRead && pass.queue != QueueHint::Copy;
             if (state.read_entry != UINT32_MAX && shared_read)
             {
@@ -1748,7 +1788,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             }
         }
         submission_order.push_back(index);
-        if (pass.external)
+        if (pass.External())
         {
             // Outgoing barriers run only after the provider fence bridge.
             const auto tail_index = append_batch(pass.queue);
@@ -1916,7 +1956,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     const auto standalone = [&](std::uint32_t index) {
         const auto &batch = batches[index];
         return !batch.external_imports.empty() || batch.external_finish != UINT32_MAX ||
-            batch.resolve_timestamps || (batch.pass != UINT32_MAX && g.passes[batch.pass].external);
+            batch.resolve_timestamps || (batch.pass != UINT32_MAX && g.passes[batch.pass].External());
     };
     auto &submission_ends = impl_->submission_ends;
     submission_ends.resize(submission_order.size());
@@ -1925,7 +1965,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     const auto workers = tasks ? std::max<std::size_t>(tasks->WorkerCount(), 1) : 1;
     const auto grain = std::max<std::size_t>(1, (g.passes.size() + workers - 1) / workers);
     const auto owner_batch = [&](std::uint32_t index) {
-        return batches[index].pass != UINT32_MAX && g.passes[batches[index].pass].execute_on_owner;
+        return batches[index].pass != UINT32_MAX && g.passes[batches[index].pass].RecordsOnOwner();
     };
     for (std::size_t first = 0; first < submission_order.size();)
     {
@@ -2054,10 +2094,10 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
                 const auto query_slot = query_slot_for(batch.position);
                 const bool pass_has_queries = query_slot != UINT32_MAX;
                 const auto query = options ? options->timestamp_base + query_slot * 2 : 0;
-                if (batch.pass != UINT32_MAX && g.passes[batch.pass].external && queries &&
+                if (batch.pass != UINT32_MAX && g.passes[batch.pass].External() && queries &&
                     pass_has_queries)
                     commands->EndQuery(queries, D3D12_QUERY_TYPE_TIMESTAMP, query);
-                if (batch.pass != UINT32_MAX && !g.passes[batch.pass].external)
+                if (batch.pass != UINT32_MAX && !g.passes[batch.pass].External())
                 {
                     auto &pass = g.passes[batch.pass];
                     if (queries && pass_has_queries)
@@ -2069,10 +2109,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     #endif
                     RenderPassContext context(commands, enhanced, barriers, &g, batch.queue);
                     if (cpu_timing) cpu_timing->cpu_callback_begin_qpc = cpu_counter();
-                    if (pass.owner_execute)
-                        record_results[index] = pass.owner_execute(context);
-                    else
-                        pass.execute(context);
+                    record_results[index] = pass.Record(context);
                     if (cpu_timing)
                     {
                         cpu_timing->cpu_callback_end_qpc = cpu_counter();
@@ -2142,34 +2179,42 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         }
     };
     impl_->stats.cpu_plan_us = measure_stage();
-    Result dispatch = Result::Success();
+    const char *dispatch_failure = nullptr;
     if (tasks)
     {
         auto group = tasks->CreateTaskGroup();
+        const auto recording_workers = std::min<std::size_t>(workers,
+            std::ranges::count_if(recording_batches, [](const auto &batch) { return !batch.owner; }));
+        std::atomic_size_t next_recording{};
         try
         {
-            for (std::uint32_t index = 0; index < recording_batches.size(); ++index)
+            for (std::size_t worker = 0; worker < recording_workers; ++worker)
             {
-                if (recording_batches[index].owner) continue;
-                if (!group.Submit([&, index](std::stop_token) { record(index); }))
+                // Each accepted worker drains ranges; native lists and their submission boundaries stay unchanged.
+                if (!group.Submit([&](std::stop_token) {
+                    for (auto index = next_recording.fetch_add(1, std::memory_order_relaxed);
+                         index < recording_batches.size();
+                         index = next_recording.fetch_add(1, std::memory_order_relaxed))
+                        if (!recording_batches[index].owner) record(static_cast<std::uint32_t>(index));
+                }))
                 {
-                    dispatch = fail("RenderGraph recording task submission rejected.");
+                    dispatch_failure = "RenderGraph recording task submission rejected.";
                     break;
                 }
                 ++impl_->stats.record_jobs;
             }
-            // Submit every worker list before owner-only SDK recording can block dispatch.
-            if (dispatch)
+            // Dispatch recording workers before owner-only SDK recording can block dispatch.
+            if (!dispatch_failure)
                 for (std::uint32_t index = 0; index < recording_batches.size(); ++index)
                     if (recording_batches[index].owner) record(index);
         }
-        catch (...) { dispatch = fail("RenderGraph recording task submission threw."); }
+        catch (...) { dispatch_failure = "RenderGraph recording task submission threw."; }
         // join is mandatory even after a rejected/throwing submit. All lambda
         // captures remain alive here, before any command list is submitted.
         Result joined = Result::Success();
         try { joined = group.Wait(); }
         catch (...) { joined = fail("RenderGraph recording task join threw."); }
-        if (!dispatch) return dispatch;
+        if (dispatch_failure) return fail(dispatch_failure);
         if (!joined) return joined;
     }
     else
@@ -2180,7 +2225,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     // Allocate completion/ownership storage before any submission. Callback
     // failure must not leave retirement dependent on a later host allocation.
     const bool has_external_operations = std::ranges::any_of(batches, [&](const auto &batch) {
-        return batch.pass != UINT32_MAX && g.passes[batch.pass].external;
+        return batch.pass != UINT32_MAX && g.passes[batch.pass].External();
     });
     const bool has_external_imports = std::ranges::any_of(batches, [](const auto &batch) {
         return !batch.external_imports.empty();
@@ -2194,9 +2239,9 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
     for (std::size_t index = 0; index < batches.size(); ++index)
     {
         const auto &batch = batches[index];
-        if (batch.pass == UINT32_MAX || !g.passes[batch.pass].external) continue;
+        if (batch.pass == UINT32_MAX || !g.passes[batch.pass].External()) continue;
         auto &pending = pending_operations[index];
-        pending.operation = g.passes[batch.pass].external;
+        pending.operation = g.passes[batch.pass].ExternalOwner();
         pending.queue = static_cast<ID3D12CommandQueue *>(pending.operation->binding.native_queue_owner.get());
         for (const auto resource : batch.Resources())
             pending.resources.emplace_back(static_cast<ID3D12Resource *>(g.resources[resource].native));
@@ -2269,7 +2314,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
         for (const auto producer : batch.dependencies)
             waits.Include(batches[producer].queue, signals[producer]);
         if (auto result = Join(waits, batch.queue); !result) return result;
-        if (batch.pass != UINT32_MAX && g.passes[batch.pass].external)
+        if (batch.pass != UINT32_MAX && g.passes[batch.pass].External())
         {
             // Prefix barriers already reference provider resources. Install
             // durable ownership before submission, including a failed Signal.
@@ -2299,7 +2344,7 @@ Result RenderGraphQueueExecutor::Execute(RenderGraphBuilder &graph, std::uint32_
             retain(submission_order[position], value);
         }
         Result provider_result = Result::Success();
-        if (batch.pass != UINT32_MAX && g.passes[batch.pass].external)
+        if (batch.pass != UINT32_MAX && g.passes[batch.pass].External())
         {
             auto &retained = impl_->external_retained[operation_retention[index]];
             const auto external_failure = [&](std::string_view operation, HRESULT result) {
@@ -2629,12 +2674,11 @@ ResourceVersion PassBuilder::ReadWrite(ResourceVersion predecessor, Access acces
 
 void PassBuilder::SetExecute(std::move_only_function<void(RenderPassContext &)> execute)
 {
-    static_cast<RenderGraphBuilder::Impl *>(graph_)->state = Preparation::Building;
-    auto &pass = static_cast<RenderGraphBuilder::Impl *>(graph_)->passes[pass_];
-    pass.external.reset();
-    pass.owner_execute = {};
-    pass.execute_on_owner = false;
-    pass.execute = std::move(execute);
+    auto &graph = *static_cast<RenderGraphBuilder::Impl *>(graph_);
+    graph.state = Preparation::Building;
+    auto &pass = graph.passes[pass_];
+    if (execute) pass.execution.emplace<1>(std::move(execute));
+    else pass.execution.emplace<0>();
 }
 
 void PassBuilder::SetExecuteChecked(std::move_only_function<Result(RenderPassContext &)> execute)
@@ -2642,32 +2686,28 @@ void PassBuilder::SetExecuteChecked(std::move_only_function<Result(RenderPassCon
     auto &graph = *static_cast<RenderGraphBuilder::Impl *>(graph_);
     graph.state = Preparation::Building;
     auto &pass = graph.passes[pass_];
-    pass.external.reset();
-    pass.execute = {};
-    pass.owner_execute = std::move(execute);
-    pass.execute_on_owner = false;
+    if (execute) pass.execution.emplace<2>(std::move(execute));
+    else pass.execution.emplace<0>();
 }
 
 void PassBuilder::SetExecuteOnOwner(std::move_only_function<Result(RenderPassContext &)> execute)
 {
-    SetExecuteChecked(std::move(execute));
-    auto &pass = static_cast<RenderGraphBuilder::Impl *>(graph_)->passes[pass_];
-    pass.execute_on_owner = true;
+    auto &graph = *static_cast<RenderGraphBuilder::Impl *>(graph_);
+    graph.state = Preparation::Building;
+    graph.passes[pass_].execution.emplace<3>(Pass::OwnerRecord{std::move(execute)});
 }
 
 void PassBuilder::SetExternalExecute(ExternalQueueBinding binding,
     std::span<const ExternalResourceAccess> accesses,
     std::move_only_function<Result(RenderExternalPassContext &, ExternalQueueCompletion &)> execute)
 {
-    static_cast<RenderGraphBuilder::Impl *>(graph_)->state = Preparation::Building;
-    auto &pass = static_cast<RenderGraphBuilder::Impl *>(graph_)->passes[pass_];
-    pass.execute = {};
-    pass.owner_execute = {};
-    pass.execute_on_owner = false;
-    pass.external = std::make_shared<ExternalOperation>();
-    pass.external->binding = std::move(binding);
-    pass.external->accesses.assign(accesses.begin(), accesses.end());
-    pass.external->execute = std::move(execute);
+    auto &graph = *static_cast<RenderGraphBuilder::Impl *>(graph_);
+    graph.state = Preparation::Building;
+    auto operation = std::make_shared<ExternalOperation>();
+    operation->binding = std::move(binding);
+    operation->accesses.assign(accesses.begin(), accesses.end());
+    operation->execute = std::move(execute);
+    graph.passes[pass_].execution.emplace<4>(std::move(operation));
 }
 
 void PassBuilder::BindExternalExecute(ExternalQueueBinding binding,
@@ -2675,10 +2715,10 @@ void PassBuilder::BindExternalExecute(ExternalQueueBinding binding,
 {
     auto &graph = *static_cast<RenderGraphBuilder::Impl *>(graph_);
     graph.state = Preparation::Building;
-    auto &pass = graph.passes[pass_];
-    if (!pass.external) return;
-    pass.external->binding = std::move(binding);
-    pass.external->execute = std::move(execute);
+    auto *operation = graph.passes[pass_].External();
+    if (!operation) return;
+    operation->binding = std::move(binding);
+    operation->execute = std::move(execute);
 }
 
 RenderGraphBuilder::RenderGraphBuilder() : impl_(std::make_unique<Impl>())
@@ -2751,9 +2791,9 @@ bool RenderGraphBuilder::RestorePlan(PlanHandle handle)
         pass.cached_uses = &saved.uses;
         if (saved.execution_kind == 4)
         {
-            pass.external = std::make_shared<ExternalOperation>();
-            pass.external->binding.queue_type = saved.external_queue;
-            pass.external->accesses = saved.boundaries;
+            pass.execution.emplace<4>(std::make_shared<ExternalOperation>());
+            pass.External()->binding.queue_type = saved.external_queue;
+            pass.External()->accesses = saved.boundaries;
         }
     }
     impl_->restored_plan = true;
@@ -2817,7 +2857,7 @@ std::optional<PassBuilder> RenderGraphBuilder::BindPass(std::uint32_t declaratio
         declaration_index >= impl_->passes.size() ||
         impl_->passes[declaration_index].id != expected_pass_id) return std::nullopt;
     const auto &pass = impl_->passes[declaration_index];
-    if (pass.execute || pass.owner_execute || (pass.external && pass.external->execute))
+    if (pass.HasRecord() || (pass.External() && pass.External()->execute))
         return std::nullopt;
     return PassBuilder(impl_.get(), declaration_index);
 }
@@ -3122,9 +3162,9 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             placed_imports[index].begin < placed_imports[index - 1].end)
             return fail("RenderGraph imports overlapping placed resources without an alias contract.");
     for (const auto &pass : impl_->passes)
-        if (pass.external)
+        if (pass.External())
         {
-            const auto &external = *pass.external;
+            const auto &external = *pass.External();
             auto *queue = static_cast<ID3D12CommandQueue *>(external.binding.native_queue_owner.get());
             if (!queue || external.binding.queue_type != pass.queue ||
                 queue->GetDesc().Type != NativeQueueType(pass.queue) ||
@@ -3154,10 +3194,8 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
             std::rotate(impl_->previous_plans.begin(), previous, std::next(previous));
             reused = true;
         }
-    if (reused) ++impl_->plan_reuses;
     if (!reused)
     {
-        ++impl_->plan_input_builds;
         for (const auto &resource : impl_->resources)
         {
             if (resource.imported) continue;
@@ -3245,9 +3283,9 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
         for (std::size_t pass_index = 0; pass_index < impl_->passes.size(); ++pass_index)
         {
             const auto &pass = impl_->passes[pass_index];
-            if (pass.external)
+            if (pass.External())
             {
-                const auto &external = *pass.external;
+                const auto &external = *pass.External();
                 if (external.accesses.size() != pass.Uses().size())
                     return fail("RenderGraph external operation requires one boundary for every whole-resource use.");
                 if (external_uses.empty()) external_uses.resize(impl_->resources.size());
@@ -3325,7 +3363,7 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
         {
             const auto &pass = impl_->passes[index];
             pass_infos.push_back({pass.id, pass.queue,
-                static_cast<bool>(pass.execute) || static_cast<bool>(pass.owner_execute) || static_cast<bool>(pass.external),
+                pass.HasRecord() || static_cast<bool>(pass.External()),
                 pass.Uses(), predecessor_ids[index]});
         }
         render_graph::CompiledSchedule schedule;
@@ -3365,7 +3403,6 @@ Result RenderGraphBuilder::Prepare(TransientResourcePool &pool, GraphExecutionSt
         impl_->schedule = std::move(schedule);
         impl_->alias_plan = std::move(aliases);
         impl_->topology = std::move(compiled_topology);
-        ++impl_->plan_compilations;
     }
     if (reused) capture_stage(captured_cpu.cpu_prepare_info_key_us);
     capture_stage(captured_cpu.cpu_prepare_compile_us);
@@ -3531,7 +3568,7 @@ Result RenderGraphBuilder::Execute(void *native_command_list, void *enhanced_com
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "RenderGraph single-list Execute requires a Direct-only schedule.");
     }
-    if (std::any_of(impl_->passes.begin(), impl_->passes.end(), [](const auto &pass) { return bool(pass.external); }) ||
+    if (std::any_of(impl_->passes.begin(), impl_->passes.end(), [](const auto &pass) { return bool(pass.External()); }) ||
         std::any_of(impl_->resources.begin(), impl_->resources.end(), [](const auto &resource) {
             return bool(resource.imported_external_completion.native_fence_owner) ||
                    bool(resource.imported_external_completion.resource_lease);
@@ -3550,7 +3587,7 @@ Result RenderGraphBuilder::Execute(void *native_command_list, void *enhanced_com
     for (const auto scheduled : impl_->schedule.execution_order)
     {
         auto &pass = impl_->passes[scheduled];
-        if (!pass.execute && !pass.owner_execute)
+        if (!pass.HasRecord())
         {
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    "RenderGraph pass has no execute callback.");
@@ -3612,12 +3649,7 @@ Result RenderGraphBuilder::Execute(void *native_command_list, void *enhanced_com
 #if defined(HS_DEVELOPMENT_TOOLS)
         PIXBeginEvent(commands, PIX_COLOR_DEFAULT, "%s", pass.Name().c_str());
 #endif
-        if (pass.owner_execute)
-        {
-            if (auto result = pass.owner_execute(context); !result) return result;
-        }
-        else
-            pass.execute(context);
+        if (auto result = pass.Record(context); !result) return result;
 #if defined(HS_DEVELOPMENT_TOOLS)
         PIXEndEvent(commands);
 #endif
@@ -3699,20 +3731,8 @@ std::uint32_t RenderGraphBuilder::CompiledPassId(std::uint32_t execution_index) 
     return impl_->passes[impl_->schedule.execution_order[execution_index]].id;
 }
 
-std::uint64_t RenderGraphBuilder::PlanCompilationCount() const noexcept
-{
-    return impl_->plan_compilations;
-}
 
-std::uint64_t RenderGraphBuilder::PlanReuseCount() const noexcept
-{
-    return impl_->plan_reuses;
-}
 
-std::uint64_t RenderGraphBuilder::PlanInputBuildCount() const noexcept
-{
-    return impl_->plan_input_builds;
-}
 
 std::string_view RenderGraphBuilder::CompiledPassName(std::uint32_t execution_index) const noexcept
 {

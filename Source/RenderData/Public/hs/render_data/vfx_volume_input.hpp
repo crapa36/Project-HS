@@ -31,7 +31,7 @@ struct VfxVolumeInput
     VfxVolumeNoise noise{};
     std::uint32_t stable_seed{}, steps{}, minimum_quality{2}, half_resolution{};
     float elapsed_seconds{}, source_age{}, source_envelope{1.0f}; // Live knot envelope; gradient alpha is sampled on GPU.
-    float authored_scale{}, density{1.0f}, alpha{}, anisotropy{};
+    float density{1.0f}, alpha{}, anisotropy{};
     // Explicit LocalVolume profile: extinction is 1 m^-1; authored density,
     // alpha and smoke_fade multiply it. Scattering albedo is authored linear
     // RGB clamped to [0,1], independently of HDR. Authored linear RGB*HDR is a
@@ -39,9 +39,7 @@ struct VfxVolumeInput
     // in the same L/T interval as regular fog. It never gets composited twice.
     float extinction{1.0f};
     Float3 scattering_albedo{}, emission{};
-    float hdr{};
     std::uint32_t gradient_row{};
-    std::uint64_t transform_revision{}, density_revision{}, appearance_revision{};
 };
 static_assert(std::is_trivially_copyable_v<VfxVolumeInput>);
 using VfxVolumeInputs = std::span<const VfxVolumeInput>;

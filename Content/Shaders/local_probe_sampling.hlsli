@@ -71,7 +71,7 @@ HsLocalProbeBlend HsLocalProbePrepareBlend(float3 world,HsProbeGridCell c)
     HsLocalProbeBlend blend=(HsLocalProbeBlend)0;
     blend.global_weight=1;
     if(!c.dims.x) return blend;
-    uint2 candidates=asuint(HsLocalProbeCosineSh[c.metadata+4u].xy);
+    uint2 candidates=asuint(HsLocalProbeData[c.metadata+4u].xy);
     float total=0;
     [unroll] for(uint word=0;word<2;++word)
     {
@@ -110,7 +110,7 @@ void HsLocalProbeEvaluateIbl(float3 world,HsProbeGridCell cell,float3 normal,flo
     if(local_specular && cell.dims.x)
     {
         const float3 projected_direction=normalize(reflected);
-        const uint2 candidates=asuint(HsLocalProbeCosineSh[cell.metadata+4u].xy);
+        const uint2 candidates=asuint(HsLocalProbeData[cell.metadata+4u].xy);
         [unroll] for(uint word=0;word<2;++word)
         {
             uint bits=candidates[word];

@@ -66,10 +66,11 @@ bool Normalize(const ResourceInfo &resource, const ResourceUse &use, Intervals &
 bool Overlaps(std::span<const Interval> a, std::span<const Interval> b)
 {
     std::size_t left{}, right{};
+    const auto *left_data = a.data(), *right_data = b.data();
     while (left < a.size() && right < b.size())
     {
-        if (a[left].begin < b[right].end && b[right].begin < a[left].end) return true;
-        if (a[left].end <= b[right].begin) ++left;
+        if (left_data[left].begin < right_data[right].end && right_data[right].begin < left_data[left].end) return true;
+        if (left_data[left].end <= right_data[right].begin) ++left;
         else ++right;
     }
     return false;
@@ -91,11 +92,16 @@ void Include(Intervals &initialized, std::span<const Interval> ranges)
 
 bool Covered(std::span<const Interval> initialized, std::span<const Interval> ranges)
 {
-    return std::all_of(ranges.begin(), ranges.end(), [&](const auto range) {
-        return std::any_of(initialized.begin(), initialized.end(), [&](const auto known) {
-            return known.begin <= range.begin && known.end >= range.end;
-        });
-    });
+    const auto *range_data = ranges.data(), *known_data = initialized.data();
+    for (std::size_t i = 0; i < ranges.size(); ++i)
+    {
+        bool covered{};
+        for (std::size_t j = 0; j < initialized.size(); ++j)
+            if (known_data[j].begin <= range_data[i].begin && known_data[j].end >= range_data[i].end)
+            { covered = true; break; }
+        if (!covered) return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -125,7 +131,8 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
         RangeSlice written;
         std::size_t first_reader{SIZE_MAX},last_reader{SIZE_MAX};
     };
-    std::vector<std::vector<VersionInfo>> versions(resources.size());
+    // Immutable imports need no version chain or Debug-container allocation.
+    std::vector<std::vector<VersionInfo>> versions;
     Intervals interval_arena;
     std::vector<UseInfo> reader_records;
     for (std::size_t i = 0; i < resources.size(); ++i)
@@ -143,6 +150,7 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
         bool has_writes{};
         std::uint32_t seen_pass{UINT32_MAX};
         std::size_t first_use{};
+        std::size_t chain{SIZE_MAX};
     };
     std::vector<ResourceState> resource_states(resources.size());
     auto *const state_data = resource_states.data();
@@ -219,7 +227,12 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
             // Initialized resources with no writers have no version hazards; range/access validation still applies.
             if (immutable) continue;
             const RangeSlice ranges{range_begin, interval_arena.size() - range_begin};
-            auto &chain = versions[resource_index];
+            if (state.chain == SIZE_MAX)
+            {
+                state.chain = versions.size();
+                versions.emplace_back();
+            }
+            auto &chain = versions[state.chain];
             if (chain.size() <= use.successor.ordinal)
                 chain.resize(std::size_t(use.successor.ordinal) + 1);
             if (use.reads)
@@ -256,16 +269,20 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
             edge(producer->second, consumer);
         }
     const auto interval_slice = [&](RangeSlice slice) {
-        return std::span<const Interval>{interval_arena}.subspan(slice.first, slice.count);
+        return std::span<const Interval>{interval_arena.data() + slice.first, slice.count};
     };
+    Intervals initialized;
+    const auto *const readers = reader_records.data();
     for (std::size_t resource_index = 0; resource_index < resources.size(); ++resource_index)
     {
         const auto &r = resources[resource_index];
-        const auto &chain = versions[resource_index];
+        const auto chain_index = resource_states[resource_index].chain;
+        const auto chain = chain_index == SIZE_MAX ? std::span<const VersionInfo>{}
+            : std::span<const VersionInfo>{versions[chain_index]};
         const auto extent = r.kind == ResourceKind::Buffer ? r.buffer_size :
             std::uint64_t(r.mip_count) * r.array_count * r.plane_count;
         // Initially complete resources retain full coverage across later writes.
-        Intervals initialized;
+        initialized.clear();
         std::uint32_t latest{};
         for (std::uint32_t ordinal = 0; ordinal < chain.size(); ++ordinal)
         {
@@ -283,9 +300,9 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
             else if (ordinal && version.first_reader != SIZE_MAX)
                 return fail("RenderGraph reads a nonexistent resource version.");
             for (auto reader_index = version.first_reader; reader_index != SIZE_MAX;
-                 reader_index = reader_records[reader_index].next)
+                 reader_index = readers[reader_index].next)
             {
-                const auto &reader = reader_records[reader_index];
+                const auto &reader = readers[reader_index];
                 const auto reader_ranges = interval_slice(reader.ranges);
                 if (!r.initialized && !Covered(initialized, reader_ranges))
                     return fail("RenderGraph reads an undefined resource range.");
@@ -315,8 +332,13 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
     for (std::uint32_t before = 0; before < pass_count; ++before)
     {
         auto &next = successors[before];
-        std::sort(next.begin(), next.end());
-        next.erase(std::unique(next.begin(), next.end()), next.end());
+        if (next.size() > 1)
+        {
+            auto *const first = next.data();
+            const auto last = first + next.size();
+            std::sort(first, last);
+            next.resize(static_cast<std::size_t>(std::unique(first, last) - first));
+        }
         for (const auto after : next)
             ++indegree[after];
     }
@@ -446,38 +468,49 @@ Result PlanTransientAliases(std::span<const ResourceInfo> resources,
         position[pass] = i;
     }
 
-    std::vector<std::vector<std::uint32_t>> successors(passes.size());
-    const auto add_edge = [&](std::uint32_t before, std::uint32_t after) {
-        if (before >= passes.size() || after >= passes.size() || before == after) return;
-        auto &out = successors[before];
-        if (std::find(out.begin(), out.end(), after) == out.end()) out.push_back(after);
-    };
+    constexpr std::array<std::uint32_t, 3> absent{UINT32_MAX, UINT32_MAX, UINT32_MAX};
+    std::vector<std::uint32_t> queue_position(passes.size());
+    std::vector<std::uint32_t> queue_previous(passes.size(), UINT32_MAX);
     for (const auto &order : schedule.queue_orders)
-        for (std::size_t i = 1; i < order.size(); ++i) add_edge(order[i - 1], order[i]);
-    for (const auto &dependency : schedule.cross_queue_dependencies)
-        add_edge(dependency.producer, dependency.consumer);
-
-    // Alias pairs query the same producer repeatedly; traverse each producer at most once.
-    std::vector<std::vector<std::uint8_t>> reachable_from(passes.size());
-    std::vector<std::uint32_t> stack;
-    const auto reachable = [&](std::uint32_t from, std::uint32_t to) {
-        if (from == to || from >= successors.size() || to >= successors.size()) return false;
-        auto &seen = reachable_from[from];
-        if (seen.empty())
+        for (std::size_t i = 0; i < order.size(); ++i)
         {
-            seen.resize(passes.size());
-            stack.clear(); stack.push_back(from); seen[from] = 1;
-            while (!stack.empty())
-            {
-                const auto current = stack.back(); stack.pop_back();
-                for (const auto next : successors[current])
-                    if (!seen[next]) { seen[next] = 1; stack.push_back(next); }
-            }
+            queue_position[order[i]] = static_cast<std::uint32_t>(i + 1);
+            if (i) queue_previous[order[i]] = order[i - 1];
         }
-        return seen[to] != 0;
+    std::vector<std::array<std::uint32_t, 3>> waits(passes.size(), absent);
+    for (const auto &dependency : schedule.cross_queue_dependencies)
+    {
+        const auto before = dependency.producer, after = dependency.consumer;
+        if (before >= passes.size() || after >= passes.size() || before == after) continue;
+        auto &latest = waits[after][static_cast<std::size_t>(passes[before].queue)];
+        if (latest == UINT32_MAX || queue_position[latest] < queue_position[before]) latest = before;
+    }
+    // FIFO order and accepted cross-queue waits need only three progress counters.
+    std::vector<std::array<std::uint32_t, 3>> completed(passes.size());
+    for (const auto pass : schedule.execution_order)
+    {
+        auto &clock = completed[pass];
+        const auto merge = [&](std::uint32_t predecessor) {
+            if (predecessor == UINT32_MAX) return;
+            for (std::size_t queue = 0; queue < clock.size(); ++queue)
+                clock[queue] = std::max(clock[queue], completed[predecessor][queue]);
+        };
+        merge(queue_previous[pass]);
+        for (const auto predecessor : waits[pass]) merge(predecessor);
+        clock[static_cast<std::size_t>(passes[pass].queue)] = queue_position[pass];
+    }
+    const auto reachable = [&](std::uint32_t from, std::uint32_t to) {
+        return from != to && queue_position[from] != 0 &&
+            completed[to][static_cast<std::size_t>(passes[from].queue)] >= queue_position[from];
     };
 
-    std::vector<std::vector<std::uint32_t>> users(resources.size());
+    struct Lifetime
+    {
+        std::array<std::uint32_t, 3> first{UINT32_MAX, UINT32_MAX, UINT32_MAX};
+        std::array<std::uint32_t, 3> last{UINT32_MAX, UINT32_MAX, UINT32_MAX};
+        std::uint32_t first_pass{UINT32_MAX};
+    };
+    std::vector<Lifetime> users(resources.size());
     for (const auto pass : schedule.execution_order)
         for (const auto &use : passes[pass].uses)
         {
@@ -486,16 +519,18 @@ Result PlanTransientAliases(std::span<const ResourceInfo> resources,
             const auto resource = use.predecessor.resource.value - 1;
             // Imported/initialized resources never enter transient alias groups.
             if (resources[resource].initialized) continue;
-            auto &resource_users = users[resource];
-            if (resource_users.empty() || resource_users.back() != pass)
-                resource_users.push_back(pass);
+            auto &lifetime = users[resource];
+            const auto queue = static_cast<std::size_t>(passes[pass].queue);
+            if (lifetime.first_pass == UINT32_MAX) lifetime.first_pass = pass;
+            if (lifetime.first[queue] == UINT32_MAX) lifetime.first[queue] = pass;
+            lifetime.last[queue] = pass;
         }
 
     std::vector<std::uint32_t> candidates;
     for (std::uint32_t resource = 0; resource < resources.size(); ++resource)
     {
         const auto &info = resources[resource];
-        if (info.initialized || users[resource].empty()) continue;
+        if (info.initialized || users[resource].first_pass == UINT32_MAX) continue;
         if (!info.allocation_size || !info.allocation_alignment) continue;
         candidates.push_back(resource);
         if (std::numeric_limits<std::uint64_t>::max() - plan.transient_bytes_without_aliasing <
@@ -504,15 +539,17 @@ Result PlanTransientAliases(std::span<const ResourceInfo> resources,
         plan.transient_bytes_without_aliasing += info.allocation_size;
     }
     std::sort(candidates.begin(), candidates.end(), [&](auto left, auto right) {
-        const auto left_pass = users[left].front(), right_pass = users[right].front();
+        const auto left_pass = users[left].first_pass, right_pass = users[right].first_pass;
         return position[left_pass] == position[right_pass] ? left < right
                                                             : position[left_pass] < position[right_pass];
     });
 
     const auto can_follow = [&](std::uint32_t before, std::uint32_t after) {
-        for (const auto first : users[before])
-            for (const auto second : users[after])
+        // Each queue orders its other uses before its last / after its first use.
+        for (const auto first : users[before].last)
+            for (const auto second : users[after].first)
             {
+                if (first == UINT32_MAX || second == UINT32_MAX) continue;
                 if (first == second || position[first] >= position[second] || !reachable(first, second))
                     return false;
             }

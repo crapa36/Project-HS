@@ -186,6 +186,11 @@ struct TextureStreamingCapabilities
     total += bytes;
     return true;
 }
+enum class TextureStreamFallback
+{
+    NativeTexture,
+    SourceMaterial
+};
 struct TextureStreamRegistration
 {
     std::string generation, logical_id;
@@ -203,6 +208,7 @@ struct TextureStreamRegistration
     NativeResourceContract fallback_contract{};
     bool srgb_view{};
     bool sampler_feedback{true};
+    TextureStreamFallback fallback_mode{TextureStreamFallback::NativeTexture};
 };
 struct TextureStreamView
 {
@@ -215,6 +221,7 @@ struct TextureStreamView
     bool reserved{};
     bool opacity_sampling{true};
     bool feedback_supported{};
+    QueueHint queue{QueueHint::Direct};
 };
 struct TextureStreamingGraphBinding
 {
@@ -229,18 +236,12 @@ struct TextureStreamingLayout
 {
     struct Entry
     {
-        TextureHandle sampled{}, candidate{};
-        ResourceVersion sampled_version{};
+        TextureHandle sampled{};
         render_data::TextureDescription description{};
-        std::uint32_t first_mip{}, target_mip{};
-        std::uint32_t map_count{}, unmap_count{};
-        std::vector<std::uint32_t> mapped_mips, unmapped_mips;
-        bool pending{}, separate_target{}, reserved{}, copy_upload{}, software_copy{};
+        std::uint32_t first_mip{};
         bool opacity_sampling{true};
     };
     std::vector<Entry> entries;
-    std::uint32_t first_pass_id{}, copy_pass_index{};
-    QueueHint queue{QueueHint::Copy};
 };
 // uint4 GPU ABI, indexed by the actual material texture binding slot.
 struct TextureMipMetadata
@@ -276,7 +277,8 @@ class RendererTextureStreaming
     [[nodiscard]] Result Register(TextureStreamRegistration, ResidencyManager &, TextureStreamId &);
     // A budget refusal is a successful, non-admitted transaction with zero IDs.
     [[nodiscard]] Result RegisterBatch(std::span<TextureStreamRegistration>, ResidencyManager &,
-                                       std::span<TextureStreamId>, bool &admitted);
+                                       std::span<TextureStreamId>, bool &admitted,
+                                       std::uint64_t *required_budget_bytes = nullptr);
     [[nodiscard]] Result SupplyDescriptor(std::string logical_id, render_data::TextureDescriptorStorage);
     [[nodiscard]] Result ValidateConfiguration(GraphicsQuality, std::uint32_t budget_mib) const;
     [[nodiscard]] Result Configure(GraphicsQuality, std::uint32_t finest_mip, std::uint32_t budget_mib);
@@ -287,15 +289,13 @@ class RendererTextureStreaming
                 std::uint64_t frame_number) noexcept;
     [[nodiscard]] Result Pump(std::uint64_t frame_number, const CompletionSet &completed,
         RendererAssetIo &, StreamingManager &, ResidencyManager &);
-    // Owns map/unmap, copy commands, and their retained backing. The graph
-    // bridges completion onto its existing owned Copy queue timeline.
-    [[nodiscard]] Result AddPendingPasses(RenderGraphBuilder &, ExternalQueueBinding,
-        std::uint32_t first_pass_id, std::vector<TextureStreamingGraphBinding> &,
-        TextureStreamingLayout *layout = nullptr);
-    [[nodiscard]] bool MatchesLayout(std::uint32_t first_pass_id,
-        const TextureStreamingLayout &) const noexcept;
-    [[nodiscard]] Result BindRetained(RenderGraphBuilder &, ExternalQueueBinding,
-        std::uint32_t first_pass_id, const TextureStreamingLayout &,
+    // Upload declarations own only the actual Copy/mapping inputs and targets.
+    [[nodiscard]] bool HasPendingUploads() const noexcept;
+    [[nodiscard]] Result AddUploadPass(RenderGraphBuilder &, ID3D12CommandQueue *, std::uint32_t pass_id);
+    [[nodiscard]] Result ImportViews(RenderGraphBuilder &,
+        std::vector<TextureStreamingGraphBinding> &, TextureStreamingLayout *layout = nullptr);
+    [[nodiscard]] bool MatchesLayout(const TextureStreamingLayout &) const noexcept;
+    [[nodiscard]] Result BindRetained(RenderGraphBuilder &, const TextureStreamingLayout &,
         std::vector<TextureStreamingGraphBinding> &);
     void MarkSubmitted(const CompletionSet &, StreamingManager &) noexcept;
     [[nodiscard]] bool HasStartedWork() const noexcept;
@@ -320,9 +320,8 @@ class RendererTextureStreaming
     [[nodiscard]] std::optional<bool> RequiredMipSetFitsConfiguredBudget(
         std::span<const TextureStreamMipRequirement>) const noexcept;
   private:
-    [[nodiscard]] Result AddPendingPassesImpl(RenderGraphBuilder &, ExternalQueueBinding,
-        std::uint32_t, std::vector<TextureStreamingGraphBinding> &,
-        TextureStreamingLayout *, const TextureStreamingLayout *);
+    [[nodiscard]] Result ImportViewsImpl(RenderGraphBuilder &,
+        std::vector<TextureStreamingGraphBinding> &, TextureStreamingLayout *, const TextureStreamingLayout *);
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };

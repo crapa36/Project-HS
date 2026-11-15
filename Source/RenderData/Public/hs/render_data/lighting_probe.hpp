@@ -26,6 +26,8 @@ struct LightingProbePackageView
     // Lambertian reflected radiance is albedo * E / pi. w is reserved zero.
     // Basis order: 1,y,z,x,xy,yz,3z*z-1,xz,x*x-y*y (orthonormal constants applied).
     LightingProbeIrradiance irradiance{};
+    // Derived from validated raw/prefiltered RGB; not serialized.
+    float max_radiance{};
 };
 
 // Lighting probe v1 has exactly three required, portable little-endian chunks:

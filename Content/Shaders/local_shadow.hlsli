@@ -4,13 +4,11 @@
 #include "local_shadow_abi.hlsli"
 
 // Independent of light_list.hlsli: world consumers pass the complete light key.
-// Byte offsets match renderer_local_shadow.hpp (64B metadata, 2096B record).
-// A 2096B record exceeds D3D12's 2048B structured-element limit, so t1 is raw.
+// Byte offsets match renderer_local_shadow.hpp (64B metadata, 576B record).
 struct HsLocalShadowRecord
 {
     uint4 identity,revision;
     float4 position_range,direction_cos_outer,parameters;
-    float4 emitter_normal_two_sided;
     uint4 state;
 };
 struct HsLocalShadowDrawRecord
@@ -31,7 +29,6 @@ HsLocalShadowRecord HsLocalShadowLoadRecord(uint index)
     record.position_range=asfloat(HsLocalShadowRecords.Load4(address+HS_LOCAL_SHADOW_RECORD_POSITION_RANGE));
     record.direction_cos_outer=asfloat(HsLocalShadowRecords.Load4(address+HS_LOCAL_SHADOW_RECORD_DIRECTION));
     record.parameters=asfloat(HsLocalShadowRecords.Load4(address+HS_LOCAL_SHADOW_RECORD_PARAMETERS));
-    record.emitter_normal_two_sided=asfloat(HsLocalShadowRecords.Load4(address+HS_LOCAL_SHADOW_RECORD_EMITTER));
     record.state=HsLocalShadowRecords.Load4(address+HS_LOCAL_SHADOW_RECORD_STATE);
     return record;
 }
@@ -45,8 +42,6 @@ float4x4 HsLocalShadowFaceMatrix(uint index,uint face)
 }
 float4 HsLocalShadowFaceTile(uint index,uint face)
 {return asfloat(HsLocalShadowRecords.Load4(index*HsLocalShadowRecordBytes+HS_LOCAL_SHADOW_RECORD_TILES+face*HS_LOCAL_SHADOW_VECTOR_BYTES));}
-float3 HsLocalShadowSamplePosition(uint index,uint sample)
-{return asfloat(HsLocalShadowRecords.Load4(index*HsLocalShadowRecordBytes+HS_LOCAL_SHADOW_RECORD_SAMPLES+sample*HS_LOCAL_SHADOW_VECTOR_BYTES)).xyz;}
 
 bool HsLocalShadowIsDraw(uint pass) {return (pass&0xc0000000u)==0x40000000u;}
 HsLocalShadowDrawRecord HsLocalShadowLoadDraw(uint pass)
@@ -147,7 +142,7 @@ bool HsLocalShadowLookup(uint record_reference,uint4 identity,uint2 revision,flo
 {
     visibility=1.0;
     const uint4 counts=HsLocalShadowMetadata.Load4(HS_LOCAL_SHADOW_METADATA_COUNTS);
-    if(counts.w==0u||record_reference==0u||record_reference>counts.x||identity.w<1u||identity.w>4u)return false;
+    if(counts.w==0u||record_reference==0u||record_reference>counts.x||identity.w<1u||identity.w>2u)return false;
     const uint index=record_reference-1u;
     const HsLocalShadowRecord record=HsLocalShadowLoadRecord(index);
     if(any(record.identity!=identity)||any(record.revision.xy!=revision)||record.state.y==0u)return false;
@@ -155,37 +150,7 @@ bool HsLocalShadowLookup(uint record_reference,uint4 identity,uint2 revision,flo
     if(dot(delta,delta)>record.position_range.w*record.position_range.w)return false;
     const float3 n=dot(normal,normal)>1e-10?normalize(normal):0.0;
     const float3 biased_world=world+n*record.parameters.z;
-    if(identity.w<3u)
-    {
-        const uint face=identity.w==1u?HsLocalShadowCubeFace(biased_world-record.position_range.xyz):0u;
-        return HsLocalShadowFaceVisibility(index,record,face,biased_world,visibility);
-    }
-    const uint samples=record.revision.z;
-    if((samples!=1u&&samples!=2u&&samples!=4u)||record.revision.w!=samples*6u||
-        record.state.x!=((1u<<record.revision.w)-1u))return false;
-    float weighted_visibility=0.0,total_weight=0.0;
-    [loop]for(uint sample=0u;sample<samples;++sample)
-    {
-        const float3 toward=HsLocalShadowSamplePosition(index,sample)-biased_world;
-        const float distance_squared=dot(toward,toward);
-        if(distance_squared<=0.0||!isfinite(distance_squared))continue;
-        const float3 direction=toward*rsqrt(distance_squared);
-        float emitter_cosine=dot(record.emitter_normal_two_sided.xyz,-direction);
-        if(record.emitter_normal_two_sided.w>0.5)emitter_cosine=abs(emitter_cosine);
-        // World/froxel queries do not invent a receiving surface normal;
-        // their actual directional response is evaluated by their caller.
-        const float receiver_cosine=dot(n,n)>0.0?max(dot(n,direction),0.0):1.0;
-        const float weight=max(emitter_cosine,0.0)*receiver_cosine/distance_squared;
-        if(weight<=0.0||!isfinite(weight))continue;
-        const uint face=sample*6u+HsLocalShadowCubeFace(-toward);
-        float sample_visibility;
-        if(!HsLocalShadowFaceVisibility(index,record,face,biased_world,sample_visibility))return false;
-        weighted_visibility+=weight*sample_visibility;total_weight+=weight;
-    }
-    // Equal-area sample weights, radiance, emitter area and range taper
-    // cancel in this normalized scalar. Actual area BSDF/LTC energy remains
-    // in light_list.hlsli and is multiplied by this visibility exactly once.
-    if(total_weight<=0.0)return false;
-    visibility=saturate(weighted_visibility/total_weight);return true;
+    const uint face=identity.w==1u?HsLocalShadowCubeFace(biased_world-record.position_range.xyz):0u;
+    return HsLocalShadowFaceVisibility(index,record,face,biased_world,visibility);
 }
 #endif

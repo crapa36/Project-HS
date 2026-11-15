@@ -2,22 +2,28 @@
 
 #include "renderer_local_probe.hpp"
 #include <hs/render_data/geometry_package.hpp>
-#include <hs/render_data/material_schema.hpp>
-#include <hs/renderer/renderer.hpp>
+#if defined(HS_OFFLINE_PROBE_BAKER)
 #include <D3D12MemAlloc.h>
 #include <wrl/client.h>
+#endif
 
 #include <array>
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
+namespace D3D12MA { class Allocator; }
+
 namespace hs
 {
 namespace renderer_detail { struct FrameConstants; }
+struct RendererConfig;
 class RendererPipelineCache;
+struct LocalProbeRuntimeCaptureLayout;
 
+#if defined(HS_OFFLINE_PROBE_BAKER)
 // One complete conventional page per authored environment/terrain material.
 // Use an actual complete resident source/fallback page, never a selected main
 // camera cluster/HLOD cut. Retain both native resource and allocator leases.
@@ -34,6 +40,7 @@ struct LocalProbeCapturePage
     bool complete{};
     std::array<std::byte, 32> source_digest{}; // Actual decoded complete geometry page bytes.
 };
+#endif
 
 // Value-only revision facts from the geometry catalog. They let a sample-ready
 // probe check source ownership without constructing native capture pages/leases.
@@ -43,24 +50,28 @@ struct LocalProbePageRevision
     std::array<std::byte, 32> source_digest{};
     render_data::GeometryBounds bounds;
 };
+#if defined(HS_OFFLINE_PROBE_BAKER)
 struct LocalProbeTextureFact
 {
     std::string_view logical_id;
     std::uint32_t sampled_mip{};
     bool ready{};
 };
+#endif
 
 struct LocalProbeRuntimeFrameInputs
 {
-    const RendererConfig *config{};
-    RendererPipelineCache *pipeline_cache{};
     std::shared_ptr<const StaticRenderScene> scene;
-    std::span<const LightView> lights; // Same authoritative static lights bound below.
     std::uint32_t static_instance_generation{};
     std::uint64_t material_parameter_revision{}, pipeline_revision{}; // Material: 0 matches the admitted Generation, otherwise a unique publication stamp.
     float foliage_density{};
     const renderer_detail::FrameConstants *frame_constants{}; // Copied at Register.
     std::span<const LocalProbePageRevision> page_revisions;
+    CompletionSet completed;
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    const RendererConfig *config{};
+    RendererPipelineCache *pipeline_cache{};
+    std::span<const LightView> lights; // Same authoritative static lights bound below.
     std::span<const LocalProbeTextureFact> texture_facts;
     bool texture_facts_valid{};
     Microsoft::WRL::ComPtr<ID3D12Resource> static_instances;
@@ -75,14 +86,14 @@ struct LocalProbeRuntimeFrameInputs
     D3D12_GPU_DESCRIPTOR_HANDLE sampler_table{};
     // Complete geometry catalog order, followed by terrain. Material ordinals are separate.
     std::span<const LocalProbeCapturePage> pages;
-    // All actual texture/material/light/shadow/environment/LTC/LUT/frame binding
+    // All actual texture/material/light/shadow/environment/LUT/frame binding
     // reads. Native vertex/index/static table and private constants are appended.
     std::span<const LocalProbeSceneRead> scene_reads;
     // Additional owners for resources read through the shared binding tables.
     std::vector<std::shared_ptr<const void>> binding_owners;
-    CompletionSet completed;
     std::uint32_t max_cube_views{6};
     std::function<void(PassBuilder &)> declare_material_sampling, declare_shadow_sampling;
+#endif
 };
 
 struct LocalProbeCaptureState;
@@ -99,21 +110,22 @@ struct LocalProbeRuntimeFramePlan
     render_data::SceneProbeRevisions revisions;
     std::shared_ptr<const StaticRenderScene> scene;
     std::uint64_t static_instance_generation{},material_parameter_revision{},pipeline_revision{};
+#if defined(HS_OFFLINE_PROBE_BAKER)
     std::size_t light_count{},page_count{},scene_read_count{};
     std::uint32_t max_cube_views{};
     std::array<std::byte,32> capture_identity{};
     bool capture_identity_valid{},capture_sources_ready{};
-    bool active{},capture{},shadow{};
+    bool capture{},shadow{};
+#endif
+    bool active{};
 };
 struct LocalProbeRuntimeLayout
 {
     LocalProbeLayout service;
-    ResourceHandle private_constants{},private_shadow{};
-    ResourceVersion shadow_output{};
-    std::uint32_t shadow_pass_index{};
-    std::vector<LocalProbeSceneRead> scene_reads;
-    std::vector<LocalProbeSceneRead> shadow_reads;
-    bool active{},capture{},shadow{},shadow_sampling{};
+    // Common renderer objects share this layout with the offline composition.
+    std::shared_ptr<LocalProbeRuntimeCaptureLayout> capture;
+    bool active{};
+    [[nodiscard]] bool HasCaptureBindings() const noexcept;
 };
 class LocalProbeRuntimeCandidate
 {
@@ -129,11 +141,13 @@ class LocalProbeRuntimeCandidate
 class LocalProbeRuntime
 {
   public:
+#if defined(HS_OFFLINE_PROBE_BAKER)
     [[nodiscard]] Result PrepareCaptureMaterialOrdinals(const std::shared_ptr<const StaticRenderScene> &,
         float foliage_density);
     [[nodiscard]] std::span<const std::uint32_t> CachedCaptureMaterialOrdinals(
         const std::shared_ptr<const StaticRenderScene> &, float foliage_density) const noexcept;
     [[nodiscard]] bool CaptureIdentityPending(const CompletionSet &) const noexcept;
+#endif
     LocalProbeRuntime();
     ~LocalProbeRuntime();
     LocalProbeRuntime(const LocalProbeRuntime &) = delete;
@@ -162,18 +176,19 @@ class LocalProbeRuntime
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
 #if defined(HS_OFFLINE_PROBE_BAKER)
     [[nodiscard]] Result BeginOfflineIteration(const CompletionSet &,bool reflections_only);
-#endif
     [[nodiscard]] Result ExportBakedPackage(RenderGraphQueueExecutor &, TransientResourcePool &,
         std::uint32_t frame_slot, BarrierMode, std::vector<std::byte> &package_bytes);
+#endif
     [[nodiscard]] std::span<const render_data::SceneProbeRecord> Probes() const noexcept;
     [[nodiscard]] render_data::SceneProbeRevisions BaselineRevisions() const noexcept;
 #if defined(HS_DEVELOPMENT_TOOLS)
     [[nodiscard]] LocalProbeRevisionDiagnostics RevisionDiagnostics() const;
 #endif
+#if defined(HS_OFFLINE_PROBE_BAKER)
     [[nodiscard]] LocalProbeBakeStatus BakeStatus(const CompletionSet &) const noexcept;
+#endif
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
     // Called only after all old submissions have reliably completed.
-    void SwapState(LocalProbeRuntime &other) noexcept { impl_.swap(other.impl_); }
   private:
     [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const LocalProbeRuntimeFrameInputs &,
         const LocalProbeRuntimeFramePlan &,LocalProbeOutputs &,LocalProbeRuntimeLayout *,

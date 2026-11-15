@@ -4,42 +4,26 @@
 #include <array>
 #include <bit>
 #include <cstring>
-#include <limits>
 #include <unordered_map>
-#if defined(_M_X64)
-#include <emmintrin.h>
-#endif
 
 namespace hs
 {
+std::array<std::uint32_t, 2> texture_feedback_detail::DecodeTerrainMipRequests(std::uint32_t word) noexcept
+{
+    const auto low = word & ((1u << HS_TERRAIN_REQUEST_MIP_BITS) - 1u);
+    const auto high = word >> HS_TERRAIN_REQUEST_MIP_BITS;
+    return {low ? static_cast<std::uint32_t>(std::countr_zero(low)) : kNoMipDemand,
+            high ? static_cast<std::uint32_t>(std::countr_zero(high)) : kNoMipDemand};
+}
 std::uint32_t texture_feedback_detail::MinimumRequestedMip(
     std::span<const std::byte> row, std::uint32_t mip_count) noexcept
 {
     auto minimum = std::uint8_t{0xff};
-    std::size_t offset{};
-#if defined(_M_X64)
-    if (row.size() >= 16)
+    for (const auto value : row)
     {
-        auto lanes = _mm_set1_epi8(static_cast<char>(0xff));
-        const auto zero = _mm_setzero_si128();
-        const auto vector_end = row.size() - row.size() % 16;
-        for (; offset < vector_end; offset += 16)
-        {
-            const auto values = _mm_loadu_si128(
-                reinterpret_cast<const __m128i *>(row.data() + offset));
-            lanes = _mm_min_epu8(lanes, values);
-            if (_mm_movemask_epi8(_mm_cmpeq_epi8(lanes, zero)) != 0)
-                return 0;
-        }
-        lanes = _mm_min_epu8(lanes, _mm_srli_si128(lanes, 8));
-        lanes = _mm_min_epu8(lanes, _mm_srli_si128(lanes, 4));
-        lanes = _mm_min_epu8(lanes, _mm_srli_si128(lanes, 2));
-        lanes = _mm_min_epu8(lanes, _mm_srli_si128(lanes, 1));
-        minimum = static_cast<std::uint8_t>(_mm_cvtsi128_si32(lanes));
+        if (minimum == 0) break;
+        minimum = std::min(minimum, std::to_integer<std::uint8_t>(value));
     }
-#endif
-    for (; offset < row.size() && minimum != 0; ++offset)
-        minimum = std::min(minimum, std::to_integer<std::uint8_t>(row[offset]));
     if (minimum == 0xff) return texture_feedback_detail::kNoMipDemand;
     // Preserve the byte sentinel and the prior uint32 clamp arithmetic exactly.
     return std::min(static_cast<std::uint32_t>(minimum), mip_count - 1u);
@@ -72,8 +56,12 @@ struct FeedbackOwner
 };
 struct FeedbackFrame
 {
-    AllocationResource metadata;
+    AllocationResource metadata, terrain_requests, terrain_readback;
     ResidencyTicket metadata_ticket;
+    std::vector<ResidencyTicket> terrain_tickets;
+    std::vector<TextureStreamId> terrain_planes;
+    D3D12_CPU_DESCRIPTOR_HANDLE terrain_cpu{};
+    D3D12_GPU_DESCRIPTOR_HANDLE terrain_gpu{};
     std::vector<FeedbackOwner> owners;
     std::array<std::uint32_t, kTextureFeedbackBindingCount> aliases;
     ComPtr<ID3D12DescriptorHeap> heap, cpu_heap, clear_descriptors;
@@ -114,8 +102,9 @@ struct RendererTextureFeedback::Impl
         owner.target = view.resource; owner.mip_count = view.logical_description.mip_count;
         owner.opacity_sampling = view.opacity_sampling;
         const auto target = view.resource->GetDesc();
-        const auto region_width = std::min(16u, std::bit_floor(static_cast<UINT>(target.Width) / 2u));
-        const auto region_height = std::min(16u, std::bit_floor(target.Height / 2u));
+        // The consumer keeps only the whole-texture minimum, so spatial feedback precision is unused.
+        const auto region_width = std::bit_floor(static_cast<UINT>(target.Width) / 2u);
+        const auto region_height = std::bit_floor(target.Height / 2u);
         if (region_width < 4u || region_height < 4u) return FeedbackFailure("Selected feedback mip region is too small.");
         owner.width = (static_cast<std::uint32_t>(target.Width) + region_width - 1u) / region_width;
         owner.height = (target.Height + region_height - 1u) / region_height; owner.slices = target.DepthOrArraySize;
@@ -174,6 +163,7 @@ struct RendererTextureFeedback::Impl
     }
     static void ReleaseAccounting(const FeedbackFrame &frame, ResidencyManager &residency) noexcept
     {
+        for (auto ticket : frame.terrain_tickets) static_cast<void>(residency.ReleaseNow(ticket));
         if (frame.metadata_ticket) static_cast<void>(residency.ReleaseNow(frame.metadata_ticket));
         for (const auto &owner : frame.owners)
             for (auto ticket : owner.tickets) static_cast<void>(residency.ReleaseNow(ticket));
@@ -206,16 +196,19 @@ Result RendererTextureFeedback::Initialize(ID3D12Device *device, D3D12MA::Alloca
     impl_->frames.resize(frame_count); return Result::Success();
 }
 Result RendererTextureFeedback::PrepareFrame(std::uint32_t slot, const CompletionSet &completed,
-    std::span<const TextureStreamId> bindings, const RendererTextureStreaming &streaming, ResidencyManager &residency)
+    std::span<const TextureStreamId> bindings, std::span<const TextureStreamId> terrain_planes,
+    const RendererTextureStreaming &streaming, ResidencyManager &residency)
 {
-    if (slot >= impl_->frames.size() || bindings.size() != kTextureFeedbackBindingCount)
+    if (slot >= impl_->frames.size() || bindings.size() != kTextureFeedbackBindingCount ||
+        terrain_planes.size() > HS_TERRAIN_PAGE_PLANE_CAPACITY || terrain_planes.size() % 3 != 0)
         return FeedbackFailure("Sampler feedback material/frame binding count is invalid.");
     const auto previous = impl_->frames[slot];
     if (previous && (!previous->completion.IsSatisfiedBy(completed) || previous->pending))
         return FeedbackFailure("Sampler feedback frame bank is still in flight or unconsumed.");
     std::array<TextureMipMetadata, kTextureFeedbackBindingCount> metadata{};
     std::array<TextureStreamView, kTextureFeedbackBindingCount> views{};
-    bool reuse = static_cast<bool>(previous);
+    bool reuse = previous && std::equal(terrain_planes.begin(), terrain_planes.end(),
+        previous->terrain_planes.begin(), previous->terrain_planes.end());
     for (UINT index = 0; index < bindings.size(); ++index)
     {
         views[index] = streaming.View(bindings[index]);
@@ -237,6 +230,7 @@ Result RendererTextureFeedback::PrepareFrame(std::uint32_t slot, const Completio
         previous->scheduled = false; return Result::Success();
     }
     auto candidate = std::make_shared<FeedbackFrame>(); candidate->aliases.fill(UINT32_MAX);
+    candidate->terrain_planes.assign(terrain_planes.begin(), terrain_planes.end());
     std::unordered_map<std::uint32_t, std::uint32_t> owners;
     // Construct a complete bank first. Old metadata/pairs remain intact if any
     // native creation or accounting fails.
@@ -277,6 +271,34 @@ Result RendererTextureFeedback::PrepareFrame(std::uint32_t slot, const Completio
                 cpu.ptr += stride;
             }
         }
+        if (!terrain_planes.empty())
+        {
+            auto request_desc = Buffer(HS_TERRAIN_PAGE_TILE_CAPACITY * sizeof(std::uint32_t));
+            request_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+            const auto readback_desc = Buffer(request_desc.Width);
+            const auto request_info = impl_->device->GetResourceAllocationInfo(0, 1, &request_desc);
+            const auto readback_info = impl_->device->GetResourceAllocationInfo(0, 1, &readback_desc);
+            if (!request_info.SizeInBytes || request_info.SizeInBytes == UINT64_MAX ||
+                !readback_info.SizeInBytes || readback_info.SizeInBytes == UINT64_MAX)
+            { Impl::ReleaseAccounting(*candidate, residency); return FeedbackFailure("Terrain feedback allocation size is invalid."); }
+            impl_->SampleAllocatorStats(residency);
+            ScopedGpuAdmission admission(residency, request_info.SizeInBytes, readback_info.SizeInBytes);
+            if (!admission) { Impl::ReleaseAccounting(*candidate, residency); return FeedbackFailure("Terrain feedback exceeds the shared GPU budget."); }
+            if (auto result = impl_->Allocate(candidate->terrain_requests, request_desc, D3D12_HEAP_TYPE_DEFAULT, D3D12_RESOURCE_STATE_COMMON); !result)
+            { Impl::ReleaseAccounting(*candidate, residency); return result; }
+            if (auto result = impl_->Allocate(candidate->terrain_readback, readback_desc, D3D12_HEAP_TYPE_READBACK, D3D12_RESOURCE_STATE_COPY_DEST); !result)
+            { Impl::ReleaseAccounting(*candidate, residency); return result; }
+            candidate->terrain_tickets.reserve(2);
+            for (const auto *resource : {&candidate->terrain_requests, &candidate->terrain_readback})
+            {
+                const bool readback = resource == &candidate->terrain_readback;
+                const auto ticket = impl_->RegisterNativeAllocation(residency, readback ? ResidencyCategory::Staging : ResidencyCategory::Texture,
+                    resource->allocation->GetSize(), false, readback ? D3D12_HEAP_TYPE_READBACK : D3D12_HEAP_TYPE_DEFAULT);
+                if (!ticket) { Impl::ReleaseAccounting(*candidate, residency); return FeedbackFailure("Could not account terrain feedback storage."); }
+                candidate->terrain_tickets.push_back(ticket);
+            }
+            admission.Complete();
+        }
         const auto description = Buffer(sizeof(metadata));
         const auto info = impl_->device->GetResourceAllocationInfo(0, 1, &description);
         impl_->SampleAllocatorStats(residency);
@@ -300,7 +322,8 @@ Result RendererTextureFeedback::PrepareFrame(std::uint32_t slot, const Completio
 }
 Result RendererTextureFeedback::WriteDescriptors(std::uint32_t slot, ID3D12DescriptorHeap *heap,
     ID3D12DescriptorHeap *cpu_heap,
-    D3D12_CPU_DESCRIPTOR_HANDLE first, D3D12_GPU_DESCRIPTOR_HANDLE gpu_first, UINT stride)
+    D3D12_CPU_DESCRIPTOR_HANDLE first, D3D12_GPU_DESCRIPTOR_HANDLE gpu_first,
+    D3D12_CPU_DESCRIPTOR_HANDLE terrain_cpu, D3D12_GPU_DESCRIPTOR_HANDLE terrain_gpu, UINT stride)
 {
     if (slot >= impl_->frames.size() || !impl_->frames[slot] || !heap || !cpu_heap || !stride)
         return FeedbackFailure("Sampler feedback descriptor bank is not prepared.");
@@ -308,7 +331,8 @@ Result RendererTextureFeedback::WriteDescriptors(std::uint32_t slot, ID3D12Descr
     // Metadata and target/alias owners are immutable for this bank. PrepareFrame
     // replaces the bank when they change, after its existing lease checks.
     if (frame.heap.Get() == heap && frame.cpu_heap.Get() == cpu_heap && frame.written_cpu.ptr == first.ptr &&
-        frame.written_gpu.ptr == gpu_first.ptr && frame.written_stride == stride) return Result::Success();
+        frame.written_gpu.ptr == gpu_first.ptr && frame.terrain_cpu.ptr == terrain_cpu.ptr &&
+        frame.terrain_gpu.ptr == terrain_gpu.ptr && frame.written_stride == stride) return Result::Success();
     if (stride != impl_->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) ||
         heap->GetDesc().Type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
         !(heap->GetDesc().Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
@@ -339,6 +363,12 @@ Result RendererTextureFeedback::WriteDescriptors(std::uint32_t slot, ID3D12Descr
             impl_->device->CreateUnorderedAccessView(nullptr, nullptr, &empty, cpu);
         }
     }
+    D3D12_UNORDERED_ACCESS_VIEW_DESC terrain_view{};
+    terrain_view.Format = DXGI_FORMAT_R32_UINT;
+    terrain_view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    terrain_view.Buffer.NumElements = HS_TERRAIN_PAGE_TILE_CAPACITY;
+    impl_->device->CreateUnorderedAccessView(frame.terrain_requests.resource.Get(), nullptr, &terrain_view, terrain_cpu);
+    frame.terrain_cpu = terrain_cpu; frame.terrain_gpu = terrain_gpu;
     frame.written_cpu = first;
     frame.written_gpu = gpu_first;
     frame.written_stride = stride;
@@ -350,12 +380,19 @@ bool RendererTextureFeedback::MatchesLayout(std::uint32_t slot,
 {
     if(slot>=impl_->frames.size()||!impl_->frames[slot])return false;
     const auto &frame=*impl_->frames[slot];
-    if(!frame.metadata.resource||(!frame.owners.empty()&&!frame.heap)||
+    if(!frame.metadata.resource||((!frame.owners.empty()||frame.terrain_requests.resource)&&!frame.heap)||
         layout.owners.size()!=frame.owners.size()||
-        layout.clear_pass_id!=(frame.owners.empty()?0u:clear_id)||
-        layout.decode_pass_id!=(frame.owners.empty()?0u:decode_id)||
+        layout.clear_pass_id!=((frame.owners.empty()&&!frame.terrain_requests.resource)?0u:clear_id)||
+        layout.decode_pass_id!=((frame.owners.empty()&&!frame.terrain_requests.resource)?0u:decode_id)||
         !layout.metadata||layout.metadata_version.resource!=layout.metadata||
         layout.metadata_version.ordinal!=0)return false;
+    if (frame.terrain_requests.resource)
+    {
+        if (!layout.terrain_requests || layout.terrain_cleared.resource != layout.terrain_requests ||
+            layout.terrain_cleared.ordinal != 1 || layout.terrain_sampled.resource != layout.terrain_requests ||
+            layout.terrain_sampled.ordinal < 1) return false;
+    }
+    else if (layout.terrain_requests) return false;
     for(std::size_t index=0;index<frame.owners.size();++index)
     {
         const auto &owner=frame.owners[index];const auto &saved=layout.owners[index];
@@ -383,7 +420,7 @@ Result RendererTextureFeedback::AddClearPassImpl(RenderGraphBuilder &graph,
     bindings.clear();
     if (slot >= impl_->frames.size() || !impl_->frames[slot]) return FeedbackFailure("Sampler feedback frame is missing.");
     const auto frame = impl_->frames[slot];
-    if (frame->owners.empty()) return Result::Success();
+    if (frame->owners.empty() && !frame->terrain_requests.resource) return Result::Success();
     if (!frame->heap) return FeedbackFailure("Sampler feedback GPU descriptors were not written.");
     if(retained&&(!MatchesLayout(slot,pass_id,retained->decode_pass_id,*retained)||
         !graph.BindPass(retained->clear_pass_index,pass_id)))
@@ -395,7 +432,7 @@ Result RendererTextureFeedback::AddClearPassImpl(RenderGraphBuilder &graph,
     }
     auto pass=retained?*graph.BindPass(retained->clear_pass_index,pass_id):
         graph.AddPass(pass_id,"Clear actual material feedback",QueueHint::Direct);
-    bindings.reserve(frame->owners.size());
+    bindings.reserve(frame->owners.size() + (frame->terrain_requests.resource ? 1u : 0u));
     for (std::size_t index=0;index<frame->owners.size();++index)
     {
         auto &owner=frame->owners[index];
@@ -408,9 +445,22 @@ Result RendererTextureFeedback::AddClearPassImpl(RenderGraphBuilder &graph,
             return FeedbackFailure("Sampler feedback retained map import changed.");
         const auto written=retained?retained->owners[index].cleared:
             pass.Write(graph.Version(handle),Access::UnorderedWrite);
-        bindings.push_back({owner.id,written,owner.opacity_sampling});
+        bindings.push_back({retained?retained->owners[index].sampled:written,owner.opacity_sampling});
         if(layout)layout->owners.push_back({owner.id,handle,written,{},
             owner.width,owner.height,owner.slices,owner.mip_count});
+    }
+    if (frame->terrain_requests.resource)
+    {
+        if (auto certified=frame->terrain_requests.EnsureNativeContract(impl_->device.Get()); !certified) return certified;
+        const auto external=ExternalBuffer{frame->terrain_requests.resource.Get(),frame->completion,
+            QueueHint::Direct,{},frame->terrain_requests.NativeContract()};
+        const auto handle=retained?retained->terrain_requests:
+            graph.ImportBuffer(external,Access::Common,"actual terrain mip requests");
+        if (retained && !graph.BindBuffer(handle,external,Access::Common))
+            return FeedbackFailure("Terrain feedback retained buffer import changed.");
+        const auto written=retained?retained->terrain_cleared:pass.Write(graph.Version(handle),Access::UnorderedWrite);
+        bindings.push_back({retained?retained->terrain_sampled:written,false});
+        if (layout) { layout->terrain_requests=handle; layout->terrain_cleared=written; }
     }
     pass.SetExecuteChecked([frame](RenderPassContext &context) {
         auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
@@ -418,6 +468,12 @@ Result RendererTextureFeedback::AddClearPassImpl(RenderGraphBuilder &graph,
         const UINT empty[]{0xffu, 0xffu, 0xffu, 0xffu};
         for (const auto &owner : frame->owners)
             commands->ClearUnorderedAccessViewUint(owner.gpu, owner.cpu, owner.feedback.resource.Get(), empty, 0, nullptr);
+        if (frame->terrain_requests.resource)
+        {
+            const UINT zero[4]{};
+            commands->ClearUnorderedAccessViewUint(frame->terrain_gpu, frame->terrain_cpu,
+                frame->terrain_requests.resource.Get(), zero, 0, nullptr);
+        }
         return Result::Success();
     });
     return Result::Success();
@@ -480,18 +536,20 @@ Result RendererTextureFeedback::AddDecodePassImpl(RenderGraphBuilder &graph,
 {
     if (slot >= impl_->frames.size() || !impl_->frames[slot]) return FeedbackFailure("Sampler feedback frame is missing.");
     const auto frame = impl_->frames[slot];
-    if (frame->owners.empty()) return Result::Success();
-    if (bindings.size() != frame->owners.size()) return FeedbackFailure("Sampler feedback graph alias set changed.");
+    if (frame->owners.empty() && !frame->terrain_requests.resource) return Result::Success();
+    if (bindings.size() != frame->owners.size() + (frame->terrain_requests.resource ? 1u : 0u)) return FeedbackFailure("Sampler feedback graph alias set changed.");
     if(retained&&(!MatchesLayout(slot,retained->clear_pass_id,pass_id,*retained)||
         !graph.BindPass(retained->decode_pass_index,pass_id)))
         return FeedbackFailure("Sampler feedback retained decode topology changed.");
     if(layout){layout->decode_pass_index=graph.PassCount();layout->decode_pass_id=pass_id;}
     auto pass=retained?*graph.BindPass(retained->decode_pass_index,pass_id):
         graph.AddPass(pass_id,"Decode actual material feedback",QueueHint::Direct);
-    for(std::size_t index=0;index<bindings.size();++index)
+    for(std::size_t index=0;index<frame->owners.size();++index)
     {
         const auto &binding=bindings[index];
-        if(binding.texture!=frame->owners[index].id)
+        if ((retained && binding.feedback!=retained->owners[index].sampled) ||
+            (layout && binding.feedback.resource!=layout->owners[index].imported) ||
+            binding.opacity_sampling != frame->owners[index].opacity_sampling)
             return FeedbackFailure("Sampler feedback decode owner order changed.");
         if(retained)continue;
         // The opaque source is read only during decode. COMMON is an explicit
@@ -501,11 +559,27 @@ Result RendererTextureFeedback::AddDecodePassImpl(RenderGraphBuilder &graph,
         graph.SetFinalAccess(binding.feedback, Access::Common);
         if(layout)layout->owners[index].sampled=binding.feedback;
     }
+    if (frame->terrain_requests.resource)
+    {
+        const auto &binding=bindings.back();
+        if ((retained && binding.feedback != retained->terrain_sampled) ||
+            (layout && binding.feedback.resource != layout->terrain_requests) || binding.opacity_sampling)
+            return FeedbackFailure("Terrain feedback decode binding changed.");
+        if (!retained)
+        {
+            pass.Read(binding.feedback, Access::CopySource);
+            graph.SetFinalAccess(binding.feedback, Access::Common);
+            if (layout) layout->terrain_sampled=binding.feedback;
+        }
+    }
     pass.SetExecuteChecked([frame](RenderPassContext &context) {
         auto *base = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
         ComPtr<ID3D12GraphicsCommandList1> commands;
-        const auto hr = base->QueryInterface(IID_PPV_ARGS(&commands));
-        if (FAILED(hr)) return NativeFailure("Query sampler feedback resolve command list", hr);
+        if (!frame->owners.empty())
+        {
+            const auto hr = base->QueryInterface(IID_PPV_ARGS(&commands));
+            if (FAILED(hr)) return NativeFailure("Query sampler feedback resolve command list", hr);
+        }
         for (const auto &owner : frame->owners)
         {
             D3D12_RESOURCE_BARRIER barriers[2]{};
@@ -537,6 +611,9 @@ Result RendererTextureFeedback::AddDecodePassImpl(RenderGraphBuilder &graph,
             barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
             commands->ResourceBarrier(2, barriers);
         }
+        if (frame->terrain_requests.resource)
+            base->CopyBufferRegion(frame->terrain_readback.resource.Get(), 0,
+                frame->terrain_requests.resource.Get(), 0, HS_TERRAIN_PAGE_TILE_CAPACITY * sizeof(std::uint32_t));
         return Result::Success();
     });
     frame->scheduled = true; return Result::Success();
@@ -579,7 +656,48 @@ Result RendererTextureFeedback::Consume(std::uint32_t slot, const CompletionSet 
         if (mip != texture_feedback_detail::kNoMipDemand)
             streaming.Demand(owner.id, mip, UINT32_MAX - mip, demand_frame);
     }
+    if (frame->terrain_requests.resource)
+    {
+        void *address{};
+        D3D12_RANGE range{0, HS_TERRAIN_PAGE_TILE_CAPACITY * sizeof(std::uint32_t)};
+        const auto hr = frame->terrain_readback.resource->Map(0, &range, &address);
+        if (FAILED(hr)) return NativeFailure("Map terrain feedback", hr);
+        const auto *words = static_cast<const std::uint32_t *>(address);
+        for (std::size_t tile = 0; tile < frame->terrain_planes.size() / 3; ++tile)
+        {
+            const auto mip = texture_feedback_detail::DecodeTerrainMipRequests(words[tile]);
+            if (mip[0] != texture_feedback_detail::kNoMipDemand)
+            {
+                streaming.Demand(frame->terrain_planes[tile * 3], mip[0], 0, demand_frame);
+                streaming.Demand(frame->terrain_planes[tile * 3 + 1], mip[0], 0, demand_frame);
+            }
+            if (mip[1] != texture_feedback_detail::kNoMipDemand)
+                streaming.Demand(frame->terrain_planes[tile * 3 + 2], mip[1], 0, demand_frame);
+        }
+        D3D12_RANGE none{}; frame->terrain_readback.resource->Unmap(0, &none);
+    }
     frame->pending = false; return Result::Success();
 }
+#ifdef HS_DEVELOPMENT_TOOLS
+Result RendererTextureFeedback::ReadTerrainRequests(std::uint32_t slot, const CompletionSet &completed,
+    std::span<std::uint32_t, HS_TERRAIN_PAGE_TILE_CAPACITY> words,
+    std::span<const TextureStreamId> &planes) const
+{
+    planes = {};
+    if (slot >= impl_->frames.size()) return FeedbackFailure("Sampler feedback bank index is invalid.");
+    const auto frame = impl_->frames[slot];
+    if (!frame || !frame->scheduled || frame->terrain_planes.empty()) return Result::Success();
+    if (!frame->completion.IsSatisfiedBy(completed)) return FeedbackFailure("Sampler feedback readback was requested before all queues completed.");
+    void *address{};
+    D3D12_RANGE range{0, HS_TERRAIN_PAGE_TILE_CAPACITY * sizeof(std::uint32_t)};
+    const auto hr = frame->terrain_readback.resource->Map(0, &range, &address);
+    if (FAILED(hr)) return NativeFailure("Map terrain feedback", hr);
+    std::memcpy(words.data(), address, HS_TERRAIN_PAGE_TILE_CAPACITY * sizeof(std::uint32_t));
+    D3D12_RANGE none{};
+    frame->terrain_readback.resource->Unmap(0, &none);
+    planes = frame->terrain_planes;
+    return Result::Success();
+}
+#endif
 void RendererTextureFeedback::SwapState(RendererTextureFeedback &other) noexcept { impl_.swap(other.impl_); }
 } // namespace hs

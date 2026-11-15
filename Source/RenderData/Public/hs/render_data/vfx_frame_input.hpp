@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <variant>
 #include <vector>
@@ -141,37 +142,51 @@ struct VfxEventInput
     std::uint32_t geometry_sector_index{};
 };
 enum class VfxImpactShape : std::uint32_t { SoftDisc, CrossSlash, NoiseDisc, StatusStamp, RadialSlash, Pulse, StarRing, LeafMote, SmallMote, DiamondMote, Flame, Smoke6Way, RadialEnergy, ThreeProngBite, BossCrestContact, NeedleStar, Spark };
-struct VfxFlashSpawnInput
+// Catalog-owned display values shared by all births of an admitted output.
+struct VfxFlashAppearance
+{
+    Float4 color{};
+    std::uint32_t gradient_row{};
+    float hdr{}, aspect{1};
+    bool oit{}, ground_base_anchor{};
+    std::uint32_t fbm_octaves{4}, smoke_first_frame{}, smoke_frame_count{};
+    float domain_warp{}, smoke_fps{}, procedural_flow_speed{0.85f};
+};
+inline constexpr VfxFlashAppearance kDefaultVfxFlashAppearance{};
+
+struct VfxFlashState
 {
     Float3 position{};
-    Float4 color{};
-    float size{};
-    float delay{};
-    float lifetime{};
+    float size{}, delay{}, lifetime{};
     Tick event_tick{};
     std::uint32_t stable_seed{};
-    std::uint32_t gradient_row{};
-    float hdr{};
     float normalized_age{};
     VfxImpactShape shape{VfxImpactShape::SoftDisc};
     Float3 direction{0, 0, 1};
-    float aspect{1};
-    std::uint32_t curve_row{0xffffffffu};
-    std::uint32_t mask_slice{0xffffffffu};
+    std::uint32_t curve_row{0xffffffffu}, mask_slice{0xffffffffu};
     float mask_strength{};
-    // Immutable burst initial conditions; shader evaluates from absolute source age.
     Float3 initial_offset{}, initial_velocity{};
     float orbit_radius{}, orbit_phase{}, orbit_rate{}, drag{};
-    bool oit{};
-    bool ground_base_anchor{}; // Circle burst support rests above its authoritative base.
-    std::uint32_t fbm_octaves{4}, smoke_first_frame{}, smoke_frame_count{};
-    float domain_warp{}, smoke_fps{}, opacity_scale{1}, motion_strength{};
-    float procedural_flow_speed{0.85f};
-    // Live attachments share the owner's snapshot interpolation. Burst/contact
-    // flashes stay world anchored by default; these are not motion-history data.
+    float opacity_scale{1}, motion_strength{};
     Float3 previous_position{};
     bool interpolate_owner_position{};
 };
+
+struct VfxFlashTemplate : VfxFlashState
+{
+    VfxFlashAppearance appearance;
+};
+
+struct VfxFlashSpawnInput : VfxFlashState
+{
+    // The immutable image (or tool-owned appearance) outlives retained births and Render.
+    std::reference_wrapper<const VfxFlashAppearance> appearance{std::cref(kDefaultVfxFlashAppearance)};
+};
+
+[[nodiscard]] inline VfxFlashSpawnInput InstantiateVfxFlash(const VfxFlashTemplate &source) noexcept
+{
+    return {static_cast<const VfxFlashState &>(source), std::cref(source.appearance)};
+}
 struct VfxPersistentInput
 {
     std::uint64_t stable_id{};

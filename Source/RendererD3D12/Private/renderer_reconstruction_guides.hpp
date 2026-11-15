@@ -127,7 +127,6 @@ class ReconstructionGuidesSystem
     [[nodiscard]] AllocationResource RetainPreExposedOutput() const;
 #endif
     // Called only after all old submissions have reliably completed.
-    void SwapState(ReconstructionGuidesSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
     [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const ReconstructionGuidesInputs &,
         ReconstructionGuidesConstants,SdkReconstructionFrame,ExecuteReconstruction,

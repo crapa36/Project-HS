@@ -156,7 +156,7 @@ struct CharacterMaterialBinding
     std::span<const std::byte> bytes, std::span<const std::string> dependencies,
     std::uint32_t material_count);
 inline constexpr std::size_t kMaterialTextureSlots = 6;
-inline constexpr std::uint32_t kMaterialShaderBindingAbi = 2;
+inline constexpr std::uint32_t kMaterialShaderBindingAbi = 5;
 enum class MaterialTextureDimension : std::uint16_t { Texture2DArray = 1 };
 enum class MaterialTextureSemantic : std::uint16_t
 { BaseColor = 1, Surface = 2, Normal = 3, Detail = 4, Roughness = 5,

@@ -749,7 +749,6 @@ Result RendererPipelineCache::Flush()
     std::unique_lock lifecycle(impl_->lifecycle_mutex);
     std::lock_guard lock(impl_->mutex);
     RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);
-    if(!impl_->stats.initialized) return Failure(ErrorCode::InvalidState,"Initialize pipeline cache before flushing.");
     if(!impl_->library || !impl_->stats.persistence_enabled || !impl_->dirty) return Result::Success();
     try
     {

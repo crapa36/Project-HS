@@ -57,7 +57,6 @@ struct LayeredTranslucencyInputs
     D3D12_RECT composition_rect{};
     // A sparse CPU contributor set may justify same-frame GPU occupancy queries.
     bool use_occupancy_queries{};
-    bool single_layer_water{};
     std::uint32_t frame_slot{};
     CompletionSet completed;
     // Reserved suffix of the current native frame SRV heap. Root owns its lease.
@@ -107,7 +106,7 @@ struct LayeredTranslucencyLayout
 {
     std::uint64_t target_generation{};
     std::uint32_t layer_count{};
-    bool capture_work{}, occupancy{}, single_layer_water{};
+    bool capture_work{}, occupancy{};
     std::array<ResourceVersion, 4> inputs{};
     ResourceVersion background{};
     std::vector<LayeredTranslucencySceneRead> peel_reads, scene_reads;
@@ -161,7 +160,7 @@ class TranslucencySystem
         const LayeredTranslucencyLayout &, LayeredTranslucencyOutputs &);
     // Pure topology check for selecting a retained plan before RestorePlan.
     [[nodiscard]] bool MatchesShape(const LayeredTranslucencyLayout &, bool use_occupancy_queries,
-        std::size_t diagnostic_contributor_count, bool single_layer_water = false) const noexcept;
+        std::size_t diagnostic_contributor_count) const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &, const CompletionSet &, bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
@@ -171,7 +170,6 @@ class TranslucencySystem
     [[nodiscard]] std::array<const AllocationResource *, 15> DiagnosticResources() const noexcept;
 #endif
     // Called only after all old submissions have reliably completed.
-    void SwapState(TranslucencySystem &other) noexcept { impl_.swap(other.impl_); }
   private:
     [[nodiscard]] Result RegisterLayersImpl(RenderGraphBuilder &, const LayeredTranslucencyInputs &,
         LayeredTranslucencyOutputs &, LayeredTranslucencyLayout *capture,

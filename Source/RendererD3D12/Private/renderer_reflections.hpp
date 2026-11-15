@@ -110,7 +110,6 @@ class ScreenReflectionsSystem
     [[nodiscard]] std::array<const AllocationResource *, 3> DiagnosticResources(
         std::uint64_t frame_index) const noexcept;
     // Called only after all old submissions have reliably completed.
-    void SwapState(ScreenReflectionsSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
     [[nodiscard]] Result RegisterFrame(RenderGraphBuilder &, const ScreenReflectionsInputs &,
         ScreenReflectionsConstants, ScreenReflectionsOutputs &,

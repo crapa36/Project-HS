@@ -62,7 +62,7 @@ struct TextureDescriptorStorage
     const PackageDirectory &directory, std::span<const std::byte> metadata,
     std::uint32_t bulk_index, std::uint64_t product_bytes);
 
-// Bind already authenticated bytes to admitted, compiled metadata without parsing a package.
+// Bind already authenticated bytes to admitted metadata without parsing or rehashing them.
 // The returned subresources borrow bytes. Dependencies stay as typed IDs in the descriptor.
 [[nodiscard]] TexturePackageView BindTextureDescriptor(
     std::span<const std::byte> bytes, const TextureDescriptor &descriptor);

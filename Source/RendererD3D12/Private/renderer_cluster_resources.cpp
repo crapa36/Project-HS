@@ -444,6 +444,7 @@ Result D3D12Renderer::Impl::CreateClusterViewResources(ClusterViewRuntime &targe
         auto hr = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&next.descriptors));
         if (FAILED(hr)) return HResultFailure("Create cluster view cut descriptor heap", hr);
         heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+        heap.NumDescriptors = kClusterRuntimeFrames * kClusterRuntimeCatalogs * kClusterCutClearCount;
         hr = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&next.clear_descriptors));
         if (FAILED(hr)) return HResultFailure("Create cluster view cut clear descriptor heap", hr);
         return Result::Success();
@@ -837,7 +838,7 @@ void D3D12Renderer::Impl::WriteClusterCutDescriptors(OwnedView &owner, std::uint
         auto gpu_clear_handle = runtime.descriptors->GetCPUDescriptorHandleForHeapStart();
         gpu_clear_handle.ptr += bank_offset + static_cast<SIZE_T>(kClusterCutClearOffset) * srv_stride;
         auto clear_handle = runtime.clear_descriptors->GetCPUDescriptorHandleForHeapStart();
-        clear_handle.ptr += bank_offset + static_cast<SIZE_T>(kClusterCutClearOffset) * srv_stride;
+        clear_handle.ptr += static_cast<SIZE_T>((frame_slot * kClusterRuntimeCatalogs + ordinal) * kClusterCutClearCount) * srv_stride;
         const std::array<const AllocationResource *, kClusterCutSrvCount> srvs{&runtime.groups, &runtime.children,
             &runtime.clusters, &native.pages, &cut.candidates,
             previous_cut ? &previous_cut->history_bits : &runtime.history_zero,
@@ -875,28 +876,30 @@ void D3D12Renderer::Impl::WriteClusterCutDescriptors(OwnedView &owner, std::uint
             if (!cut.descriptors_initialized || i == 6u || i == 7u || i == 11u)
             {
                 const auto bytes = uavs[i]->resource ? uavs[i]->resource->GetDesc().Width : 4u;
+                D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
+                view.Format = strides[i] ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_TYPELESS;
+                view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+                view.Buffer.NumElements = static_cast<UINT>(bytes / (strides[i] ? strides[i] : 4u));
+                view.Buffer.StructureByteStride = strides[i];
+                if (!strides[i]) view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+                device->CreateUnorderedAccessView(uavs[i]->resource.Get(), nullptr, &view, handle);
+            }
+            handle.ptr += srv_stride;
+        }
+        if (!cut.descriptors_initialized && phase == 0u)
+            for (const auto member : kClusterCutClearMembers)
+            {
+                const auto &resource = cut.*member;
                 D3D12_UNORDERED_ACCESS_VIEW_DESC clear_view{};
                 clear_view.Format = DXGI_FORMAT_R32_TYPELESS;
                 clear_view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-                clear_view.Buffer.NumElements = static_cast<UINT>(bytes / 4u);
+                clear_view.Buffer.NumElements = static_cast<UINT>(resource.resource->GetDesc().Width / 4u);
                 clear_view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-                device->CreateUnorderedAccessView(uavs[i]->resource.Get(), nullptr, &clear_view, clear_handle);
+                device->CreateUnorderedAccessView(resource.resource.Get(), nullptr, &clear_view, clear_handle);
                 device->CopyDescriptorsSimple(1, gpu_clear_handle, clear_handle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-                if (strides[i])
-                {
-                    D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
-                    view.Format = DXGI_FORMAT_UNKNOWN;
-                    view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-                    view.Buffer.NumElements = static_cast<UINT>(bytes / strides[i]);
-                    view.Buffer.StructureByteStride = strides[i];
-                    device->CreateUnorderedAccessView(uavs[i]->resource.Get(), nullptr, &view, handle);
-                }
-                else device->CopyDescriptorsSimple(1, handle, clear_handle, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+                gpu_clear_handle.ptr += srv_stride;
+                clear_handle.ptr += srv_stride;
             }
-            handle.ptr += srv_stride;
-            gpu_clear_handle.ptr += srv_stride;
-            clear_handle.ptr += srv_stride;
-        }
     }
     cut.descriptors_initialized = true;
 }

@@ -122,6 +122,8 @@ struct SceneProbePackageView
     std::span<const std::byte> cosine_sh; // Explicit LE float4, grid.NodeCount()*9 records for a grid.
     std::vector<SceneProbeCell> cells;
     std::span<const std::byte> first_hit_distance; // Explicit LE float, raw face order.
+    // Derived from validated raw/prefiltered RGB; not serialized.
+    float max_radiance{};
 };
 
 // Empty bake spans produce a layout. A baked grid requires complete reflection

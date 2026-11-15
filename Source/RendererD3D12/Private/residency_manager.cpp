@@ -81,6 +81,9 @@ void ResidencyManager::Reset() noexcept
     gpu_reserved_overflow_ = {};
     host_held_overflow_ = false;
     allocations_.clear();
+#if defined(HS_DEVELOPMENT_TOOLS)
+    allocation_totals_ = {};
+#endif
     next_ticket_ = 1;
     retiring_count_ = 0;
     reclaimed_total_ = 0;
@@ -231,8 +234,14 @@ bool ResidencyManager::CommitHost(ResidencyTicket ticket, std::uint64_t bytes) n
     if (found == allocations_.end() || found->second.storage != ResidencyStorage::HostReservation ||
         !bytes || bytes > found->second.bytes) return false;
     const auto previous = found->second.bytes;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    AdjustAllocationTotals(allocation_totals_, found->second, false);
+#endif
     found->second.storage = ResidencyStorage::HostStaging;
     found->second.bytes = bytes;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    AdjustAllocationTotals(allocation_totals_, found->second, true);
+#endif
     UpdateAdmissionTotals(ResidencyStorage::HostStaging, ResidencySegment::Local, previous, bytes);
     return true;
 }
@@ -244,7 +253,10 @@ ResidencyTicket ResidencyManager::Register(ResidencyCategory category,
     if (category == ResidencyCategory::Count || bytes == 0 ||
         next_ticket_ == std::numeric_limits<std::uint64_t>::max()) return {};
     const auto ticket = ResidencyTicket{next_ticket_++};
-    allocations_.emplace(ticket.value, Allocation{category, bytes, pinned, false, {}, storage, segment});
+    [[maybe_unused]] const auto inserted = allocations_.emplace(ticket.value, Allocation{category, bytes, pinned, false, {}, storage, segment}).first;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    AdjustAllocationTotals(allocation_totals_, inserted->second, true);
+#endif
     UpdateAdmissionTotals(storage, segment, 0, bytes);
     return ticket;
 }
@@ -254,8 +266,17 @@ bool ResidencyManager::Retire(ResidencyTicket ticket,
 {
     const auto found = allocations_.find(ticket.value);
     if (found == allocations_.end() || found->second.pinned) return false;
-    if (!found->second.retiring) ++retiring_count_;
-    found->second.retiring = true;
+    if (!found->second.retiring)
+    {
+#if defined(HS_DEVELOPMENT_TOOLS)
+        AdjustAllocationTotals(allocation_totals_, found->second, false);
+#endif
+        found->second.retiring = true;
+#if defined(HS_DEVELOPMENT_TOOLS)
+        AdjustAllocationTotals(allocation_totals_, found->second, true);
+#endif
+        ++retiring_count_;
+    }
     found->second.completion.Merge(completion);
     return true;
 }
@@ -273,6 +294,9 @@ bool ResidencyManager::ReleaseNow(ResidencyTicket ticket) noexcept
         assert(retiring_count_ != 0);
         --retiring_count_;
     }
+#if defined(HS_DEVELOPMENT_TOOLS)
+    AdjustAllocationTotals(allocation_totals_, found->second, false);
+#endif
     allocations_.erase(found);
     UpdateAdmissionTotals(storage, segment, bytes, 0);
     return true;
@@ -295,6 +319,9 @@ std::uint32_t ResidencyManager::Collect(const CompletionSet &completed) noexcept
         const auto bytes = it->second.bytes;
         assert(retiring_count_ != 0);
         --retiring_count_;
+#if defined(HS_DEVELOPMENT_TOOLS)
+        AdjustAllocationTotals(allocation_totals_, it->second, false);
+#endif
         it = allocations_.erase(it);
         UpdateAdmissionTotals(storage, segment, bytes, 0);
         ++collected;
@@ -313,9 +340,42 @@ bool ResidencyManager::IsPinned(ResidencyTicket ticket) const noexcept
     return found != allocations_.end() && found->second.pinned;
 }
 
+void ResidencyManager::AdjustAllocationTotals(ResidencyAccounting &totals, const Allocation &allocation, bool add) noexcept
+{
+    const auto adjust = [&](std::uint64_t &total) {
+        if (add) total += allocation.bytes;
+        else total -= allocation.bytes;
+    };
+    if (allocation.storage == ResidencyStorage::GpuReservation)
+        adjust(totals.gpu_reserved_total);
+    else if (allocation.storage == ResidencyStorage::HostReservation)
+        adjust(totals.host_reserved_total);
+    else if (allocation.storage == ResidencyStorage::HostStaging)
+        adjust(totals.host_staging_total);
+    else
+    {
+        auto &bucket = allocation.retiring ? totals.retiring_bytes : totals.live_bytes;
+        adjust(bucket[CategoryIndex(allocation.category)]);
+        auto &segment_bucket = allocation.segment == ResidencySegment::Local
+            ? (allocation.retiring ? totals.local_retiring_bytes : totals.local_live_bytes)
+            : (allocation.retiring ? totals.nonlocal_retiring_bytes : totals.nonlocal_live_bytes);
+        adjust(segment_bucket[CategoryIndex(allocation.category)]);
+        adjust(allocation.retiring ? totals.retiring_total : totals.live_total);
+    }
+}
+
 ResidencyAccounting ResidencyManager::Accounting() const noexcept
 {
-    ResidencyAccounting accounting;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    ResidencyAccounting accounting = allocation_totals_;
+#else
+    ResidencyAccounting accounting{};
+    for (const auto &[ticket, allocation] : allocations_)
+    {
+        static_cast<void>(ticket);
+        AdjustAllocationTotals(accounting, allocation, true);
+    }
+#endif
     accounting.budget = budget_;
     accounting.allocator_stats = allocator_stats_;
     accounting.allocator_stats_available = has_allocator_stats_;
@@ -324,35 +384,6 @@ ResidencyAccounting ResidencyManager::Accounting() const noexcept
     accounting.local_growth_since_snapshot = segment_growth_since_snapshot_[0];
     accounting.nonlocal_growth_since_snapshot = segment_growth_since_snapshot_[1];
     accounting.gpu_reserved_by_segment = gpu_reserved_;
-    for (const auto &[ticket, allocation] : allocations_)
-    {
-        static_cast<void>(ticket);
-        if (allocation.storage == ResidencyStorage::GpuReservation)
-        {
-            accounting.gpu_reserved_total += allocation.bytes;
-            continue;
-        }
-        if (allocation.storage == ResidencyStorage::HostReservation)
-        {
-            accounting.host_reserved_total += allocation.bytes;
-            continue;
-        }
-        if (allocation.storage == ResidencyStorage::HostStaging)
-        {
-            accounting.host_staging_total += allocation.bytes;
-            continue;
-        }
-        auto &bucket = allocation.retiring ? accounting.retiring_bytes : accounting.live_bytes;
-        bucket[CategoryIndex(allocation.category)] += allocation.bytes;
-        auto &segment_bucket = allocation.segment == ResidencySegment::Local
-            ? (allocation.retiring ? accounting.local_retiring_bytes : accounting.local_live_bytes)
-            : (allocation.retiring ? accounting.nonlocal_retiring_bytes : accounting.nonlocal_live_bytes);
-        segment_bucket[CategoryIndex(allocation.category)] += allocation.bytes;
-        if (allocation.retiring)
-            accounting.retiring_total += allocation.bytes;
-        else
-            accounting.live_total += allocation.bytes;
-    }
     return accounting;
 }
 

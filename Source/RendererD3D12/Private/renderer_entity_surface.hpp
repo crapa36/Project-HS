@@ -15,7 +15,7 @@ namespace hs
 class EntitySurfaceFrame
 {
   public:
-    [[nodiscard]] Result Build(VfxEntitySurfaceInputs commands);
+    [[nodiscard]] Result Build(VfxEntitySurfaceInputs commands, std::span<const RenderInstance> instances);
     [[nodiscard]] std::uint32_t InstancePayload(std::uint64_t render_id) const noexcept;
     [[nodiscard]] std::span<const std::byte> Bytes() const noexcept { return bytes_; }
 

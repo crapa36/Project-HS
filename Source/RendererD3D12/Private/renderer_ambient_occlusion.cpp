@@ -19,9 +19,10 @@ using Microsoft::WRL::ComPtr;
 constexpr std::uint32_t kSrvCount = AoSrvCount, kUavCount = AoUavCount, kDescriptorCount = kSrvCount + kUavCount;
 constexpr std::uint32_t kConstantStride = 512;
 constexpr std::array<std::string_view, 6> kShaderProducts{
-    "render/shader/gtao_horizon_cs.dxil", "render/shader/gtao_temporal_cs.dxil",
-    "render/shader/gtao_bilateral_cs.dxil", "render/shader/contact_shadow_cs.dxil",
-    "render/shader/adaptive_gtao_cs.dxil", "render/shader/gtao_prepare_inverse_w_cs.dxil"};
+#define HS_AO_PRODUCT(role, family, file, entry, target) kAo##role##ShaderProduct,
+    HS_AO_PROGRAMS(HS_AO_PRODUCT)
+#undef HS_AO_PRODUCT
+};
 
 Result AoFailure(ErrorCode code, std::string message)
 {
@@ -53,23 +54,9 @@ DirectX::XMFLOAT4 SizeConstants(ViewExtent extent)
     return {static_cast<float>(extent.width), static_cast<float>(extent.height),
             1.0f / static_cast<float>(extent.width), 1.0f / static_cast<float>(extent.height)};
 }
-bool SupportsFastAoUnprojection(const DirectX::XMFLOAT4X4 &inverse) noexcept
+bool SupportsPreparedInverseW(const DirectX::XMFLOAT4 &view_depth) noexcept
 {
-    for (const auto &row : inverse.m)
-        for (const float value : row)
-            if (!std::isfinite(value)) return false;
-    if (inverse._12 != 0.0f || inverse._13 != 0.0f || inverse._14 != 0.0f ||
-        inverse._21 != 0.0f || inverse._23 != 0.0f || inverse._24 != 0.0f ||
-        inverse._31 != 0.0f || inverse._32 != 0.0f)
-        return false;
-    const double depth_determinant = static_cast<double>(inverse._33) * inverse._44 -
-        static_cast<double>(inverse._34) * inverse._43;
-    return inverse._11 != 0.0f && inverse._22 != 0.0f && depth_determinant != 0.0 &&
-        std::isfinite(depth_determinant);
-}
-bool SupportsPreparedInverseW(const DirectX::XMFLOAT4X4 &inverse) noexcept
-{
-    return SupportsFastAoUnprojection(inverse) && inverse._33 == 0.0f && inverse._43 > 0.0f;
+    return view_depth.x == 0.0f && view_depth.y > 0.0f;
 }
 bool FitsGuide(const RenderGraphBuilder &graph,const AmbientOcclusionGuide &guide, ViewExtent active, DXGI_FORMAT format)
 {
@@ -349,14 +336,14 @@ bool AmbientOcclusionSystem::MatchesShape(const AmbientOcclusionLayout &layout,
 }
 bool AmbientOcclusionSystem::MatchesShape(const AmbientOcclusionLayout &layout,
     bool reset_history, QueueHint queue, ViewExtent active,
-    const DirectX::XMFLOAT4X4 &inverse_projection) const noexcept
+    const DirectX::XMFLOAT4 &view_depth) const noexcept
 {
     const auto &s = impl_->targets;
     if (!MatchesShape(layout, reset_history, queue)) return false;
     const auto aoActive = s->ao_enabled ? AoExtent(active, s->profile) : ViewExtent{};
     const bool prepared = s->ao_enabled && ValidExtent(active) &&
         aoActive.width == active.width && aoActive.height == active.height &&
-        SupportsPreparedInverseW(inverse_projection);
+        SupportsPreparedInverseW(view_depth);
     return layout.prepared_inverse_w == prepared;
 }
 bool AmbientOcclusionSystem::MatchesLayout(const AmbientOcclusionInputs &inputs,const AmbientOcclusionLayout &layout)const noexcept
@@ -370,7 +357,7 @@ bool AmbientOcclusionSystem::MatchesLayout(const AmbientOcclusionInputs &inputs,
     const AmbientOcclusionConstants &constants, const AmbientOcclusionLayout &layout) const noexcept
 {
     return MatchesShape(layout, inputs.reset_history, inputs.queue, inputs.render_active,
-        constants.inverse_projection) &&
+        constants.view_depth) &&
         ((!impl_->targets->ao_enabled && !impl_->targets->contact_enabled) ||
          layout.guides == std::array{inputs.depth.version, inputs.normal.version, inputs.metadata.version,
              inputs.motion.version, inputs.surface_history.version, inputs.adaptive_density.version});
@@ -425,14 +412,11 @@ Result AmbientOcclusionSystem::RegisterFrame(RenderGraphBuilder &graph, const Am
         !std::isfinite(constants.contact_parameters.y) || constants.contact_parameters.y <= 0.0f ||
         !std::isfinite(constants.contact_parameters.z) || constants.contact_parameters.z < 0.0f)
         return AoFailure(ErrorCode::InvalidArgument, "AO physical radius, strength or contact parameters are invalid.");
-    // The shader's fast path is exact for axis-aligned homogeneous inverse
-    // projections (including off-axis and jittered perspective and orthographic
-    // projections). Keep arbitrary matrices on the original general multiply.
+    // Engine cameras supply the coefficients for axis-aligned projection with clip jitter.
     const auto aoActive = AoExtent(active, storage->profile);
     const bool preparedInverseW = storage->ao_enabled && aoActive.width == active.width &&
-        aoActive.height == active.height && SupportsPreparedInverseW(constants.inverse_projection);
-    constants.gtao_parameters.w = preparedInverseW ? 2.0f :
-        SupportsFastAoUnprojection(constants.inverse_projection) ? 1.0f : 0.0f;
+        aoActive.height == active.height && SupportsPreparedInverseW(constants.view_depth);
+    constants.gtao_parameters.w = preparedInverseW ? 2.0f : 1.0f;
     if (retained && (!MatchesLayout(inputs, constants, *retained) ||
                      retained->prepared_inverse_w != preparedInverseW))
         return AoFailure(ErrorCode::InvalidState, "AO retained topology has changed.");

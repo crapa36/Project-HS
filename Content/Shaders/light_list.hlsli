@@ -1,7 +1,7 @@
 #ifndef HS_LIGHT_LIST_HLSLI
 #define HS_LIGHT_LIST_HLSLI
 
-// 128-byte record ABI from renderer_light_list.hpp. CPU converts authored units
+// 96-byte record ABI from renderer_light_list.hpp. CPU converts authored units
 // to radiometric quantities; prepared radiometric Point inputs pass through.
 struct HsGpuLightRecord
 {
@@ -11,20 +11,15 @@ struct HsGpuLightRecord
     float4 shape_cone;
     uint4 identity;
     uint4 metadata;
-    float4 area_tangent_half_width;
-    float4 area_bitangent_half_height;
 };
 StructuredBuffer<HsGpuLightRecord> HsLightRecords : register(t0, space19);
 static const uint HsLightDirectionalMask = 1u;
-static const uint HsLightLocalMask = 30u;
-static const uint HsLightAllMask = 31u;
-static const uint HsLightCapacityOverflowFlag = 1u; // Diagnostic only; all candidates fit the mask.
-static const uint HsLightWorldQueryFlag = 2u;
+static const uint HsLightLocalMask = 6u;
+static const uint HsLightAllMask = 7u;
 static const uint HsLightHeaderBytes = 256u;
 static const uint HsLightMaskWords = 4u; // The CPU rejects more than128 authoritative lights.
 
 #ifndef HS_LIGHT_LIST_BUILD
-#include "ltc_area.hlsli"
 #include "local_shadow.hlsli"
 float HsLocalShadowVisibility(HsGpuLightRecord light,float3 world,float3 normal)
 {
@@ -37,11 +32,8 @@ float HsLightShadowVisibility(HsGpuLightRecord light,float3 world,float3 normal,
 {
     return HsLocalShadowVisibility(light,world,normal);
 }
-// t1 starts with the immutable 256-byte LightListConstants header. Each cell
-// then owns uint4(inline count, spill count, diagnostic/world-query flags, total count).
-ByteAddressBuffer HsLightRanges : register(t1, space19);
-StructuredBuffer<uint> HsLightInline : register(t2, space19);
-StructuredBuffer<uint> HsLightSpill : register(t3, space19);
+// The header is followed by one complete128-bit local membership mask per cell.
+ByteAddressBuffer HsLightGridBuffer : register(t1, space19);
 
 struct HsLightGrid
 {
@@ -57,12 +49,12 @@ HsLightGrid HsLoadLightGrid(uint4 dimensions, uint4 limits)
     HsLightGrid grid;
     // CPU stores transposed DirectX matrices for column-major CBVs. A raw SRV
     // has no matrix layout, so reconstruct the same logical matrices explicitly.
-    grid.world_to_view = transpose(float4x4(asfloat(HsLightRanges.Load4(0u)),
-        asfloat(HsLightRanges.Load4(16u)), asfloat(HsLightRanges.Load4(32u)), asfloat(HsLightRanges.Load4(48u))));
-    grid.projection = transpose(float4x4(asfloat(HsLightRanges.Load4(64u)),
-        asfloat(HsLightRanges.Load4(80u)), asfloat(HsLightRanges.Load4(96u)), asfloat(HsLightRanges.Load4(112u))));
-    grid.camera_origin_near = asfloat(HsLightRanges.Load4(192u));
-    grid.extent_far_log = asfloat(HsLightRanges.Load4(208u));
+    grid.world_to_view = transpose(float4x4(asfloat(HsLightGridBuffer.Load4(0u)),
+        asfloat(HsLightGridBuffer.Load4(16u)), asfloat(HsLightGridBuffer.Load4(32u)), asfloat(HsLightGridBuffer.Load4(48u))));
+    grid.projection = transpose(float4x4(asfloat(HsLightGridBuffer.Load4(64u)),
+        asfloat(HsLightGridBuffer.Load4(80u)), asfloat(HsLightGridBuffer.Load4(96u)), asfloat(HsLightGridBuffer.Load4(112u))));
+    grid.camera_origin_near = asfloat(HsLightGridBuffer.Load4(192u));
+    grid.extent_far_log = asfloat(HsLightGridBuffer.Load4(208u));
     grid.grid = dimensions;
     grid.limits = limits;
     return grid;
@@ -88,11 +80,11 @@ HsLightQuery HsBeginLightQuery(float3 world, uint type_mask, bool force_world_qu
     // loading local-grid dimensions and total-light limits on that path.
     if ((type_mask & HsLightLocalMask) == 0u)
     {
-        query.directional_count = HsLightRanges.Load(236u);
+        query.directional_count = HsLightGridBuffer.Load(236u);
         return query;
     }
-    const uint4 dimensions = HsLightRanges.Load4(224u);
-    const uint4 limits = HsLightRanges.Load4(240u);
+    const uint4 dimensions = HsLightGridBuffer.Load4(224u);
+    const uint4 limits = HsLightGridBuffer.Load4(240u);
     query.directional_count = dimensions.w;
     query.light_count = limits.x;
     if (query.world_query)
@@ -119,17 +111,9 @@ HsLightQuery HsBeginLightQuery(float3 world, uint type_mask, bool force_world_qu
         const uint slice = min((uint)(log2(view.z / grid.camera_origin_near.w) * float(grid.grid.z) /
             grid.extent_far_log.w), grid.grid.z - 1u);
         const uint cell = (slice * grid.grid.y + tile.y) * grid.grid.x + tile.x;
-        const uint4 range = HsLightRanges.Load4(HsLightHeaderBytes + cell * 16u);
-        query.world_query = (range.z & HsLightWorldQueryFlag) != 0u;
-        if (!query.world_query)
-        {
-            const uint base = cell * HsLightMaskWords;
-            query.local_mask = uint4(HsLightInline[base], HsLightInline[base + 1u],
-                HsLightInline[base + 2u], HsLightInline[base + 3u]);
-        }
+        query.local_mask = HsLightGridBuffer.Load4(HsLightHeaderBytes + cell * 16u);
     }
-    // Finite cells retain every candidate in the 128-bit mask, even above the
-    // diagnostic inline/spill capacity. Invalid/off-frustum queries scan all locals.
+    // Invalid cell bounds retain all local bits; off-frustum queries scan all locals.
     query.local_cursor = query.world_query ? query.directional_count : 0u;
     return query;
 }
@@ -178,7 +162,7 @@ bool HsLightIncident(uint index, float3 world, out float3 direction, out float3 
     const HsGpuLightRecord light = HsLightRecords[index];
     direction = 0.0; incident = 0.0;
     if (light.color_intensity.w <= 0.0) return false;
-    if (light.identity.w >= 3u) return false; // Area emitters require their actual domain integral.
+    if (light.identity.w >= 3u) return false;
     if (light.identity.w == 0u)
     {
         direction = -light.direction_cos_outer.xyz;
@@ -207,7 +191,7 @@ bool HsLightIncident(uint index, float3 world, out float3 direction, out float3 
 // is evaluated by HsLightListEvaluateComponents below, not by this accessor.
 bool HsPrimaryDirectional(out float3 toward_light, out float3 incident)
 {
-    const uint count = HsLightRanges.Load(236u);
+    const uint count = HsLightGridBuffer.Load(236u);
     toward_light = float3(0.0, 1.0, 0.0); incident = 0.0;
     if (count == 0u) return false;
     uint owner = 0u;
@@ -233,13 +217,6 @@ void HsLightListEvaluateComponentsForView(HsSurfaceClosure closure, float3 world
     const float3 bsdf_normal = bsdf_prepared.normal;
     [loop] do
     {
-        if(HsLightRecords[index].identity.w>=3u)
-        {
-            float3 area_diffuse,area_specular;
-            HsAreaEvaluateComponents(HsLightRecords[index],closure,world,view,base_fresnel_override,area_diffuse,area_specular);
-            const float visibility=HsLightShadowVisibility(HsLightRecords[index],world,closure.normal,world_query);
-            diffuse+=area_diffuse*visibility; specular+=area_specular*visibility; continue;
-        }
         float3 light, radiance;
         if (!HsLightIncident(index, world, light, radiance)) continue;
         float3 light_diffuse, light_specular;
@@ -296,23 +273,6 @@ float3 HsLightListSixWay(float3 world, float3 right, float3 up, float3 forward,
     uint index;
     [loop] while (HsNextLight(query, index))
     {
-        if(HsLightRecords[index].identity.w>=3u)
-        {
-            const HsGpuLightRecord area=HsLightRecords[index]; float range_weight;
-            if(!HsAreaLightVisible(area,world,range_weight)) continue;
-            const float visibility=HsLocalShadowVisibility(area,world,0.0);
-            [loop] for(uint sample=0u;sample<HsAreaSampleCount;++sample)
-            {
-                float3 direction; float pdf;
-                if(!HsAreaSampleDirection(area,world,float2((float(sample)+0.5)/float(HsAreaSampleCount),
-                    HsAreaRadicalInverse(sample)),direction,pdf)) continue;
-                const float3 local=float3(dot(direction,right),dot(direction,up),dot(direction,forward));
-                const float3 positive=max(local,0.0),negative=max(-local,0.0);
-                const float response=dot(positive_response,positive*positive)+dot(negative_response,negative*negative);
-                result+=area.color_intensity.rgb*area.color_intensity.w*range_weight*visibility*response/(pdf*float(HsAreaSampleCount));
-            }
-            continue;
-        }
         float3 direction, incident;
         if (!HsLightIncident(index, world, direction, incident)) continue;
         const float3 local = float3(dot(direction, right), dot(direction, up), dot(direction, forward));

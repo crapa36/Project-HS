@@ -1,4 +1,5 @@
 #include "renderer_impl.hpp"
+#include <hs/render_data/render_package.hpp>
 #include "renderer_hlod_runtime.hpp"
 #include <hs/render_data/render_asset_format.hpp>
 #include <hs/render_data/material_descriptor.hpp>
@@ -181,16 +182,17 @@ Result D3D12Renderer::Impl::AppendHlodPages(ClusterRuntimeState &runtime)
                 {
                     const auto &value = *owner;
                     const auto &entry = value.scene->Value().pages.at(local);
-                    const auto package = render_data::ReadPackage(payload, MakeAssetId(entry.logical_id),
-                        render_data::PackageReadMode::GeometryDecoderValidatesVertices);
-                    if (package.dependencies != value.scene->Value().dependencies)
+                    render_data::PreparedGeometryPage prepared{
+                        render_data::ReadPackage(payload, MakeAssetId(entry.logical_id),
+                            render_data::PackageReadMode::GeometryDecoderValidatesVertices), {}};
+                    if (prepared.package.dependencies != value.scene->Value().dependencies)
                         return HlodFailure("HLOD page dependencies differ from its scene directory.");
-                    auto geometry = render_data::DecodeGeometryPagePayload(package, entry.geometry_flags);
-                    render_data::ValidateSceneHlodPage(value.scene->Value(), local, geometry);
+                    prepared.geometry = render_data::DecodeGeometryPagePayload(prepared.package, entry.geometry_flags);
+                    value.scene->ValidatePage(local, prepared);
                     if (development_catalog)
                         static_cast<void>(development_catalog->AdmitGeometry(
-                            MakeAssetId(entry.logical_id), payload, package, geometry));
-                    output = std::move(geometry);
+                            MakeAssetId(entry.logical_id), payload, prepared));
+                    output = std::move(prepared.geometry);
                     return Result::Success();
                 }
                 catch (const std::exception &error) { return HlodFailure(error.what()); }
@@ -244,22 +246,22 @@ Result D3D12Renderer::Impl::RetireHlodView(ViewId id)
     return PumpHlodDemand();
 }
 
-Result D3D12Renderer::Impl::BeginHlodViewPackage(const RenderPackage &input)
+Result D3D12Renderer::Impl::BeginHlodViewPackage(const RenderPackage &input, std::span<const RenderViewSample> views)
 {
     if (!hlod_runtime) return Result::Success();
     auto &runtime = *hlod_runtime;
-    const auto session = input.snapshots.has_current ? input.snapshots.current.header.session_id : 0u;
-    const auto scene = input.snapshots.has_current ? input.snapshots.current.static_scene : nullptr;
+    const auto session = input.snapshots.current.header.session_id;
+    const auto scene = input.snapshots.current.static_scene;
     // A valid frame package owns participation. Dormant histories remain leased
     // and reusable, while omitted views immediately withdraw IO qualification.
     for (auto &[key, view] : runtime.views)
     {
-        const bool participating = key.second == session && std::ranges::any_of(input.views,
+        const bool participating = key.second == session && std::ranges::any_of(views,
             [&](const auto &input_view) { return input_view.id.value == key.first; });
         if (view->participating && !participating) InvalidateHlodQualification(*view);
         view->participating = participating;
     }
-    for (const auto &input_view : input.views)
+    for (const auto &input_view : views)
     {
         if (std::ranges::any_of(runtime.views, [&](const auto &entry) {
                 return entry.first.first == input_view.id.value && entry.first.second != session; }))
@@ -273,11 +275,7 @@ Result D3D12Renderer::Impl::BeginHlodViewPackage(const RenderPackage &input)
             owner->group_priorities.resize(runtime.scene->Value().groups.size());
         }
         owner->participating = true;
-        const auto owned = owned_views.find(input_view.id.value);
-        const bool prior_origins = owned != owned_views.end() && owned->second->previous_origins_valid;
-        const auto prior_origin = owned != owned_views.end()
-            ? owned->second->previous_scene_origin : RenderWorldPosition{};
-        if (input_view.camera_cut || (prior_origins && input_view.scene_origin != prior_origin))
+        if (input_view.camera_cut)
             InvalidateHlodQualification(*owner);
         if (!scene || scene->content_generation_id != runtime.content_generation ||
             scene->layout_abi != runtime.scene->Value().layout_abi || scene->eligible_layout_digest != runtime.scene->Value().layout_digest ||
@@ -501,7 +499,7 @@ Result D3D12Renderer::Impl::PrepareHlodFrame(std::uint32_t frame_slot,
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::PrepareHlodFrameRecordData(const RenderViewInput &view_input, std::uint32_t frame_slot,std::uint32_t active_view_mask,
+Result D3D12Renderer::Impl::PrepareHlodFrameRecordData(const RenderViewSample &view_input, std::uint32_t frame_slot,std::uint32_t active_view_mask,
     ResourceVersion geometry_records,ResourceVersion static_scene,ResourceVersion proxy_refs,
     HlodRuntimeFrameRecordData &record)
 {
@@ -521,7 +519,7 @@ Result D3D12Renderer::Impl::PrepareHlodFrameRecordData(const RenderViewInput &vi
     // The cut frame cannot read history, but its output owns the new generation.
     inputs.history_generation = owner.history_generation + (camera_cut ? 1u : 0u) + (scene_changed ? 1u : 0u);
     inputs.history_valid = !camera_cut && !scene_changed && view.session_id == owner.view_session_id &&
-        owner.previous_origins_valid && view_input.scene_origin == owner.previous_scene_origin;
+        owner.previous_submission_valid;
     inputs.completed = graph_queue_executor.Completed(); inputs.content_generation_id = resource_generation_id;
     inputs.layout_abi = view.matching_scene->layout_abi; inputs.layout_digest = view.matching_scene->eligible_layout_digest;
     inputs.members = native.members; inputs.proxies = native.bindings; inputs.buckets = native.buckets; inputs.views = native.views;

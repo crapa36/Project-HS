@@ -147,6 +147,7 @@ struct TextureOwner
     // remains the immutable state produced by its upload publication.
     Access fallback_access{Access::Undefined};
     Access active_access{Access::Undefined};
+    QueueHint active_queue{QueueHint::Direct};
     bool reserved_published{}, demand_valid{};
     bool feedback_supported{};
     bool preferred{};
@@ -157,6 +158,32 @@ struct TextureOwner
     }
 };
 static_assert(std::is_nothrow_move_constructible_v<TextureOwner>);
+
+Result TextureContract(TextureOwner &texture, ID3D12Resource *resource, ID3D12Device *device,
+                       const NativeResourceContract *&contract)
+{
+    contract = nullptr;
+    if (resource && texture.reserved.Get() == resource)
+    {
+        texture.reserved_contract.generation = texture.revision;
+        contract = &texture.reserved_contract;
+    }
+    else if (resource && texture.software.resource.Get() == resource)
+    {
+        if (auto certified = texture.software.EnsureNativeContract(device); !certified) return certified;
+        contract = texture.software.NativeContract();
+    }
+    else if (resource && texture.pending && texture.pending->candidate_owner.resource.Get() == resource)
+    {
+        if (auto certified = texture.pending->candidate_owner.EnsureNativeContract(device); !certified) return certified;
+        contract = texture.pending->candidate_owner.NativeContract();
+    }
+    else if (resource && texture.registration.fallback.Get() == resource &&
+             texture.registration.fallback_contract.backing != NativeBackingKind::Unknown)
+        contract = &texture.registration.fallback_contract;
+    return Result::Success();
+}
+
 [[nodiscard]] bool IsSoftwareCopyCoarsening(const TextureOwner &texture) noexcept
 {
     return texture.software_transaction && !texture.request_reserved && texture.software.resource &&
@@ -279,6 +306,7 @@ struct RendererTextureStreaming::Impl
     std::uint32_t frame_count{};
     std::uint64_t budget{};
     std::vector<TextureOwner> textures;
+    std::uint32_t pending_uploads{};
     std::size_t next_read_owner{};
     std::vector<TextureStreamId> preferred_working_set;
     bool settled_preferred{};
@@ -495,8 +523,10 @@ Result RendererTextureStreaming::Register(TextureStreamRegistration registration
     return admitted ? Result::Success() : Failure("Texture budget cannot contain the actual pinned selected texture tails.");
 }
 Result RendererTextureStreaming::RegisterBatch(std::span<TextureStreamRegistration> registrations,
-    ResidencyManager &residency, std::span<TextureStreamId> ids, bool &admitted)
+    ResidencyManager &residency, std::span<TextureStreamId> ids, bool &admitted,
+    std::uint64_t *required_budget_bytes)
 {
+    if (required_budget_bytes) *required_budget_bytes = impl_->minimum_budget_bytes;
     admitted = false;
     std::ranges::fill(ids, TextureStreamId{});
     if (registrations.size() != ids.size()) return Failure("Texture registration batch output size mismatch.");
@@ -516,6 +546,7 @@ Result RendererTextureStreaming::RegisterBatch(std::span<TextureStreamRegistrati
             !registration.generation_lease.owner_before(existing.generation_lease) &&
             existing.fallback_graph_access == registration.fallback_graph_access &&
             existing.sampler_feedback == registration.sampler_feedback &&
+            existing.fallback_mode == registration.fallback_mode &&
             existing.pinned == registration.pinned && existing.srgb_view == registration.srgb_view &&
             existing.opacity_sampling == registration.opacity_sampling;
     };
@@ -529,10 +560,10 @@ Result RendererTextureStreaming::RegisterBatch(std::span<TextureStreamRegistrati
             impl_->texture_catalog[registration.compiled_texture.value].asset_id.value != MakeAssetId(registration.logical_id).value ||
             !Same(impl_->texture_catalog[registration.compiled_texture.value].description, registration.description))))
         return Failure("Texture registration does not match its compiled metadata handle.");
-    if (!impl_->device || !registration.fallback || !registration.generation_lease ||
+    if (!impl_->device || !registration.generation_lease ||
         registration.generation.empty() || registration.logical_id.empty() || registration.source.empty() ||
-        !registration.fallback_allocation_bytes || !registration.description.width || !registration.description.height ||
-        !registration.description.mip_count || registration.fallback_graph_access == Access::Undefined ||
+        !registration.description.width || !registration.description.height ||
+        !registration.description.mip_count ||
         registration.description.mip_count > 32 || !registration.description.array_size ||
         registration.description.width > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
         registration.description.height > D3D12_REQ_TEXTURE2D_U_OR_V_DIMENSION ||
@@ -541,25 +572,43 @@ Result RendererTextureStreaming::RegisterBatch(std::span<TextureStreamRegistrati
         registration.fallback_first_mip >= registration.description.mip_count ||
         (registration.pinned && registration.fallback_first_mip))
         return Failure("Invalid selected texture streaming registration.");
+    if (registration.fallback_mode != TextureStreamFallback::NativeTexture &&
+        registration.fallback_mode != TextureStreamFallback::SourceMaterial)
+        return Failure("Invalid selected texture fallback mode.");
+    if (registration.fallback_mode == TextureStreamFallback::NativeTexture)
+    {
+        if (!registration.fallback || !registration.fallback_allocation_bytes ||
+            registration.fallback_graph_access == Access::Undefined)
+            return Failure("Invalid selected native texture fallback.");
+    }
+    else if (registration.pinned || registration.fallback || registration.fallback_allocation_bytes ||
+        registration.fallback_residency || registration.fallback_contract.backing != NativeBackingKind::Unknown ||
+        registration.fallback_contract.native_resource || registration.fallback_graph_access != Access::Undefined ||
+        registration.opacity_sampling || registration.sampler_feedback)
+        return Failure("Invalid selected source-material fallback.");
     if (registration.srgb_view &&
         registration.description.format != static_cast<std::uint32_t>(DXGI_FORMAT_BC7_UNORM) &&
         registration.description.format != static_cast<std::uint32_t>(DXGI_FORMAT_R8G8B8A8_UNORM))
         return Failure("sRGB texture streaming requires BC7_UNORM or R8G8B8A8_UNORM source format.");
-    const auto fallback = registration.fallback->GetDesc();
-    if (registration.fallback_contract.backing != NativeBackingKind::Unknown &&
-        (registration.fallback_contract.native_resource != registration.fallback.Get() ||
-         !registration.fallback_contract.resource_identity || !registration.fallback_contract.device_identity ||
-         !registration.fallback_contract.generation))
-        return Failure("Selected texture fallback contract does not belong to its owner.");
     const auto expected = Description(registration, registration.fallback_first_mip);
     D3D12_FEATURE_DATA_FORMAT_INFO planes{expected.Format, 0};
-    if (fallback.Dimension != expected.Dimension || fallback.Width != expected.Width ||
-        fallback.Height != expected.Height || fallback.DepthOrArraySize != expected.DepthOrArraySize ||
-        fallback.MipLevels != expected.MipLevels || fallback.Format != expected.Format ||
-        fallback.SampleDesc.Count != 1 || fallback.SampleDesc.Quality ||
-        FAILED(impl_->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_INFO, &planes, sizeof(planes))) ||
+    if (FAILED(impl_->device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_INFO, &planes, sizeof(planes))) ||
         planes.PlaneCount != 1)
-        return Failure("Selected texture fallback/native subresources disagree with immutable metadata.");
+        return Failure("Selected texture native format is not single-plane.");
+    if (registration.fallback_mode == TextureStreamFallback::NativeTexture)
+    {
+        const auto fallback = registration.fallback->GetDesc();
+        if (registration.fallback_contract.backing != NativeBackingKind::Unknown &&
+            (registration.fallback_contract.native_resource != registration.fallback.Get() ||
+             !registration.fallback_contract.resource_identity || !registration.fallback_contract.device_identity ||
+             !registration.fallback_contract.generation))
+            return Failure("Selected texture fallback contract does not belong to its owner.");
+        if (fallback.Dimension != expected.Dimension || fallback.Width != expected.Width ||
+            fallback.Height != expected.Height || fallback.DepthOrArraySize != expected.DepthOrArraySize ||
+            fallback.MipLevels != expected.MipLevels || fallback.Format != expected.Format ||
+            fallback.SampleDesc.Count != 1 || fallback.SampleDesc.Quality)
+            return Failure("Selected texture fallback/native subresources disagree with immutable metadata.");
+    }
     for (std::size_t index = 0; index < impl_->textures.size(); ++index)
     {
         const auto &existing = impl_->textures[index].registration;
@@ -681,6 +730,7 @@ Result RendererTextureStreaming::RegisterBatch(std::span<TextureStreamRegistrati
     pending_ids[batch_index].value = static_cast<std::uint32_t>(impl_->textures.size() + prepared.size() + 1);
     prepared.push_back(std::move(texture));
     }
+    if (required_budget_bytes) *required_budget_bytes = next_minimum_budget;
     if (impl_->budget && next_minimum_budget > impl_->budget) return Result::Success();
     impl_->textures.reserve(impl_->textures.size() + prepared.size());
     std::vector<ResidencyTicket> owned_tickets;
@@ -689,7 +739,7 @@ Result RendererTextureStreaming::RegisterBatch(std::span<TextureStreamRegistrati
     {
         for (auto &texture : prepared)
         {
-            if (texture.fallback_ticket) continue;
+            if (texture.fallback_ticket || !texture.registration.fallback_allocation_bytes) continue;
             texture.fallback_ticket = impl_->RegisterNativeAllocation(residency,
                 ResidencyCategory::Texture, texture.registration.fallback_allocation_bytes, true, D3D12_HEAP_TYPE_DEFAULT);
             if (!texture.fallback_ticket)
@@ -849,9 +899,8 @@ Result RendererTextureStreaming::Impl::Prepare(TextureOwner &texture, std::uint3
                 if (offset != texture.bytes.size()) return Failure("Selected texture range payload layout is inconsistent.");
             }
             else if (texture.prepared_package.subresources.empty())
-                texture.prepared_package = texture.registration.compiled_texture ?
-                    render_data::BindTextureDescriptor(texture.bytes, texture_catalog[texture.registration.compiled_texture.value]) :
-                    render_data::ReadTexturePackage(texture.bytes, MakeAssetId(texture.registration.logical_id));
+                texture.prepared_package = render_data::ReadTexturePackage(
+                    texture.bytes, MakeAssetId(texture.registration.logical_id));
         }
         catch (const std::exception &error) { return Failure("Selected texture decode failed: " + std::string(error.what())); }
     }
@@ -1102,6 +1151,7 @@ Result RendererTextureStreaming::Impl::Prepare(TextureOwner &texture, std::uint3
             ? "Texture mapping-only request transition was stale or invalid."
             : "Texture upload request transition was stale."); }
         texture.pending = std::move(batch);
+        ++pending_uploads;
         if (texture.software_transaction)
             texture.pending->candidate_owner = std::move(texture.software_candidate);
         if (texture.read_ticket) static_cast<void>(residency.ReleaseNow(texture.read_ticket));
@@ -1225,6 +1275,7 @@ Result RendererTextureStreaming::Impl::PrepareSoftwareCopy(TextureOwner &texture
             return Failure("Software texture copy request was stale or invalid.");
         }
         texture.pending = std::move(batch);
+        ++pending_uploads;
         texture.pending->candidate_owner = std::move(texture.software_candidate);
         admission.Complete();
         return Result::Success();
@@ -1337,7 +1388,12 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
                 else ++iterator;
             for (auto &backing : batch->maps) texture.backing.push_back(std::move(backing));
             texture.first_mip = 0; texture.reserved_published = true;
-            texture.active_access = already_published ? Access::AllShaderRead : Access::Common;
+            if (!already_published)
+            {
+                texture.active_access = Access::Common;
+                texture.active_queue = QueueHint::Copy;
+                texture.last_use = {}; // Earlier readers belong to the still-pinned fallback allocation.
+            }
         }
         else if (texture.software_transaction && !batch->software_final_chunk)
         {
@@ -1371,6 +1427,7 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
             if (ReleaseSoftwareUploadWindow(texture, residency)) ++texture.reclaims;
             texture.first_mip = batch->target_mip;
             texture.active_access = Access::Common;
+            texture.active_queue = QueueHint::Copy;
             texture.last_use = {};
             if (texture.decode_ticket) static_cast<void>(residency.ReleaseNow(texture.decode_ticket));
             texture.decode_ticket = {}; texture.metadata_ticket_committed = false;
@@ -1525,7 +1582,8 @@ Result RendererTextureStreaming::Pump(std::uint64_t frame, const CompletionSet &
             impl_->retired.push_back({owner, std::move(texture.software), texture.software_ticket, retirement});
             texture.software_ticket = {}; texture.last_use = {}; texture.publication = {};
             texture.first_mip = texture.resident_mip = texture.registration.fallback_first_mip;
-            texture.active_access = texture.fallback_access; ++texture.revision;
+            texture.active_access = texture.fallback_access;
+            texture.active_queue = QueueHint::Direct; ++texture.revision;
             if (fallback_target)
             {
                 if (texture.request) io.Cancel(texture.request, streaming);
@@ -1961,7 +2019,7 @@ TextureStreamView RendererTextureStreaming::View(TextureStreamId id) const noexc
     auto completion = texture.last_use; completion.Merge(texture.publication);
     return {resource, texture.registration.description, texture.first_mip, resident_mip,
         texture.revision, completion, texture.active_access, texture.reserved_published,
-        texture.registration.opacity_sampling, texture.feedback_supported};
+        texture.registration.opacity_sampling, texture.feedback_supported, texture.active_queue};
 }
 bool RendererTextureStreaming::HardwareBacked(TextureStreamId id) const noexcept
 {
@@ -1974,195 +2032,181 @@ bool RendererTextureStreaming::NeedsDemand(TextureStreamId id, bool baseline_con
     return !texture.registration.pinned &&
         (baseline_consumer || !feedback_active || !texture.reserved || !texture.feedback_supported);
 }
-bool RendererTextureStreaming::MatchesLayout(std::uint32_t first_pass,
-    const TextureStreamingLayout &layout) const noexcept
+bool RendererTextureStreaming::HasPendingUploads() const noexcept
 {
-    if(layout.first_pass_id!=first_pass||layout.queue!=QueueHint::Copy||
-        layout.entries.size()!=impl_->textures.size())return false;
-    for(std::size_t index=0;index<impl_->textures.size();++index)
+    return impl_->pending_uploads != 0;
+}
+
+bool RendererTextureStreaming::MatchesLayout(const TextureStreamingLayout &layout) const noexcept
+{
+    if (layout.entries.size() != impl_->textures.size()) return false;
+    for (std::size_t index = 0; index < impl_->textures.size(); ++index)
     {
-        const auto &texture=impl_->textures[index];
-        const auto view=View({static_cast<std::uint32_t>(index+1u)});
-        const auto batch=texture.pending;
-        const bool pending=batch&&!batch->submitted;
-        const auto &entry=layout.entries[index];
-        // Resident clamp and import state are rebound live, not graph topology.
-        if(!view.resource||!entry.sampled||entry.sampled_version.resource!=entry.sampled||
-            entry.sampled_version.ordinal!=(pending&&!entry.separate_target?1u:0u)||
-            !Same(entry.description,view.logical_description)||
-            entry.first_mip!=view.first_mip||entry.pending!=pending||
-            entry.opacity_sampling!=view.opacity_sampling)return false;
-        if(pending)
-        {
-            if(entry.separate_target!=(batch->resource.Get()!=view.resource)||
-                (entry.separate_target&&!entry.candidate)||
-                entry.reserved!=batch->reserved||entry.copy_upload!=bool(batch->upload.resource)||
-                entry.software_copy!=batch->software_copy||
-                entry.target_mip!=batch->target_mip||entry.map_count!=batch->maps.size()||
-                entry.unmap_count!=batch->unmaps.size())return false;
-            if(entry.mapped_mips.size()!=batch->maps.size()||
-                entry.unmapped_mips!=batch->unmap_mips)return false;
-            for(std::size_t mip=0;mip<batch->maps.size();++mip)
-                if(entry.mapped_mips[mip]!=batch->maps[mip].mip)return false;
-        }
+        const auto view = View({static_cast<std::uint32_t>(index + 1u)});
+        const auto &entry = layout.entries[index];
+        if (bool(view.resource) != bool(entry.sampled) ||
+            !Same(entry.description, view.logical_description) || entry.first_mip != view.first_mip ||
+            entry.opacity_sampling != view.opacity_sampling) return false;
     }
     return true;
 }
-Result RendererTextureStreaming::AddPendingPasses(RenderGraphBuilder &graph,
-    ExternalQueueBinding queue,std::uint32_t first_pass,
-    std::vector<TextureStreamingGraphBinding> &bindings,TextureStreamingLayout *layout)
-{return AddPendingPassesImpl(graph,std::move(queue),first_pass,bindings,layout,nullptr);}
-Result RendererTextureStreaming::BindRetained(RenderGraphBuilder &graph,
-    ExternalQueueBinding queue,std::uint32_t first_pass,
-    const TextureStreamingLayout &layout,std::vector<TextureStreamingGraphBinding> &bindings)
-{return AddPendingPassesImpl(graph,std::move(queue),first_pass,bindings,nullptr,&layout);}
-Result RendererTextureStreaming::AddPendingPassesImpl(RenderGraphBuilder &graph,
-    ExternalQueueBinding queue,std::uint32_t first_pass,
-    std::vector<TextureStreamingGraphBinding> &bindings,
-    TextureStreamingLayout *layout,const TextureStreamingLayout *retained)
+
+Result RendererTextureStreaming::ImportViews(RenderGraphBuilder &graph,
+    std::vector<TextureStreamingGraphBinding> &bindings, TextureStreamingLayout *layout)
 {
-    if (!queue.native_queue_owner || queue.queue_type != QueueHint::Copy)
-        return Failure("Texture mapping requires the graph's actual owned Copy queue.");
-    if(retained)
-    {
-        if(!MatchesLayout(first_pass,*retained))
-            return Failure("Texture streaming retained topology changed.");
-    }
-    if(layout)
-    {
-        *layout={};layout->first_pass_id=first_pass;
-        layout->entries.resize(impl_->textures.size());
-    }
+    return ImportViewsImpl(graph, bindings, layout, nullptr);
+}
+Result RendererTextureStreaming::BindRetained(RenderGraphBuilder &graph,
+    const TextureStreamingLayout &layout, std::vector<TextureStreamingGraphBinding> &bindings)
+{
+    return ImportViewsImpl(graph, bindings, nullptr, &layout);
+}
+Result RendererTextureStreaming::ImportViewsImpl(RenderGraphBuilder &graph,
+    std::vector<TextureStreamingGraphBinding> &bindings,
+    TextureStreamingLayout *layout, const TextureStreamingLayout *retained)
+{
+    if (retained && retained->entries.size() != impl_->textures.size())
+        return Failure("Texture sampled import count changed.");
+    if (layout) layout->entries.resize(impl_->textures.size());
     bindings.clear(); bindings.reserve(impl_->textures.size());
-    struct CopyBatch
-    {
-        std::vector<std::shared_ptr<UploadBatch>> uploads;
-        ComPtr<ID3D12CommandAllocator> allocator;
-        ComPtr<ID3D12GraphicsCommandList> list;
-    };
-    std::shared_ptr<CopyBatch> copies;
-    std::optional<PassBuilder> copy_pass;
-    std::vector<ExternalResourceAccess> copy_accesses;
     for (std::size_t index = 0; index < impl_->textures.size(); ++index)
     {
-        auto &texture = impl_->textures[index]; const auto view = View({static_cast<std::uint32_t>(index + 1u)});
-        if (layout) layout->entries[index].opacity_sampling = view.opacity_sampling;
-        const NativeResourceContract *sampled_contract{};
-        if(texture.reserved.Get()==view.resource&&view.resource)
-        {
-            texture.reserved_contract.generation=texture.revision;
-            sampled_contract=&texture.reserved_contract;
-        }
-        else if(texture.software.resource.Get()==view.resource&&view.resource)
-        {
-            if(auto certified=texture.software.EnsureNativeContract(impl_->device.Get());!certified)return certified;
-            sampled_contract=texture.software.NativeContract();
-        }
-        else if(texture.registration.fallback.Get()==view.resource&&view.resource&&
-                texture.registration.fallback_contract.backing!=NativeBackingKind::Unknown)
-            sampled_contract=&texture.registration.fallback_contract;
-        TextureStreamingLayout::Entry unused{};
-        auto *capture=layout?&layout->entries[index]:nullptr;
-        const auto &entry=retained?retained->entries[index]:capture?*capture:unused;
-        const auto external=ExternalTexture{view.resource,view.completion,QueueHint::Direct,{},sampled_contract};
-        const auto handle=retained?entry.sampled:
-            graph.ImportTexture(external,view.access,texture.registration.logical_id);
-        if(retained&&!graph.BindTexture(handle,external,view.access))
+        auto &texture = impl_->textures[index];
+        const auto view = View({static_cast<std::uint32_t>(index + 1u)});
+        const NativeResourceContract *contract{};
+        if (auto certified = TextureContract(texture, view.resource, impl_->device.Get(), contract); !certified)
+            return certified;
+        const ExternalTexture external{view.resource, view.completion, view.queue, {}, contract};
+        const auto handle = !view.resource ? TextureHandle{} : retained ? retained->entries[index].sampled :
+            graph.ImportTexture(external, view.access, texture.registration.logical_id);
+        if (view.resource && retained && !graph.BindTexture(handle, external, view.access))
             return Failure("Texture streaming sampled import changed.");
-        if(layout)
-        {
-            capture->sampled=handle;capture->description=view.logical_description;
-            capture->first_mip=view.first_mip;
-        }
-        auto version = graph.Version(handle); const auto batch = texture.pending;
-        if (batch && !batch->submitted)
-        {
-            if (batch->software_copy && (batch->reserved || batch->upload.resource ||
-                batch->software_copy_source.Get() != view.resource ||
-                batch->resource.Get() == view.resource))
-                return Failure("Software texture copy lost its published source or separate candidate.");
-            auto target = handle;
-            if (batch->resource.Get() != view.resource)
-            {
-                const NativeResourceContract *target_contract{};
-                if(batch->reserved&&texture.reserved.Get()==batch->resource.Get())
-                    target_contract=&texture.reserved_contract;
-                else if(batch->candidate_owner.resource.Get()==batch->resource.Get()&&batch->resource)
-                {
-                    if(auto certified=batch->candidate_owner.EnsureNativeContract(impl_->device.Get());!certified)return certified;
-                    target_contract=batch->candidate_owner.NativeContract();
-                }
-                const auto target_external=ExternalTexture{batch->resource.Get(),{},QueueHint::Copy,{},target_contract};
-                target=retained?entry.candidate:
-                    graph.ImportTexture(target_external,Access::Common,"selected texture candidate");
-                if(retained&&!graph.BindTexture(target,target_external,Access::Common))
-                    return Failure("Texture streaming candidate import changed.");
-            }
-            if(layout)
-            {
-                capture->pending=true;capture->separate_target=target.value!=handle.value;
-                capture->candidate=capture->separate_target?target:TextureHandle{};
-                capture->reserved=batch->reserved;capture->copy_upload=bool(batch->upload.resource);
-                capture->software_copy=batch->software_copy;
-                capture->target_mip=batch->target_mip;
-                capture->map_count=static_cast<std::uint32_t>(batch->maps.size());
-                capture->unmap_count=static_cast<std::uint32_t>(batch->unmaps.size());
-                for(const auto &mapping:batch->maps)capture->mapped_mips.push_back(mapping.mip);
-                capture->unmapped_mips=batch->unmap_mips;
-            }
-            if (!copy_pass)
-            {
-                copies=std::make_shared<CopyBatch>();
-                copies->uploads.reserve(impl_->textures.size());
-                if (retained) copy_pass=graph.BindPass(retained->copy_pass_index,first_pass);
-                else
-                {
-                    if (layout) layout->copy_pass_index=graph.PassCount();
-                    copy_pass=graph.AddPass(first_pass,"Texture mip map/upload",QueueHint::Copy);
-                    copy_accesses.reserve(impl_->textures.size()*2);
-                }
-                if (!copy_pass) return Failure("Texture streaming retained Copy pass changed.");
-            }
-            auto &pass=*copy_pass;
-            if (batch->software_copy && !retained) pass.Read(graph.Version(handle), Access::CopySource);
-            const auto written=retained?ResourceVersion{target,1}:
-                pass.Write(graph.Version(target),Access::CopyDest);
-            if (!retained)
-            {
-                if (batch->software_copy) copy_accesses.push_back({handle,Access::Common,Access::Common});
-                copy_accesses.push_back({target,Access::Common,Access::Common});
-            }
-            copies->uploads.push_back(batch);
-            if (target.value == handle.value) version = written;
-            else if(!retained)graph.SetFinalAccess(written, Access::Common);
-        }
-        if(!retained)graph.SetFinalAccess(version,Access::AllShaderRead);
-        else version=entry.sampled_version;
-        if(layout)capture->sampled_version=version;
-        const auto required_mip=std::min(texture.tail_mip,impl_->finest_mip);
+        const ResourceVersion version{handle, 0};
+        if (!retained && handle) graph.SetFinalAccess(version, Access::AllShaderRead);
+        if (layout) layout->entries[index] = {handle, view.logical_description, view.first_mip, view.opacity_sampling};
+        const auto required_mip = std::min(texture.tail_mip, impl_->finest_mip);
         bindings.push_back({{static_cast<std::uint32_t>(index + 1u)}, version,
-            texture.registration.logical_id,view.resident_min_mip,required_mip,texture.desired_mip,
-            !texture.pending&&texture.desired_mip<=required_mip&&
-                view.resident_min_mip<=required_mip,view.opacity_sampling});
+            texture.registration.logical_id, view.resident_min_mip, required_mip, texture.desired_mip,
+            view.resource && !texture.pending && texture.desired_mip <= required_mip &&
+                view.resident_min_mip <= required_mip, view.opacity_sampling});
+    }
+    return Result::Success();
+}
+
+Result RendererTextureStreaming::AddUploadPass(RenderGraphBuilder &graph,
+    ID3D12CommandQueue *copy_queue, std::uint32_t pass_id)
+{
+    if (!HasPendingUploads()) return Result::Success();
+    struct CopyBatch
+    {
+        struct Upload { std::size_t texture; std::shared_ptr<UploadBatch> batch; };
+        std::vector<Upload> uploads;
+    };
+    auto copies = std::make_shared<CopyBatch>();
+    copies->uploads.reserve(impl_->pending_uploads);
+    for (std::size_t index = 0; index < impl_->textures.size(); ++index)
+    {
+        const auto &texture = impl_->textures[index];
+        if (texture.pending && !texture.pending->submitted) copies->uploads.push_back({index, texture.pending});
+    }
+    const auto has_mapping = [](const auto &batch) { return !batch->maps.empty() || !batch->unmaps.empty(); };
+    const auto has_copy = [](const auto &batch) { return batch->software_copy || !batch->footprints.empty(); };
+    const bool maps = std::ranges::any_of(copies->uploads, [&](const auto &upload) { return has_mapping(upload.batch); });
+    const bool transfer = std::ranges::any_of(copies->uploads, [&](const auto &upload) { return has_copy(upload.batch); });
+    if (maps && (!copy_queue || copy_queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_COPY))
+        return Failure("Texture mapping requires the graph's actual owned Copy queue.");
+    std::optional<PassBuilder> mapping_pass, copy_pass;
+    if (maps) mapping_pass = graph.AddPass(pass_id, "Texture mip map/unmap", QueueHint::Copy);
+    if (transfer) copy_pass = graph.AddPass(pass_id + 1u, "Texture mip upload/copy", QueueHint::Copy);
+    std::vector<ExternalResourceAccess> mapping_accesses;
+    if (maps) mapping_accesses.reserve(copies->uploads.size());
+    for (const auto &upload : copies->uploads)
+    {
+        auto &texture = impl_->textures[upload.texture];
+        const auto &batch = upload.batch;
+        const auto view = View({static_cast<std::uint32_t>(upload.texture + 1u)});
+        if (batch->software_copy && (batch->reserved || batch->upload.resource ||
+            batch->software_copy_source.Get() != view.resource || batch->resource.Get() == view.resource))
+            return Failure("Software texture copy lost its published source or separate candidate.");
+        TextureHandle active{};
+        if (batch->software_copy || batch->resource.Get() == view.resource)
+        {
+            const NativeResourceContract *contract{};
+            if (auto certified = TextureContract(texture, view.resource, impl_->device.Get(), contract); !certified)
+                return certified;
+            active = graph.ImportTexture({view.resource, view.completion, view.queue, {}, contract},
+                view.access, texture.registration.logical_id);
+        }
+        auto target = active;
+        if (batch->resource.Get() != view.resource)
+        {
+            const NativeResourceContract *contract{};
+            if (auto certified = TextureContract(texture, batch->resource.Get(), impl_->device.Get(), contract); !certified)
+                return certified;
+            target = graph.ImportTexture({batch->resource.Get(), {}, QueueHint::Copy, {}, contract},
+                Access::Common, "selected texture candidate");
+        }
+        auto written = graph.Version(target);
+        if (has_mapping(batch))
+        {
+            written = mapping_pass->Write(written, Access::CopyDest);
+            mapping_accesses.push_back({target, Access::Common, Access::Common});
+        }
+        if (has_copy(batch))
+        {
+            if (batch->software_copy)
+            {
+                copy_pass->Read(graph.Version(active), Access::CopySource);
+                graph.SetFinalAccess(graph.Version(active), Access::Common);
+            }
+            written = copy_pass->Write(written, Access::CopyDest);
+        }
+        graph.SetFinalAccess(written, Access::Common);
+    }
+    if (mapping_pass)
+    {
+        auto queue_owner = std::make_shared<ComPtr<ID3D12CommandQueue>>(copy_queue);
+        ExternalQueueBinding queue{std::shared_ptr<void>(queue_owner, copy_queue), QueueHint::Copy, copies};
+        mapping_pass->SetExternalExecute(std::move(queue), mapping_accesses,
+            [copies](RenderExternalPassContext &context, ExternalQueueCompletion &completion) {
+                completion.resource_lease = copies;
+                auto *native_queue = static_cast<ID3D12CommandQueue *>(context.NativeCommandQueue());
+                if (!native_queue || std::ranges::any_of(copies->uploads, [](const auto &upload) { return upload.batch->started; }))
+                    return Failure("Texture copy/mapping batch submitted twice.");
+                for (const auto &upload : copies->uploads) upload.batch->started = true;
+                for (const auto &upload : copies->uploads)
+                {
+                    const auto &batch = upload.batch;
+                    for (const auto &backing : batch->maps)
+                        for (const auto &mapping : backing.mappings)
+                        {
+                            D3D12_TILE_REGION_SIZE region{}; region.NumTiles = mapping.tiles;
+                            const D3D12_TILE_RANGE_FLAGS flags = D3D12_TILE_RANGE_FLAG_NONE;
+                            const UINT offset = static_cast<UINT>(backing.memory.allocation->GetOffset() /
+                                D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES) + mapping.heap_tile;
+                            native_queue->UpdateTileMappings(batch->resource.Get(), 1, &mapping.coordinate, &region,
+                                backing.memory.allocation->GetHeap(), 1, &flags, &offset, &mapping.tiles, D3D12_TILE_MAPPING_FLAG_NONE);
+                        }
+                    for (const auto &mapping : batch->unmaps)
+                    {
+                        D3D12_TILE_REGION_SIZE region{}; region.NumTiles = mapping.tiles;
+                        const D3D12_TILE_RANGE_FLAGS flags = D3D12_TILE_RANGE_FLAG_NULL; const UINT offset{};
+                        native_queue->UpdateTileMappings(batch->resource.Get(), 1, &mapping.coordinate, &region,
+                            nullptr, 1, &flags, &offset, &mapping.tiles, D3D12_TILE_MAPPING_FLAG_NONE);
+                    }
+                }
+                return Result::Success();
+            });
     }
     if (copy_pass)
-    {
-        const bool has_copies = std::ranges::any_of(copies->uploads, [](const auto &batch) {
-            return batch->software_copy || !batch->footprints.empty();
-        });
-        if (has_copies)
-        {
-            HRESULT hr = impl_->device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY,
-                IID_PPV_ARGS(&copies->allocator));
-            if (SUCCEEDED(hr)) hr = impl_->device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COPY,
-                copies->allocator.Get(), nullptr, IID_PPV_ARGS(&copies->list));
-            if (FAILED(hr)) return NativeFailure("Create streamed texture copy list", hr);
-            for (const auto &batch : copies->uploads)
+        copy_pass->SetExecuteChecked([copies](RenderPassContext &context) {
+            auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
+            for (const auto &upload : copies->uploads)
             {
+                const auto &batch = upload.batch;
                 if (batch->software_copy)
                 {
-                    // Prepare admitted both complete array chains and their 32-bit
-                    // subresource span. Coarsening copies the matching suffix.
+                    // Both complete array chains and the subresource span were admitted by Prepare.
                     for (UINT slice = 0; slice < batch->copy_array_size; ++slice)
                         for (UINT mip = 0; mip < batch->copy_destination_mips; ++mip)
                         {
@@ -2174,7 +2218,7 @@ Result RendererTextureStreaming::AddPendingPassesImpl(RenderGraphBuilder &graph,
                             destination.pResource = batch->resource.Get();
                             destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
                             destination.SubresourceIndex = slice * batch->copy_destination_mips + mip;
-                            copies->list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+                            commands->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
                         }
                 }
                 else
@@ -2187,52 +2231,12 @@ Result RendererTextureStreaming::AddPendingPassesImpl(RenderGraphBuilder &graph,
                         destination.pResource = batch->resource.Get();
                         destination.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
                         destination.SubresourceIndex = batch->destinations[index];
-                        copies->list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+                        commands->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
                     }
-            }
-            hr = copies->list->Close();
-            if (FAILED(hr)) return NativeFailure("Close streamed texture copy list", hr);
-        }
-        queue.resource_lease=copies;
-        auto execute=[copies](RenderExternalPassContext &context,ExternalQueueCompletion &completion) {
-            completion.resource_lease=copies;
-            auto *native_queue=static_cast<ID3D12CommandQueue *>(context.NativeCommandQueue());
-            if (!native_queue || std::ranges::any_of(copies->uploads,[](const auto &batch) { return batch->started; }))
-                return Failure("Texture copy/mapping batch submitted twice.");
-            for (const auto &batch:copies->uploads) batch->started=true;
-            // Copy resources enter/leave COMMON. All mappings precede the
-            // shared list; the graph signals completion for mapping-only work too.
-            for (const auto &batch:copies->uploads)
-            {
-                for (const auto &backing:batch->maps)
-                    for (const auto &mapping:backing.mappings)
-                    {
-                        D3D12_TILE_REGION_SIZE region{}; region.NumTiles=mapping.tiles;
-                        const D3D12_TILE_RANGE_FLAGS flags=D3D12_TILE_RANGE_FLAG_NONE;
-                        const UINT offset=static_cast<UINT>(backing.memory.allocation->GetOffset()/
-                            D3D12_TILED_RESOURCE_TILE_SIZE_IN_BYTES)+mapping.heap_tile;
-                        native_queue->UpdateTileMappings(batch->resource.Get(),1,&mapping.coordinate,&region,
-                            backing.memory.allocation->GetHeap(),1,&flags,&offset,&mapping.tiles,D3D12_TILE_MAPPING_FLAG_NONE);
-                    }
-                for (const auto &mapping:batch->unmaps)
-                {
-                    D3D12_TILE_REGION_SIZE region{}; region.NumTiles=mapping.tiles;
-                    const D3D12_TILE_RANGE_FLAGS flags=D3D12_TILE_RANGE_FLAG_NULL; const UINT offset{};
-                    native_queue->UpdateTileMappings(batch->resource.Get(),1,&mapping.coordinate,&region,
-                        nullptr,1,&flags,&offset,&mapping.tiles,D3D12_TILE_MAPPING_FLAG_NONE);
-                }
-            }
-            if (copies->list)
-            {
-                ID3D12CommandList *lists[]{copies->list.Get()};
-                native_queue->ExecuteCommandLists(1, lists);
             }
             return Result::Success();
-        };
-        if (retained) copy_pass->BindExternalExecute(std::move(queue),std::move(execute));
-        else copy_pass->SetExternalExecute(std::move(queue),copy_accesses,std::move(execute));
-        for (const auto &batch:copies->uploads) batch->scheduled=true;
-    }
+        });
+    for (const auto &upload : copies->uploads) upload.batch->scheduled = true;
     return Result::Success();
 }
 void RendererTextureStreaming::MarkSubmitted(const CompletionSet &completion, StreamingManager &streaming) noexcept
@@ -2240,8 +2244,18 @@ void RendererTextureStreaming::MarkSubmitted(const CompletionSet &completion, St
     for (auto &texture : impl_->textures)
     {
         const auto batch = texture.pending;
-        if (!batch || !batch->scheduled || !batch->started || batch->submitted) continue;
+        if (!batch || !batch->scheduled || batch->submitted) continue;
+        batch->started = true;
         batch->completion = completion; batch->submitted = true;
+        --impl_->pending_uploads;
+        auto *active = texture.reserved_published ? texture.reserved.Get() :
+            texture.software.resource ? texture.software.resource.Get() : texture.registration.fallback.Get();
+        if (active && (batch->resource.Get() == active || batch->software_copy_source.Get() == active))
+        {
+            texture.last_use.Merge(completion);
+            texture.active_access = Access::Common;
+            texture.active_queue = QueueHint::Copy;
+        }
         if (streaming.SubmitUpload(batch->request, texture.registration.generation, completion))
             ++texture.uploads;
     }
@@ -2255,6 +2269,7 @@ void RendererTextureStreaming::MarkUse(TextureStreamId id, const CompletionSet &
     // allocation and advances its mutable state as well.
     if (!texture.IsStreamed()) texture.fallback_access = Access::AllShaderRead;
     texture.active_access = Access::AllShaderRead;
+    texture.active_queue = QueueHint::Direct;
 }
 bool RendererTextureStreaming::HasStartedWork() const noexcept
 {

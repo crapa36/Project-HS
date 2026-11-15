@@ -32,15 +32,13 @@ BulkRange ChunkRange(std::span<const std::byte> bytes, const PackageView &packag
     Require(address >= begin && address - begin <= bytes.size() && found->bytes.size() <= bytes.size() - (address - begin),
             "sample chunk does not borrow supplied bytes");
     const auto offset = static_cast<std::uint64_t>(address - begin);
-    Require(offset <= UINT64_MAX - bulk.range.offset, "absolute sample offset overflows");
-    return {bulk.range.offset + offset, found->bytes.size(), RenderBulkFormat::Package, hs::Sha256(found->bytes)};
+    return {offset, found->bytes.size(), RenderBulkFormat::Package, hs::Sha256(found->bytes)};
 }
 std::uint64_t Rows(const BulkRange &range, const RendererBulkDescriptor &bulk, std::uint32_t stride)
 {
     Require(range.format == RenderBulkFormat::Package && range.byte_count && range.byte_count % stride == 0 &&
-            range.byte_count / stride <= 800'000 && range.offset >= bulk.range.offset &&
-            range.offset - bulk.range.offset <= bulk.range.byte_count &&
-            range.byte_count <= bulk.range.byte_count - (range.offset - bulk.range.offset) &&
+            range.byte_count / stride <= 800'000 && range.offset <= bulk.range.byte_count &&
+            range.byte_count <= bulk.range.byte_count - range.offset &&
             range.byte_count <= std::numeric_limits<std::size_t>::max(), "sample subrange is invalid");
     return range.byte_count / stride;
 }

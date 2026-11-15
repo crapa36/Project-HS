@@ -199,9 +199,8 @@ public:
                     throw std::runtime_error("Developer texture metadata proof read failed");
                 return bytes;
             };
-            constexpr std::size_t kMaxPrefix = 16 * 1024;
             const auto prefix = read(0, static_cast<std::size_t>(std::min<std::uint64_t>(
-                kMaxPrefix, bulk.range.byte_count)));
+                render_data::kRenderPackageMetadataPrefixBytes, bulk.range.byte_count)));
             const auto directory = render_data::ReadPackageDirectory(prefix, bulk.range.byte_count, asset);
             // TXV1 volume metadata is at most 40 + 15 * 20 bytes, below the TXM1 v2 bound.
             if (directory.chunks.empty() ||

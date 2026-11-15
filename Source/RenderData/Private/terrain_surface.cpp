@@ -13,7 +13,7 @@ namespace hs::render_data
 namespace
 {
 constexpr std::uint32_t kMagic = 0x31465354; // TSF1
-constexpr std::size_t kHeader = 68, kStride = 32, kMaxSections = 64;
+constexpr std::size_t kHeader = 68, kStride = 32;
 void Require(bool valid, std::string_view reason)
 {
     if (!valid) throw std::runtime_error("terrain surface: " + std::string(reason));
@@ -39,7 +39,7 @@ void ValidateSection(const TerrainSurfaceSection &s)
 }
 void ValidateShape(TextureDescription d, std::size_t count)
 {
-    Require(count > 0 && count <= kMaxSections && d.width > 0 && d.width <= 16384 &&
+    Require(count > 0 && count <= kTerrainSurfaceMaxTiles && d.width > 0 && d.width <= 16384 &&
         d.width == d.height && std::has_single_bit(d.width) &&
         (d.format == kTextureFormatRgba8 || d.format == kTextureFormatBc7) &&
         d.array_size == count * 3 && d.mip_count == std::bit_width(d.width),
@@ -56,8 +56,9 @@ std::vector<TerrainSurfaceTile> BuildTerrainSurfaceTiles(std::span<const Terrain
         ValidateSection(s);
         const auto nx = std::ceil(std::abs(static_cast<double>(s.span_x)) / 24.0);
         const auto ny = std::ceil(std::abs(static_cast<double>(s.span_z)) / 24.0);
-        Require(source <= std::numeric_limits<std::uint32_t>::max() && nx <= kMaxSections && ny <= kMaxSections &&
-            nx * ny <= kMaxSections - tiles.size(), "too many terrain tiles");
+        Require(source <= std::numeric_limits<std::uint32_t>::max() && nx <= kTerrainSurfaceMaxTiles &&
+            ny <= kTerrainSurfaceMaxTiles && nx * ny <= kTerrainSurfaceMaxTiles - tiles.size(),
+            "too many terrain tiles");
         const auto count_x = static_cast<std::uint32_t>(nx), count_y = static_cast<std::uint32_t>(ny);
         const auto span_x = static_cast<double>(s.span_x) / count_x;
         const auto span_z = static_cast<double>(s.span_z) / count_y;
@@ -138,7 +139,7 @@ TerrainSurfacePackageView ReadTerrainSurfacePackage(std::span<const std::byte> p
         "unsupported terrain surface version or layout");
     const auto count = Get(bytes, 8);
     const auto product_count = std::size_t(count) * 3;
-    Require(count > 0 && count <= kMaxSections &&
+    Require(count > 0 && count <= kTerrainSurfaceMaxTiles &&
         bytes.size() == kHeader + std::size_t(count) * kStride + product_count * 4 &&
         package.dependencies.size() == product_count, "invalid section count");
     TerrainSurfacePackageView result;

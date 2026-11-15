@@ -68,20 +68,19 @@ struct LocalProbeInputs
     bool capture_identity_valid{},capture_sources_ready{};
 };
 
+#if defined(HS_OFFLINE_PROBE_BAKER)
 struct LocalProbeBakeStatus { bool sources_ready{}, capture_complete{}; };
+#endif
 struct LocalProbeOutputs
 {
-    ResourceVersion radiance, prefiltered, irradiance, first_hit_distance, records;
-    ID3D12Resource *radiance_resource{}, *prefiltered_resource{}, *irradiance_resource{},
-        *distance_resource{}, *record_resource{};
-    // Append t0..t4/space23 to existing table32. 5 descriptors, no extra native
-    // root DWORDs. CubeArray RGBA32F/raw, CubeArray RGBA32F/full GGX, SH9 float4,
-    // Texture2DArray R32F distance, StructuredBuffer<8 float4> records (128 bytes).
-    // Disabled exports are typed null SRVs; helpers evaluate global fallback.
+    ResourceVersion radiance, prefiltered, sh, records;
+    ID3D12Resource *radiance_resource{}, *prefiltered_resource{}, *sh_resource{},
+        *record_resource{};
+    // t0..t4/space23: raw/GGX cubes, packed SH/cells, distance, and probe records.
     std::array<D3D12_CPU_DESCRIPTOR_HANDLE, kLocalProbeSrvCount> srvs{};
     render_data::SceneProbeRevisions revisions;
     std::uint32_t probe_count{}, edge{}, mip_count{}, captured_cube_views{}, total_cube_views{};
-    bool enabled{}, update_pending{};
+    bool enabled{}, update_pending{}, grid_baked{};
 };
 struct LocalProbeFramePlan
 {
@@ -110,7 +109,7 @@ struct LocalProbeLayout
     struct Pass { std::uint32_t index{},id{}; };
     std::uint64_t storage_generation{};
     std::array<ResourceHandle,8> imports{};
-    std::array<ResourceVersion,7> outputs{}; // raw, GGX, SH, distance, records, disabled, depth
+    std::array<ResourceVersion,7> outputs{}; // raw, GGX, SH/cells, distance, records, disabled, depth
     std::array<Pass,9> passes{};
     std::vector<LocalProbeSceneRead> scene_reads;
     std::uint32_t pass_count{},capture_first{},capture_count{};
@@ -138,11 +137,13 @@ class LocalProbeSystem
     [[nodiscard]] Result Prepare(ID3D12Device *, D3D12MA::Allocator *,
         std::span<const std::byte> package_bytes, const ShaderReader &, LocalProbeCandidate &) const;
     [[nodiscard]] Result Commit(LocalProbeCandidate &&, const CompletionSet &completed);
+#if defined(HS_OFFLINE_PROBE_BAKER)
     [[nodiscard]] Result PrepareCapture(const ShaderReader &, const CompletionSet &completed);
     [[nodiscard]] Result ExportBakedPackage(RenderGraphQueueExecutor &, TransientResourcePool &,
         std::uint32_t frame_slot, BarrierMode, std::vector<std::byte> &package_bytes,
         const render_data::SceneProbeRevisions *expected_capture = nullptr,
         const render_data::SceneProbeRevisions *compatibility = nullptr);
+#endif
     [[nodiscard]] Result Register(RenderGraphBuilder &, const LocalProbeInputs &, LocalProbeOutputs &);
     [[nodiscard]] Result PrepareFrameRecordData(const LocalProbeInputs &,LocalProbeFramePlan &) const;
     [[nodiscard]] Result Register(RenderGraphBuilder &,const LocalProbeInputs &,
@@ -151,15 +152,15 @@ class LocalProbeSystem
         const LocalProbeLayout &) const noexcept;
     [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const LocalProbeInputs &,
         const LocalProbeFramePlan &,const LocalProbeLayout &,LocalProbeOutputs &);
+#if defined(HS_OFFLINE_PROBE_BAKER)
     // Lets the concrete draw adapter allocate private face bindings only while
     // actual capture can advance. Publication/pause frames need no such upload.
     [[nodiscard]] bool NativeCaptureRequired(const std::shared_ptr<const StaticRenderScene> &,
         render_data::SceneProbeRevisions, const CompletionSet &completed) const noexcept;
     [[nodiscard]] LocalProbeBakeStatus BakeStatus(const CompletionSet &) const noexcept;
-#if defined(HS_OFFLINE_PROBE_BAKER)
     [[nodiscard]] Result BeginOfflineIteration(const CompletionSet &,bool reflections_only);
-#endif
     [[nodiscard]] bool CaptureIdentityPending(const CompletionSet &) const noexcept;
+#endif
     // Submission success records completion requirements; it does not publish
     // new cubes. Register publishes only after those requirements are completed,
     // with exactly the retained scene and revisions still current. This also

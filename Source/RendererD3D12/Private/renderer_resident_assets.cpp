@@ -25,11 +25,11 @@ Result ResidentFailure(std::string message)
 Result ReadResidentPackageDirectory(const std::filesystem::path &path, std::uint64_t product_bytes,
     AssetId asset, render_data::PackageDirectory &directory)
 {
-    constexpr std::size_t kMaxPrefix = 16 * 1024;
     std::ifstream input(path, std::ios::binary | std::ios::ate);
     if (!input || input.tellg() < 0 || static_cast<std::uint64_t>(input.tellg()) != product_bytes)
         return ResidentFailure("Resident package changed before directory read: " + path.string());
-    std::vector<std::byte> prefix(static_cast<std::size_t>(std::min<std::uint64_t>(kMaxPrefix, product_bytes)));
+    std::vector<std::byte> prefix(static_cast<std::size_t>(std::min<std::uint64_t>(
+        render_data::kRenderPackageMetadataPrefixBytes, product_bytes)));
     input.seekg(0);
     if (!input.read(reinterpret_cast<char *>(prefix.data()), static_cast<std::streamsize>(prefix.size())))
         return ResidentFailure("Resident package directory read failed: " + path.string());
@@ -250,7 +250,7 @@ Result D3D12Renderer::Impl::InitializeResidentAssetContext(const RendererConfig 
     if (FAILED(hr)) return HResultFailure("Query resident preparation memory architecture", hr);
     next.resident_preparation_accounting.unified_memory = architecture.UMA != FALSE;
     if (auto result = next.UpdateResidencyBudget(); !result) return result;
-    const auto host_budget = next.residency.Accounting().budget;
+    const auto host_budget = next.residency.HostAdmissionFacts().budget;
     if (!host_budget.host_budget_valid)
         return ResidentFailure("Resident preparation requires an observed host staging budget.");
     next.resident_preparation_accounting.host_staging_budget_bytes = host_budget.host_staging_budget;
@@ -421,138 +421,6 @@ Result D3D12Renderer::Impl::PrepareResidentPublication(Impl &candidate)
     {
         return ResidentFailure("Could not prepare resident decoder publication: " + std::string(error.what()));
     }
-}
-
-void D3D12Renderer::Impl::SwapResidentAssetData(Impl &candidate) noexcept
-{
-    preferred_texture_scene.reset();
-    preferred_texture_materials.fill(false);
-    preferred_texture_initialized = false;
-    candidate.preferred_texture_scene.reset();
-    candidate.preferred_texture_materials.fill(false);
-    candidate.preferred_texture_initialized = false;
-    // Publication has drained all queues. Release view banks with their actual
-    // accounting owner before that manager and the shared catalog are swapped.
-    ResetInactiveClusterViewResources();
-    if (cluster_runtime)
-        for (std::size_t slot = 0; slot < frames.size(); ++slot)
-            if (auto &ticket = cluster_runtime->geometry_records_residency[slot]; ticket)
-            {
-                frames[slot].geometry_draw_records.Reset();
-                static_cast<void>(residency.ReleaseNow(ticket));
-                ticket = {};
-            }
-    using std::swap;
-#define HS_SWAP_RESIDENT(field) swap(field, candidate.field)
-    HS_SWAP_RESIDENT(archer_geometry);
-    HS_SWAP_RESIDENT(gel_projectile_geometry);
-    HS_SWAP_RESIDENT(procedural_geometry);
-    HS_SWAP_RESIDENT(monster_assets);
-    HS_SWAP_RESIDENT(monster_reduced_geometry);
-    HS_SWAP_RESIDENT(monster_skin_matrices);
-    HS_SWAP_RESIDENT(archer_clips);
-    HS_SWAP_RESIDENT(archer_owned_character);
-    HS_SWAP_RESIDENT(archer_compiled_animation);
-    HS_SWAP_RESIDENT(archer_packed_transforms);
-    HS_SWAP_RESIDENT(archer_named_packed_transforms);
-    HS_SWAP_RESIDENT(archer_named_animations);
-    HS_SWAP_RESIDENT(archer_parents);
-    HS_SWAP_RESIDENT(archer_inverse_bind_matrices);
-    HS_SWAP_RESIDENT(archer_transforms);
-    HS_SWAP_RESIDENT(archer_upper_body_weights);
-    HS_SWAP_RESIDENT(archer_support_vertices);
-    HS_SWAP_RESIDENT(archer_bone_count);
-    HS_SWAP_RESIDENT(archer_material_count);
-    HS_SWAP_RESIDENT(archer_material_bindings);
-    HS_SWAP_RESIDENT(archer_ground_offset);
-    HS_SWAP_RESIDENT(archer_diffuse);
-    HS_SWAP_RESIDENT(archer_normal);
-    HS_SWAP_RESIDENT(monster_basecolor);
-    HS_SWAP_RESIDENT(monster_emissive);
-    HS_SWAP_RESIDENT(monster_ram);
-    HS_SWAP_RESIDENT(family_diffuse);
-    HS_SWAP_RESIDENT(family_normal);
-    HS_SWAP_RESIDENT(vfx_masks);
-    HS_SWAP_RESIDENT(vfx_sprite_count);
-    HS_SWAP_RESIDENT(vfx_mesh_atlas);
-    HS_SWAP_RESIDENT(vfx_mesh_vertex_counts);
-    HS_SWAP_RESIDENT(vfx_mesh_transverse_radii);
-    HS_SWAP_RESIDENT(vfx_mesh_longitudinal_bounds);
-    HS_SWAP_RESIDENT(vfx_gradient);
-    HS_SWAP_RESIDENT(vfx_gradient_rows);
-    HS_SWAP_RESIDENT(ribbon_detail);
-    HS_SWAP_RESIDENT(vfx_authored_mask);
-    HS_SWAP_RESIDENT(vfx_noise_basis);
-    HS_SWAP_RESIDENT(vfx_noise_volume);
-    HS_SWAP_RESIDENT(vfx_smoke_pos);
-    HS_SWAP_RESIDENT(vfx_smoke_neg);
-    HS_SWAP_RESIDENT(vfx_smoke_motion);
-    HS_SWAP_RESIDENT(vfx_flow_curl);
-    HS_SWAP_RESIDENT(vfx_stbn_scalar);
-    HS_SWAP_RESIDENT(vfx_fracture_decals);
-    HS_SWAP_RESIDENT(vfx_organic_decals);
-    HS_SWAP_RESIDENT(vfx_curve_lut);
-    HS_SWAP_RESIDENT(terrain_slot_static_sections_valid);
-    HS_SWAP_RESIDENT(terrain_tile_counts);
-    HS_SWAP_RESIDENT(static_terrain_sections);
-    HS_SWAP_RESIDENT(terrain_scene);
-    HS_SWAP_RESIDENT(terrain_plane_backings);
-    HS_SWAP_RESIDENT(terrain_plane_stream_ids);
-    HS_SWAP_RESIDENT(terrain_plane_needed);
-    HS_SWAP_RESIDENT(terrain_frame_mips);
-    HS_SWAP_RESIDENT(terrain_descriptor_banks);
-    HS_SWAP_RESIDENT(terrain_tiles);
-    HS_SWAP_RESIDENT(terrain_generation_parameters);
-    HS_SWAP_RESIDENT(terrain_generation_parameters_valid);
-    HS_SWAP_RESIDENT(terrain_parameters_match);
-    HS_SWAP_RESIDENT(terrain_parameters_changed);
-#if defined(HS_DEVELOPMENT_TOOLS)
-    HS_SWAP_RESIDENT(terrain_archive_reads);
-#endif
-    HS_SWAP_RESIDENT(terrain_frame_sections);
-    HS_SWAP_RESIDENT(terrain_frame_section_counts);
-    HS_SWAP_RESIDENT(terrain_frame_has_meadow);
-    HS_SWAP_RESIDENT(terrain_frame_meadow_upper);
-    HS_SWAP_RESIDENT(static_terrain_source_indices);
-    HS_SWAP_RESIDENT(dynamic_terrain_indices);
-    HS_SWAP_RESIDENT(terrain_archive_digest);
-    HS_SWAP_RESIDENT(terrain_planes_archive_digest);
-    HS_SWAP_RESIDENT(terrain_static_pages_current);
-    HS_SWAP_RESIDENT(terrain_retry_budget_bytes);
-    HS_SWAP_RESIDENT(environment_textures);
-    HS_SWAP_RESIDENT(environment_texture_ids);
-    HS_SWAP_RESIDENT(environment_texture_descriptions);
-    HS_SWAP_RESIDENT(environment_material_textures);
-    HS_SWAP_RESIDENT(environment_material_bindings);
-    HS_SWAP_RESIDENT(environment_material_variants);
-    HS_SWAP_RESIDENT(environment_meshes);
-    HS_SWAP_RESIDENT(environment_variant_radii);
-    HS_SWAP_RESIDENT(environment_cluster_catalogs);
-    HS_SWAP_RESIDENT(environment_fallback_residency);
-    HS_SWAP_RESIDENT(environment_geometry_streams);
-    HS_SWAP_RESIDENT(retired_streaming_textures);
-    HS_SWAP_RESIDENT(cluster_runtime);
-    HS_SWAP_RESIDENT(hlod_runtime);
-    HS_SWAP_RESIDENT(residency);
-    HS_SWAP_RESIDENT(streaming);
-    HS_SWAP_RESIDENT(material_headers);
-    HS_SWAP_RESIDENT(material_surface_layouts);
-    HS_SWAP_RESIDENT(material_sidecar_layout);
-    HS_SWAP_RESIDENT(material_parameters);
-    HS_SWAP_RESIDENT(material_parameter_slot_count);
-    HS_SWAP_RESIDENT(material_parameter_slots);
-    HS_SWAP_RESIDENT(material_parameter_candidate_slots);
-    HS_SWAP_RESIDENT(material_parameter_bases);
-    HS_SWAP_RESIDENT(material_parameter_counts);
-    HS_SWAP_RESIDENT(material_parameter_revisions);
-    HS_SWAP_RESIDENT(generation_material_parameters);
-    HS_SWAP_RESIDENT(generation_material_parameters_valid);
-    HS_SWAP_RESIDENT(material_parameters_match_generation);
-    HS_SWAP_RESIDENT(material_parameter_layouts);
-    HS_SWAP_RESIDENT(mesh_material_bindings_gpu);
-    HS_SWAP_RESIDENT(character_binding_ranges);
-    HS_SWAP_RESIDENT(environment_brdf_lut);
-#undef HS_SWAP_RESIDENT
 }
 
 void D3D12Renderer::Impl::PublishResidentAssetDescriptors(const Impl &candidate) noexcept

@@ -1,4 +1,5 @@
 #include "renderer_probe.hpp"
+#include "renderer_probe_grid_storage.hpp"
 #include "d3d12_resources.hpp"
 #include "renderer_startup.hpp"
 
@@ -6,6 +7,7 @@
 #include <hs/render_data/lighting_probe.hpp>
 
 #include <D3D12MemAlloc.h>
+#include <DirectXPackedVector.h>
 #include <wrl/client.h>
 
 #include <algorithm>
@@ -45,11 +47,11 @@ Result Allocate(D3D12MA::Allocator *allocator,D3D12_HEAP_TYPE heap,
         IID_PPV_ARGS(target.resource.ReleaseAndGetAddressOf())); });
     return FAILED(native)?NativeFailure("Allocate lighting probe resource",native):Result::Success();
 }
-D3D12_RESOURCE_DESC CubeDescription(const render_data::TextureDescription &cube)
+D3D12_RESOURCE_DESC CubeDescription(const render_data::TextureDescription &cube,DXGI_FORMAT format)
 {
     D3D12_RESOURCE_DESC d{}; d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
     d.Width=cube.width; d.Height=cube.height; d.DepthOrArraySize=6;
-    d.MipLevels=static_cast<UINT16>(cube.mip_count); d.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+    d.MipLevels=static_cast<UINT16>(cube.mip_count); d.Format=format;
     d.SampleDesc.Count=1; return d;
 }
 D3D12_RESOURCE_DESC BufferDescription(std::uint64_t size)
@@ -77,6 +79,65 @@ std::uint64_t Footprints(ID3D12Device *device,const D3D12_RESOURCE_DESC &descrip
     return end;
 }
 } // namespace
+
+Result SelectProbeCubeStorage(ID3D12Device *device,float max_radiance,DXGI_FORMAT &format)
+{
+    format=max_radiance<=65504.f?DXGI_FORMAT_R16G16B16A16_FLOAT:DXGI_FORMAT_R32G32B32A32_FLOAT;
+    for(;;)
+    {
+        D3D12_FEATURE_DATA_FORMAT_SUPPORT support{format};
+        const auto queried=device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,&support,sizeof(support));
+        if(FAILED(queried)) return NativeFailure("Query HDR probe format",queried);
+        if((support.Support1&D3D12_FORMAT_SUPPORT1_TEXTURECUBE) && (support.Support1&D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE))
+            return Result::Success();
+        if(format==DXGI_FORMAT_R32G32B32A32_FLOAT)
+            return Failure(ErrorCode::TaskFailed,"HDR cubemap sampling is unavailable.");
+        format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+    }
+}
+
+void PackProbeCubeRow(std::byte *destination,const std::byte *source,std::uint32_t width,DXGI_FORMAT format)
+{
+    if(format==DXGI_FORMAT_R32G32B32A32_FLOAT)
+    {
+        std::memcpy(destination,source,std::size_t(width)*16);
+        return;
+    }
+    // Package payloads can be unaligned; convert bounded aligned blocks without a second allocation.
+    alignas(16) std::array<float,64*4> block;
+    for(std::uint32_t x=0;x<width;x+=64)
+    {
+        const auto count=std::min(64u,width-x)*4;
+        std::memcpy(block.data(),source+std::size_t(x)*16,std::size_t(count)*sizeof(float));
+        DirectX::PackedVector::XMConvertFloatToHalfStream(
+            reinterpret_cast<DirectX::PackedVector::HALF *>(destination+std::size_t(x)*8),sizeof(DirectX::PackedVector::HALF),
+            block.data(),sizeof(float),count);
+    }
+}
+
+void PackProbeGrid(std::byte *destination,
+    const render_data::SceneIrradianceGrid &grid, std::span<const std::byte> coefficients)
+{
+    const auto nodes = grid.NodeCount();
+    for (std::size_t node = 0; node < nodes; ++node)
+    {
+        std::array<Float4, render_data::kSceneProbeShCount> source;
+        // Wire payloads may be unaligned, and their unused W channels are not sampled.
+        std::memcpy(source.data(), coefficients.data() + node * sizeof(source), sizeof(source));
+        const auto packed = renderer_detail::PackProbeGridSh(source);
+        std::memcpy(destination + node * sizeof(packed), packed.data(), sizeof(packed));
+    }
+}
+void PackProbeGridCells(std::byte *destination, std::span<const render_data::SceneProbeCell> cells)
+{
+    for (std::size_t i = 0; i < cells.size(); ++i)
+    {
+        auto *row = destination + i * 80u;
+        std::memset(row, 0, 80);
+        std::memcpy(row, cells[i].reachable.data(), 64);
+        std::memcpy(row + 64, cells[i].reflections.data(), 8);
+    }
+}
 
 struct LightingProbeStorage
 {
@@ -126,14 +187,11 @@ Result LightingProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *all
     try
     {
         const auto package=renderer_detail::MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadLightingProbePackage(bytes,MakeAssetId(kProduct)); });
-        D3D12_FEATURE_DATA_FORMAT_SUPPORT support{DXGI_FORMAT_R32G32B32A32_FLOAT};
-        const auto queried=device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,&support,sizeof(support));
-        if(FAILED(queried)) return NativeFailure("Query HDR probe format",queried);
-        if(!(support.Support1&D3D12_FORMAT_SUPPORT1_TEXTURECUBE) || !(support.Support1&D3D12_FORMAT_SUPPORT1_SHADER_SAMPLE))
-            return Failure(ErrorCode::TaskFailed,"RGBA32F cubemap sampling is unavailable.");
+        DXGI_FORMAT cube_format;
+        if(auto result=SelectProbeCubeStorage(device,package.max_radiance,cube_format);!result) return result;
         auto storage=std::make_shared<LightingProbeStorage>(); storage->device=device; storage->allocator=allocator;
-        const auto rawDescription=CubeDescription(package.radiance.description);
-        const auto ggxDescription=CubeDescription(package.prefiltered.description);
+        const auto rawDescription=CubeDescription(package.radiance.description,cube_format);
+        const auto ggxDescription=CubeDescription(package.prefiltered.description,cube_format);
         if(auto result=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,rawDescription,D3D12_RESOURCE_STATE_COMMON,storage->radiance);!result) return result;
         if(auto result=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,ggxDescription,D3D12_RESOURCE_STATE_COMMON,storage->prefiltered);!result) return result;
         if(auto result=Allocate(allocator,D3D12_HEAP_TYPE_DEFAULT,BufferDescription(144),D3D12_RESOURCE_STATE_COMMON,storage->irradiance);!result) return result;
@@ -153,8 +211,8 @@ Result LightingProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *all
             {
                 const auto &source=cube.subresources[i]; const auto &footprint=upload.footprints[i];
                 for(std::uint32_t y=0;y<source.height;++y)
-                    std::memcpy(mapped+footprint.Offset+std::size_t(y)*footprint.Footprint.RowPitch,
-                        source.bytes.data()+std::size_t(y)*source.row_pitch,source.row_pitch);
+                    PackProbeCubeRow(mapped+footprint.Offset+std::size_t(y)*footprint.Footprint.RowPitch,
+                        source.bytes.data()+std::size_t(y)*source.row_pitch,source.width,cube_format);
             }
         };
         writeCube(package.radiance,storage->raw_upload); writeCube(package.prefiltered,storage->ggx_upload);
@@ -168,7 +226,7 @@ Result LightingProbeSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *all
         const auto created=device->CreateDescriptorHeap(&heap,IID_PPV_ARGS(storage->descriptors.ReleaseAndGetAddressOf()));
         if(FAILED(created)) return NativeFailure("Create lighting probe SRVs",created);
         storage->descriptor_stride=device->GetDescriptorHandleIncrementSize(heap.Type);
-        D3D12_SHADER_RESOURCE_VIEW_DESC view{}; view.Format=DXGI_FORMAT_R32G32B32A32_FLOAT;
+        D3D12_SHADER_RESOURCE_VIEW_DESC view{}; view.Format=cube_format;
         view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURECUBE; view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         view.TextureCube.MipLevels=1; device->CreateShaderResourceView(storage->radiance.resource.Get(),&view,storage->Srv(0));
         view.TextureCube.MipLevels=package.prefiltered.description.mip_count;

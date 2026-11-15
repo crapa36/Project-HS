@@ -124,7 +124,6 @@ class HdrPostSystem
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &completed);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
     // Called only after all old submissions have reliably completed.
-    void SwapState(HdrPostSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
     [[nodiscard]] Result RegisterMotionImpl(RenderGraphBuilder &, const HdrPostInputs &,
         HdrPostConstants, HdrPostOutputs &, HdrPostMotionLayout *, const HdrPostMotionLayout *);

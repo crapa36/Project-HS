@@ -480,6 +480,9 @@ struct HsTerrainPlaneMip
 };
 StructuredBuffer<HsTerrainPlaneMip> HsTerrainPlaneMips : register(HS_TERRAIN_JOIN(t,HS_TERRAIN_MIP_SRV),HS_TERRAIN_JOIN(space,HS_TERRAIN_PAGE_SPACE));
 Texture2D<float4> HsTerrainPlanes[HS_TERRAIN_PAGE_PLANE_CAPACITY] : register(HS_TERRAIN_JOIN(t,HS_TERRAIN_PLANE_SRV),HS_TERRAIN_JOIN(space,HS_TERRAIN_PAGE_SPACE));
+#if !defined(HS_LOCAL_PROBE_CAPTURE) && !defined(HS_TERRAIN_PAGE_BAKE)
+RWBuffer<uint> HsTerrainMipRequests : register(HS_TERRAIN_JOIN(u,HS_TERRAIN_REQUEST_UAV),HS_TERRAIN_JOIN(space,HS_TERRAIN_PAGE_SPACE));
+#endif
 
 float4 TerrainPageSample(SamplerState page_sampler,uint plane,float2 uv,float2 gx,float2 gy,float clamp_mip)
 {
@@ -604,6 +607,15 @@ HsMaterialTerrainResult HsMaterialTerrainPage(
         const float xx=dot(tx,tx),xy=dot(tx,ty),yy=dot(ty,ty);
         const float major=sqrt(.5*(xx+yy+length(float2(xx-yy,2*xy))));
         const float minor=abs(tx.x*ty.y-tx.y*ty.x)/max(major,1e-12);
+        const float footprint_mip=floor(log2(max(minor*.5,1.0)));
+        const uint requested_mip=min(uint(footprint_mip),HS_TERRAIN_REQUEST_MIP_BITS-1u);
+#if !defined(HS_LOCAL_PROBE_CAPTURE) && !defined(HS_TERRAIN_PAGE_BAKE)
+        uint requested_bits=1u<<requested_mip;
+        if(detail_weight>0) requested_bits|=requested_bits<<HS_TERRAIN_REQUEST_MIP_BITS;
+        const uint request_index=slice/3u;
+        if((HsTerrainMipRequests[request_index]&requested_bits)!=requested_bits)
+            InterlockedOr(HsTerrainMipRequests[request_index],requested_bits);
+#endif
         const float2 edge=min(uv,1-uv)*extent;
         const float parallax_tile=TerrainTileSize(3);
         const float3 parallax=TerrainParallaxFootprint(dx.xz/parallax_tile,dy.xz/parallax_tile,3,
@@ -615,7 +627,7 @@ HsMaterialTerrainResult HsMaterialTerrainPage(
         // Section indices name the admitted draw; apron contains its own
         // material continuation beyond the receiver rectangle.
         // Texture quality selects stored mips without changing the source route.
-        const float wanted_mip=max(float(color_mip.qualityMipPlusOne)-1.0,floor(log2(max(minor*.5,1.0))));
+        const float wanted_mip=max(float(color_mip.qualityMipPlusOne)-1.0,footprint_mip);
         supported=color_mip.qualityMipPlusOne!=0 && base_mip.qualityMipPlusOne!=0 && (detail_weight<=0 || weight_mip.qualityMipPlusOne!=0) &&
             float(resident)<=wanted_mip && minor>=2.0*(extent.x/4096.0) && all(edge>=support);
     }

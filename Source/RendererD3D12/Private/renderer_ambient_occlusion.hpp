@@ -23,6 +23,10 @@ struct AllocationResource;
 #define HS_AO_NATIVE
 #include "../../../Content/Shaders/ambient_occlusion_abi.hlsli"
 #undef HS_AO_NATIVE
+#include "../../../Content/Shaders/ambient_occlusion_programs.hlsli"
+#define HS_AO_PRODUCT(role, family, file, entry, target) inline constexpr char kAo##role##ShaderProduct[] = "render/shader/" file;
+HS_AO_PROGRAMS(HS_AO_PRODUCT)
+#undef HS_AO_PRODUCT
 
 struct AmbientOcclusionGuide
 {
@@ -100,7 +104,7 @@ class AmbientOcclusionSystem
         const AmbientOcclusionLayout &) const noexcept;
     [[nodiscard]] bool MatchesShape(const AmbientOcclusionLayout &, bool reset_history, QueueHint) const noexcept;
     [[nodiscard]] bool MatchesShape(const AmbientOcclusionLayout &, bool reset_history, QueueHint,
-        ViewExtent active, const DirectX::XMFLOAT4X4 &inverse_projection) const noexcept;
+        ViewExtent active, const DirectX::XMFLOAT4 &view_depth) const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &graph,
         const CompletionSet &completion, bool success);
     void ResetHistory() noexcept;
@@ -110,7 +114,6 @@ class AmbientOcclusionSystem
     [[nodiscard]] std::array<const AllocationResource *, 5> DiagnosticResources() const noexcept;
 
     // Called only after all old submissions have reliably completed.
-    void SwapState(AmbientOcclusionSystem &other) noexcept { impl_.swap(other.impl_); }
   private:
     [[nodiscard]] Result RegisterFrame(RenderGraphBuilder &, const AmbientOcclusionInputs &,
         AmbientOcclusionConstants, AmbientOcclusionOutputs &,

@@ -93,7 +93,6 @@ class DecalSurfaceSystem
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &, const CompletionSet &, bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
-    void SwapState(DecalSurfaceSystem &other) noexcept { targets_.swap(other.targets_); }
     [[nodiscard]] std::array<const AllocationResource *, kDecalSurfaceUavCount> DiagnosticResources() const noexcept;
   private:
     [[nodiscard]] Result RegisterFrame(RenderGraphBuilder &,const DecalSurfaceInputs &,

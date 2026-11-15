@@ -35,7 +35,6 @@ struct RendererOptions
     GraphicsQuality foliage_quality{GraphicsQuality::Medium};
     GraphicsQuality material_quality{GraphicsQuality::Medium};
     GraphicsOptionalQuality pom_quality{GraphicsOptionalQuality::Medium};
-    GraphicsQuality lighting_quality{GraphicsQuality::Medium};
     GraphicsAoMode ao_mode{GraphicsAoMode::GTAO};
     GraphicsQuality ao_quality{GraphicsQuality::Medium};
     bool contact_shadows{true};

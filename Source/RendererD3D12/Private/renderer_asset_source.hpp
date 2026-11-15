@@ -5,9 +5,9 @@
 #include <hs/core/sha256.hpp>
 #include <hs/render_data/render_bulk.hpp>
 
+#include <atomic>
 #include <array>
 #include <filesystem>
-#include <fstream>
 #include <limits>
 #include <optional>
 #include <span>
@@ -36,6 +36,13 @@ struct PackedRendererAsset
 {
     std::shared_ptr<const ShippedContentOwner> owner;
     render_data::BulkRange range;
+};
+
+struct ImmutableAssetRange
+{
+    std::uint64_t offset{}; // Relative to the product range in the source.
+    std::uint32_t byte_count{};
+    std::array<std::byte, 32> digest{};
 };
 
 // The source kind is selected by content composition. Loose products carry a
@@ -199,27 +206,57 @@ struct RendererAssetSource
         return Result::Success();
     }
 
+    // Offsets are relative to this product, independent of its pack placement.
+    [[nodiscard]] Result ReadRanges(std::span<const ImmutableAssetRange> ranges,
+        std::span<std::byte> output, const std::atomic<bool> *cancelled = nullptr) const
+    {
+        std::uint64_t product_bytes{};
+        std::uint64_t product_base{};
+        const ShippedContentOwner *owner{};
+        ShippedContentOwner loose_owner;
+        if (IsPacked())
+        {
+            const auto &packed = Packed();
+            if (auto result = ByteCount(product_bytes); !result) return result;
+            product_base = packed.range.offset;
+            owner = packed.owner.get();
+        }
+        else
+        {
+            const auto &loose = Loose();
+            if (auto result = ShippedContentOwner::Open(loose.path, loose_owner); !result) return result;
+            product_bytes = loose_owner.Size();
+            owner = &loose_owner;
+            if (loose.admitted && product_bytes != loose.admitted->byte_count)
+                return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Loose product changed after admission.");
+        }
+
+        std::size_t destination{};
+        // Cancelled range batches leave partial output for the request owner to discard.
+        for (const auto &range : ranges)
+        {
+            if (cancelled && cancelled->load(std::memory_order_acquire))
+                return Result::Success();
+            if (!range.byte_count || range.offset > product_bytes ||
+                range.byte_count > product_bytes - range.offset || destination > output.size() ||
+                range.byte_count > output.size() - destination)
+                return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Sample range exceeds its product or output.");
+            if (auto result = owner->ReadVerified(product_base + range.offset,
+                    output.subspan(destination, range.byte_count), range.digest); !result) return result;
+            destination += range.byte_count;
+        }
+        if (destination != output.size())
+            return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Sample ranges do not fill their output.");
+        return Result::Success();
+    }
+
     [[nodiscard]] Result ReadRange(std::uint64_t offset, std::span<std::byte> output,
         const std::array<std::byte, 32> &digest) const
     {
-        std::uint64_t product_bytes{};
-        if (auto result = ByteCount(product_bytes); !result) return result;
-        const auto begin = IsPacked() ? Packed().range.offset : 0;
-        if ((IsPacked() && product_bytes != Packed().range.byte_count) || offset < begin ||
-            offset - begin > product_bytes || output.size() > product_bytes - (offset - begin))
-            return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Sample range exceeds its admitted product.");
-        if (IsPacked()) return Packed().owner->ReadVerified(offset, output, digest);
-        const auto &loose = Loose();
-        std::ifstream stream(loose.path, std::ios::binary | std::ios::ate);
-        if (!stream || stream.tellg() < 0 || static_cast<std::uint64_t>(stream.tellg()) != product_bytes ||
-            offset > static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()) ||
-            output.size() > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()))
-            return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Loose sample file changed after admission.");
-        stream.seekg(static_cast<std::streamoff>(offset));
-        stream.read(reinterpret_cast<char *>(output.data()), static_cast<std::streamsize>(output.size()));
-        if (!stream || stream.gcount() != static_cast<std::streamsize>(output.size()) || Sha256(output) != digest)
-            return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Loose sample range digest or read failed.");
-        return Result::Success();
+        if (output.size() > std::numeric_limits<std::uint32_t>::max())
+            return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Sample range exceeds the immutable range size limit.");
+        const std::array ranges{ImmutableAssetRange{offset, static_cast<std::uint32_t>(output.size()), digest}};
+        return ReadRanges(ranges, output);
     }
 };
 } // namespace hs

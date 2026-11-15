@@ -4,7 +4,7 @@
 #include <hs/core/cooked_format.hpp>
 
 #include <bit>
-#include <numeric>
+#include <memory>
 #include <stdexcept>
 #include <tuple>
 
@@ -293,11 +293,13 @@ Result D3D12Renderer::Impl::PumpClusterStreaming(std::uint32_t frame_slot)
                 const D3D12_RANGE read{0, total_bytes};
                 const auto hr = cut.readback.resource->Map(0, &read, &mapped);
                 if (FAILED(hr)) return HResultFailure("Map cluster demand/status readback", hr);
-                std::vector<std::uint32_t> demand(runtime.cpu.pages.size());
-                std::memcpy(demand.data(), mapped, demand_bytes);
+                auto *resource = cut.readback.resource.Get();
+                const auto unmap = [resource](void *) {
+                    const D3D12_RANGE no_write{};
+                    resource->Unmap(0, &no_write);
+                };
+                const std::unique_ptr<void, decltype(unmap)> mapping(mapped, unmap);
                 std::memcpy(&cut.last_status, static_cast<const std::byte *>(mapped) + demand_bytes, sizeof(cut.last_status));
-                const D3D12_RANGE no_write{};
-                cut.readback.resource->Unmap(0, &no_write);
                 cut.readback_pending = false;
                 const auto &status = cut.last_status;
                 if (status.reserved || status.candidate_count != cut.candidate_count ||
@@ -312,9 +314,13 @@ Result D3D12Renderer::Impl::PumpClusterStreaming(std::uint32_t frame_slot)
                 cut.required_capacity = std::max(cut.required_capacity, status.required_records_low);
                 if (status.failure_flags && status.committed_records)
                     return StreamFailure("GPU cluster cut reported a partial capacity transaction.");
-                for (std::uint32_t logical = 0; logical < demand.size(); ++logical)
-                    if (demand[logical])
-                        if (auto result = DemandClusterPage(logical, runtime.generation, demand[logical]); !result) return result;
+                for (std::uint32_t logical = 0; logical < runtime.cpu.pages.size(); ++logical)
+                {
+                    std::uint32_t demand{};
+                    std::memcpy(&demand, static_cast<const std::byte *>(mapped) + std::size_t(logical) * sizeof(demand), sizeof(demand));
+                    if (demand)
+                        if (auto result = DemandClusterPage(logical, runtime.generation, demand); !result) return result;
+                }
             }
         return Result::Success();
     };
@@ -358,23 +364,30 @@ Result D3D12Renderer::Impl::PumpClusterStreaming(std::uint32_t frame_slot)
     }
     static_cast<void>(residency.Collect(completed));
     static_cast<void>(streaming.Collect(completed));
-    std::vector<std::size_t> order(runtime.streams.size());
-    std::iota(order.begin(), order.end(), 0);
+    auto &order = runtime.streaming_order;
+    order.clear();
+    const auto can_advance = [](const ClusterPageStream &stream) {
+        return stream.request && !stream.pinned && !stream.retiring && !stream.upload_pending && !stream.upload_submitted;
+    };
+    std::array<bool, kClusterRuntimeCatalogs + 1> reading{};
+    for (std::size_t index = 0; index < runtime.streams.size(); ++index)
+    {
+        const auto &stream = runtime.streams[index];
+        if (const auto *request = streaming.Find(stream.request);
+            request && request->state == StreamingPageState::Reading)
+            reading[stream.catalog] = true;
+        if (can_advance(stream)) order.push_back(index);
+    }
     std::sort(order.begin(), order.end(), [&](auto a, auto b) {
         const auto &left = runtime.streams[a]; const auto &right = runtime.streams[b];
         if (left.hlod_admitted != right.hlod_admitted) return left.hlod_admitted;
         if (left.last_demand_epoch != right.last_demand_epoch) return left.last_demand_epoch > right.last_demand_epoch;
         return left.priority == right.priority ? a < b : left.priority > right.priority;
     });
-    std::array<bool, kClusterRuntimeCatalogs + 1> reading{};
-    for (const auto &stream : runtime.streams)
-        if (const auto *request = streaming.Find(stream.request);
-            request && request->state == StreamingPageState::Reading)
-            reading[stream.catalog] = true;
     for (const auto logical : order)
     {
         auto &stream = runtime.streams[logical];
-        if (!stream.request || stream.pinned || stream.retiring || stream.upload_pending || stream.upload_submitted) continue;
+        if (!can_advance(stream)) continue;
         const auto *request = streaming.Find(stream.request);
         if (!request) return StreamFailure("Hierarchy stream lost its request state.");
         if (request->state == StreamingPageState::Requested)

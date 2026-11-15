@@ -25,7 +25,6 @@ inline constexpr std::uint32_t kClusterCutSrvCount = 11;
 inline constexpr std::uint32_t kClusterCutUavCount = 18;
 inline constexpr std::uint32_t kClusterCutDescriptorCount = 30;
 inline constexpr std::uint32_t kClusterCutClearOffset = kClusterCutDescriptorCount;
-inline constexpr std::uint32_t kClusterCutBankStride = kClusterCutClearOffset + kClusterCutUavCount;
 inline constexpr std::uint32_t kClusterOcclusionPhases = 2;
 inline constexpr std::uint32_t kClusterConstantStride = 768; // 688 bytes, CBV aligned
 inline constexpr std::uint32_t kClusterOcclusionConstantStride = 256;
@@ -114,6 +113,10 @@ struct ClusterCutBuffers
     bool descriptors_initialized{};
     GpuClusterCutStatus last_status{};
 };
+inline constexpr std::array kClusterCutClearMembers{&ClusterCutBuffers::demand, &ClusterCutBuffers::status,
+    &ClusterCutBuffers::command_counts, &ClusterCutBuffers::history_bits};
+inline constexpr std::uint32_t kClusterCutClearCount = static_cast<std::uint32_t>(kClusterCutClearMembers.size());
+inline constexpr std::uint32_t kClusterCutBankStride = kClusterCutClearOffset + kClusterCutClearCount;
 struct ClusterFrameRuntime
 {
     AllocationResource pages, page_upload;
@@ -157,6 +160,7 @@ struct ClusterRuntimeState : ClusterViewRuntime
     ClusterGpuTables cpu;
     std::array<ClusterCatalogRange, kClusterRuntimeCatalogs> catalogs;
     std::vector<ClusterPageStream> streams;
+    std::vector<std::size_t> streaming_order;
     // Geometry records are shared execution scratch, so their growth tickets
     // stay with the shared owner rather than exchanging with view histories.
     std::array<ResidencyTicket, kClusterRuntimeFrames> geometry_records_residency;
@@ -178,7 +182,7 @@ struct ClusterRuntimeState : ClusterViewRuntime
 // MarkClusterFrameUse carries ALL queue uses of snapshots/records/cut refs.
 // A frame may be rewritten/grown only after its previous completion finishes.
 // Each of two phase shader tables contains 11 SRVs followed by 18 UAVs and one
-// HLOD leaf export SRV for root4; each bank appends 18 raw clear UAVs outside
+// HLOD leaf export SRV for root4; each bank reserves four raw clear UAVs outside
 // the shader ABI. t9 is that phase's HZB; t10 is the immutable representation
 // page list. t5/t6/t7/t8 are previous
 // membership/generations/pages/status; u12/u13 are current membership/generations.

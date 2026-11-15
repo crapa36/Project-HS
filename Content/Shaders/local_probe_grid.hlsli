@@ -11,8 +11,7 @@ struct HsLocalProbeRecord
     float4 parameters; // GGX maximum mip, cube index, enabled, active probe count.
     float4 reserved0,reserved1;
 };
-StructuredBuffer<float4> HsLocalProbeCosineSh : register(t2, space23);
-// SH9 rows are followed by five float4-sized cell records (packed as uint32).
+StructuredBuffer<float4> HsLocalProbeData : register(t2, space23);
 StructuredBuffer<HsLocalProbeRecord> HsLocalProbeRecords : register(t4, space23);
 
 float HsLocalProbeIsotropicBasis()
@@ -40,21 +39,31 @@ HsProbeGridCell HsLocateProbeCell(float3 world)
     c.cell=min(uint3(position),c.dims-2u);
     c.fraction=position-float3(c.cell);
     const uint index=c.cell.x+(c.dims.x-1u)*(c.cell.y+(c.dims.y-1u)*c.cell.z);
-    c.metadata=uint(header.reserved1.w)*9u+index*5u;
+    c.metadata=7u*c.dims.x*c.dims.y*c.dims.z+index*5u;
     return c;
 }
-void HsLocalProbeGridIrradianceComponents(HsProbeGridCell c,float basis[9],bool need_back,
-    out float3 front,out float3 back)
+void HsAccumulateProbeShBlock(inout float3 value,float4 row,uint block,float basis[9],float odd_sign)
+{
+    switch(block)
+    {
+    case 0: value+=row.xyz*basis[0]; value.x+=row.w*(basis[1]*odd_sign); break;
+    case 1: value.yz+=row.xy*(basis[1]*odd_sign); value.xy+=row.zw*(basis[2]*odd_sign); break;
+    case 2: value.z+=row.x*(basis[2]*odd_sign); value+=row.yzw*(basis[3]*odd_sign); break;
+    case 3: value+=row.xyz*basis[4]; value.x+=row.w*basis[5]; break;
+    case 4: value.yz+=row.xy*basis[5]; value.xy+=row.zw*basis[6]; break;
+    case 5: value.z+=row.x*basis[6]; value+=row.yzw*basis[7]; break;
+    case 6: value+=row.xyz*basis[8]; break;
+    }
+}
+void HsLocalProbeGridIrradianceComponents(HsProbeGridCell c,float basis[9],
+    bool need_back,out float3 front,out float3 back)
 {
     const uint3 sub=min(uint3(c.fraction*4),3u);
     const uint index=sub.x+4*sub.y+16*sub.z;
-    const uint4 packed=asuint(HsLocalProbeCosineSh[c.metadata+index/16u]);
+    const uint4 packed=asuint(HsLocalProbeData[c.metadata+index/16u]);
     const uint mask=(packed[(index%16u)/4u]>>(8u*(index%4u)))&255u;
     front=0; back=0;
     if(!mask) return; // No reachable samples means no diffuse sky through walls.
-    const uint first_row=9u*(c.cell.x+c.dims.x*(c.cell.y+c.dims.y*c.cell.z));
-    const uint row_y=9u*c.dims.x;
-    const uint row_z=9u*c.dims.x*c.dims.y;
     float total=0;
     [unroll] for(uint corner=0;corner<8;++corner)
     {
@@ -63,13 +72,14 @@ void HsLocalProbeGridIrradianceComponents(HsProbeGridCell c,float basis[9],bool 
         const float3 w=lerp(1-c.fraction,c.fraction,float3(bit));
         const float weight=w.x*w.y*w.z;
         if(weight==0) continue;
-        const uint row=first_row+9u*bit.x+row_y*bit.y+row_z*bit.z;
+        const uint3 node=c.cell+bit;
+        const uint first=7u*(node.x+c.dims.x*(node.y+c.dims.y*node.z));
         float3 front_value=0,back_value=0;
-        [unroll] for(uint k=0;k<9;++k)
+        [unroll] for(uint block=0;block<7;++block)
         {
-            const float3 coefficient=HsLocalProbeCosineSh[row+k].rgb;
-            front_value+=basis[k]*coefficient;
-            if(need_back) back_value+=(k>0u && k<4u ? -basis[k] : basis[k])*coefficient;
+            const float4 row=HsLocalProbeData[first+block];
+            HsAccumulateProbeShBlock(front_value,row,block,basis,1.0);
+            if(need_back) HsAccumulateProbeShBlock(back_value,row,block,basis,-1.0);
         }
         front+=weight*front_value;
         if(need_back) back+=weight*back_value;
@@ -84,7 +94,8 @@ float3 HsLocalProbeGridIrradiance(HsProbeGridCell c,float basis[9])
     HsLocalProbeGridIrradianceComponents(c,basis,false,front,back);
     return front;
 }
-void HsLocalProbeGridIrradiancePair(HsProbeGridCell c,float basis[9],out float3 front,out float3 back)
+void HsLocalProbeGridIrradiancePair(HsProbeGridCell c,float basis[9],
+    out float3 front,out float3 back)
 {
     HsLocalProbeGridIrradianceComponents(c,basis,true,front,back);
 }

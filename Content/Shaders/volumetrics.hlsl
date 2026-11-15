@@ -25,11 +25,6 @@ uint VmHash(uint value)
 {
     value^=value>>16; value*=0x7feb352du; value^=value>>15; value*=0x846ca68bu; return value^(value>>16);
 }
-float VmRandom(uint3 p,uint sample,uint dimension)
-{
-    return float(VmHash(p.x^VmHash(p.y)^VmHash(p.z)^VmHash(VmFrameInfo.x)^VmHash(sample*31u+dimension*7919u))&0x00ffffffu)
-        *5.9604644775390625e-8;
-}
 float VmPixelDepth(int2 pixel)
 {
     const float depth=VmDepth.Load(int3(pixel,0));
@@ -271,35 +266,11 @@ void VolumetricLightingCS(uint3 p:SV_DispatchThreadID)
     [loop] while(HsNextLight(query,index))
     {
         const HsGpuLightRecord light=HsLightRecords[index];
-        if(light.identity.w>=3u)
-        {
-            float range_weight;
-            if(!HsAreaLightVisible(light,world,range_weight)) continue;
-            float visibility=1.0;
-            bool visibility_ready=VmHeroInfo.z==0u;
-            [loop] for(uint sample=0u;sample<VmFrameInfo.w;++sample)
-            {
-                const float2 u=float2((float(sample)+VmRandom(p,sample,0u))/float(VmFrameInfo.w),VmRandom(p,sample,1u));
-                float3 direction; float pdf;
-                if(!HsAreaSampleDirection(light,world,u,direction,pdf)) continue;
-                if(!visibility_ready)
-                {
-                    visibility=HsLocalShadowVisibility(light,world,0.0.xxx);
-                    visibility_ready=true;
-                }
-                // Incoming propagation is -direction; outgoing is toward camera.
-                lighting+=light.color_intensity.rgb*light.color_intensity.w*range_weight*
-                    VmPhaseFunction(dot(-direction,view),g)*visibility/(pdf*float(VmFrameInfo.w));
-            }
-        }
-        else
-        {
-            float3 direction,incident;
-            if(!HsLightIncident(index,world,direction,incident)) continue;
-            const float visibility=light.identity.w==0u?VmDirectionalVisibility(light,world):
-                (VmHeroInfo.z!=0u?HsLocalShadowVisibility(light,world,0.0.xxx):1.0);
-            lighting+=incident*VmPhaseFunction(dot(-direction,view),g)*visibility;
-        }
+        float3 direction,incident;
+        if(!HsLightIncident(index,world,direction,incident)) continue;
+        const float visibility=light.identity.w==0u?VmDirectionalVisibility(light,world):
+            (VmHeroInfo.z!=0u?HsLocalShadowVisibility(light,world,0.0.xxx):1.0);
+        lighting+=incident*VmPhaseFunction(dot(-direction,view),g)*visibility;
     }
     VmRawOutput[p]=float4(medium.xyz*lighting+emission,medium.w);
 }

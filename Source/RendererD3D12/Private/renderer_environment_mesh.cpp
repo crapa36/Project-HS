@@ -112,6 +112,11 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes(
             (index%3 == 0 ? std::string{} : "_lod" + std::to_string(index%3));
         const auto geometry_ordinal = static_cast<std::uint32_t>(index / 3);
         const auto material_ordinal = render_data::EnvironmentGeometryMaterialOrdinal(geometry_ordinal);
+        // The procedural water template supplies its own transmission closure.
+        const auto domains = geometry_ordinal == render_data::kMeadowWaterGeometry
+            ? procedural_water_material : GeometryMaterialDomains{};
+        std::fill_n(geometry_material_domains.begin() + geometry_ordinal * render_data::kEnvironmentGeometryLodCount,
+            render_data::kEnvironmentGeometryLodCount, domains);
         const std::string material_name(kAuthoredMaterialNames[material_ordinal]);
         const std::string logical_id = "render/" + mesh_name + ".rpkg";
         const std::string mesh_dependency =

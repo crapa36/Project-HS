@@ -17,7 +17,6 @@
 #include <hs/render_data/vfx_volume_input.hpp>
 #include <cstdint>
 #include <memory>
-#include <optional>
 
 namespace hs
 {
@@ -35,15 +34,9 @@ struct RenderVfxFrameInput
     // Producer supplies the complete native birth set; Renderer does not synthesize snapshot births.
     std::span<const ParticleSpawnCommand> particle_spawns;
     std::span<const VfxLineSpawnCommand> effect_lines;
-    std::uint32_t event_count{};
-    std::uint32_t persistent_count{};
     std::span<const VfxGroundSpawnInput> ground;
     std::span<const VfxFlashSpawnInput> flashes;
     std::span<const VfxOwnedMeshInput> meshes;
-    // Borrowed from an admitted catalog through Render's frame submission.
-    PreparedVfxMeshRecipeView mesh_recipe_view;
-    // Borrowed from an admitted catalog/static image through Render's joined record callbacks.
-    PreparedVfxFresnelRecipeView fresnel_recipe_view;
     std::span<const VfxFresnelInput> fresnels;
     VfxRibbonFrameInput ribbons;
     std::span<const VfxLightInput> lights;
@@ -61,22 +54,27 @@ struct RenderDisplaySample
 {
     std::chrono::steady_clock::time_point time;
     float interpolation;
+
+    RenderDisplaySample(std::chrono::steady_clock::time_point sample_time, float interpolation_value)
+        : time(sample_time), interpolation(interpolation_value)
+    {
+    }
 };
 
 // The caller retains snapshot leases and borrowed spans until Render returns.
 // Display time, UI content and native VFX identity are fixed before submission.
 struct RenderPackage
 {
-    std::span<const RenderViewInput> views;
+    CameraView camera;
+    bool camera_cut{};
     RenderSnapshotPair snapshots;
     RenderVfxFrameInput vfx;
     DevToolsFrameData devtools;
-    // The owner, including an empty UI, is selected by the producer.
+    // The producer supplies a non-null immutable owner, including the shared empty UI.
     std::shared_ptr<const UiDrawContent> ui_draw_content{EmptyUiDrawContent()};
-    std::optional<float> screen_overlay_intensity;
     std::uint64_t ui_packet_generation{};
     // Capture before preparing effects so all package consumers sample one clock.
     // Views do not retime this explicit sample; discontinuities reset their history.
-    std::optional<RenderDisplaySample> display_sample;
+    RenderDisplaySample display_sample;
 };
 } // namespace hs

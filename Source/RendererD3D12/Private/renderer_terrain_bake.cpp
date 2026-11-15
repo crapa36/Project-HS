@@ -39,6 +39,15 @@ std::vector<UINT> MeadowControls(std::span<const render_data::ExpandedVertex> ve
     const float min_tile_x=-12.f+24.f*float(tile.x)/float(tile.count_x);
     const float min_tile_z=-12.f+24.f*float(tile.y)/float(tile.count_y);
     const float span_x=24.f/float(tile.count_x),span_z=24.f/float(tile.count_y);
+    struct Coordinate { float world,clamped; };
+    std::vector<Coordinate> xs(kEdge),zs(kEdge);
+    for(UINT i=0;i<kEdge;++i)
+    {
+        const float wx=min_tile_x+(i+.5f-kApron)/kInterior*span_x;
+        const float wz=min_tile_z+(i+.5f-kApron)/kInterior*span_z;
+        xs[i]={wx,std::clamp(wx,-12.f,12.f)};
+        zs[i]={wz,std::clamp(wz,-12.f,12.f)};
+    }
     for(size_t i=0;i<indices.size();i+=3)
     {
         const auto &a=vertices[indices[i]],&b=vertices[indices[i+1]],&c=vertices[indices[i+2]];
@@ -56,21 +65,23 @@ std::vector<UINT> MeadowControls(std::span<const render_data::ExpandedVertex> ve
         const int z0=minz<=-12.f?0:std::max(0,int(std::ceil(pixel_z(minz))));
         const int x1=maxx>=12.f?int(kEdge)-1:std::min(int(kEdge)-1,int(std::floor(pixel_x(maxx))));
         const int z1=maxz>=12.f?int(kEdge)-1:std::min(int(kEdge)-1,int(std::floor(pixel_z(maxz))));
-        for(int z=z0;z<=z1;++z) for(int x=x0;x<=x1;++x)
+        for(int z=z0;z<=z1;++z)
         {
-            const float wx=min_tile_x+(x+.5f-kApron)/kInterior*span_x;
-            const float wz=min_tile_z+(z+.5f-kApron)/kInterior*span_z;
-            const float px=std::clamp(wx,-12.f,12.f)-a.position[0];
-            const float pz=std::clamp(wz,-12.f,12.f)-a.position[2];
+          const float pz=zs[z].clamped-a.position[2],rz=zs[z].world-a.position[2];
+          for(int x=x0;x<=x1;++x)
+          {
+            const float wx=xs[x].world;
+            const float px=xs[x].clamped-a.position[0];
             const float pu=(px*cz-pz*cx)/det,pv=(bx*pz-bz*px)/det;
             if(pu<-.00001f || pv<-.00001f || pu+pv>1.00001f) continue;
             // Match raster interpolation's affine continuation in helper lanes;
             // the material's normal [0,1] control clamp is retained below.
-            const float rx=wx-a.position[0],rz=wz-a.position[2];
+            const float rx=wx-a.position[0];
             const float u=(rx*cz-rz*cx)/det,v=(bx*rz-bz*rx)/det;
             const auto channel=[&](size_t k){return UINT(DirectX::PackedVector::XMConvertFloatToHalf(
                 std::clamp(a.uv[k]+u*(b.uv[k]-a.uv[k])+v*(c.uv[k]-a.uv[k]),0.f,1.f)));};
             controls[size_t(z)*kEdge+x]=channel(0)|(channel(1)<<16);
+          }
         }
     }
     return controls;

@@ -3,8 +3,10 @@
 
 #include <hs/renderer/capture_request.hpp>
 
+#if defined(HS_DEVELOPMENT_TOOLS)
 #include <DirectXTex.h>
 #include <DirectXPackedVector.h>
+#endif
 
 #include <algorithm>
 #include <bit>
@@ -732,6 +734,8 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
     };
     const auto *captured_frame = impl_->SubmittedFrame(owner);
     std::vector<Impl::GpuTerrainSection> terrain_sections;
+    std::array<std::uint32_t, HS_TERRAIN_PAGE_TILE_CAPACITY> terrain_request_words{};
+    std::span<const TextureStreamId> terrain_feedback_planes;
     std::shared_ptr<Impl::StaticGpuScene> static_scene;
     const auto dynamic_scene = captured_frame ? owner.previous_instances : nullptr;
     bool terrain_submission_available{}, dynamic_terrain_sources_current{};
@@ -756,6 +760,14 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
             std::memcpy(terrain_sections.data(), data, static_cast<std::size_t>(bytes));
             const D3D12_RANGE no_write{};
             bank.section_resource->Unmap(0, &no_write);
+        }
+        if (terrain_submission_available)
+        {
+            if (auto result = impl_->texture_feedback.ReadTerrainRequests(owner.last_submitted_frame_slot,
+                    impl_->graph_queue_executor.Completed(), terrain_request_words, terrain_feedback_planes); !result)
+                return result;
+            if (!terrain_feedback_planes.empty() && terrain_feedback_planes.size() != bank.published_count)
+                return contract_failure("Submitted terrain feedback and descriptor plane counts differ.");
         }
         const auto uses_refs = [&](const std::shared_ptr<Impl::StaticGpuScene> &scene) {
             return scene && scene->source == owner.scene_lease && captured_frame->static_input_refs &&
@@ -850,7 +862,7 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
     const auto shadow_resources = owner.virtual_shadows.DiagnosticResources();
     for (std::size_t index = 0; index < shadow_resources.size(); ++index)
         append_diagnostic(shadow_names[index], shadow_resources[index]);
-    constexpr std::array light_names{"light_records", "light_ranges", "light_inline", "light_spill"};
+    constexpr std::array light_names{"light_records", "light_grid"};
     const auto light_resources = owner.light_list.DiagnosticResources();
     for (std::size_t index = 0; index < light_resources.resources.size(); ++index)
         append_diagnostic(light_names[index], light_resources.resources[index]);
@@ -1174,6 +1186,35 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         first_texture = false;
     }
     metadata_output << "],\n";
+    metadata_output << std::format("  \"terrain_page_feedback\": {{\"available\":{},\"frame_id\":{},\"view_id\":{},\"planes\":[",
+        !terrain_feedback_planes.empty(), captured_frame ? captured_frame->submitted_frame_id : 0u, owner.view_id.value);
+    const auto write_mip = [&](std::uint32_t value, bool available) {
+        if (available) metadata_output << value;
+        else metadata_output << "null";
+    };
+    for (std::size_t plane = 0; plane < terrain_feedback_planes.size(); ++plane)
+    {
+        const auto id = terrain_feedback_planes[plane];
+        const auto word = terrain_request_words[plane / 3];
+        const auto demand = texture_feedback_detail::DecodeTerrainMipRequests(word)[plane % 3 == 2 ? 1 : 0];
+        const auto &bound = impl_->terrain_descriptor_banks[owner.last_submitted_frame_slot].entries[plane].metadata;
+        const auto current = impl_->texture_streaming.View(id);
+        metadata_output << std::format("{}{{\"plane\":{},\"stream_id\":{},\"request_bits\":{},\"requested_mip\":",
+            plane ? "," : "", plane, id.value, word);
+        write_mip(demand, demand != texture_feedback_detail::kNoMipDemand);
+        metadata_output << ",\"submitted_first_mip\":";
+        write_mip(bound.firstMip, bound.qualityMipPlusOne != 0);
+        metadata_output << ",\"submitted_resident_min_mip\":";
+        write_mip(bound.residentMinMip, bound.qualityMipPlusOne != 0);
+        metadata_output << ",\"quality_finest_mip\":";
+        write_mip(bound.qualityMipPlusOne ? bound.qualityMipPlusOne - 1u : 0u, bound.qualityMipPlusOne != 0);
+        metadata_output << ",\"current_first_mip\":";
+        write_mip(current.first_mip, current.resource != nullptr);
+        metadata_output << ",\"current_resident_min_mip\":";
+        write_mip(current.resident_min_mip, current.resource != nullptr);
+        metadata_output << '}';
+    }
+    metadata_output << "]},\n";
     constexpr std::array auxiliary_names{"subsurface_diffuse", "environment_specular"};
     metadata_output.precision(std::numeric_limits<float>::max_digits10);
     if (captured_frame && terrain_submission_available)
@@ -1287,7 +1328,6 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
             std::bit_cast<std::uint32_t>(captured_constants.particle_terrain.w));
         write_floats("camera_time", &captured_constants.camera_time.x, 4);
         write_floats("previous_grass_state", &captured_constants.previous_grass_state.x, 4);
-        write_floats("previous_grass_origin_delta", &captured_constants.previous_grass_origin_delta.x, 4);
         write_floats("grass_benders", &captured_constants.grass_benders[0].x,
             std::min(captured_constants.grass_bender_count.x, 32u) * 4u);
         write_floats("previous_grass_benders", &captured_constants.previous_grass_benders[0].x,
@@ -2408,7 +2448,8 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                 return std::format("Visibility raster record {} source6 ref identity disagrees with raster identity.", id);
         }
         std::uint32_t expected_variant{};
-        if ((geometry.flags & kGeometryBuiltin) != 0u && geometry.mesh_id == 9u)
+        if ((geometry.flags & kGeometryBuiltin) != 0u &&
+            (geometry.mesh_id & HS_GEOMETRY_MESH_ID_MASK) == 9u)
             expected_variant = 1u + kTerrainMaterialOrdinal;
         else if ((geometry.flags & kGeometryExplicitMaterialBinding) != 0u)
             expected_variant = 1u + (geometry.lod & 0xffffu);
@@ -2448,15 +2489,6 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
     }
     const auto classified_capacity = visibility_pixels_raw.size() / sizeof(std::uint32_t);
     std::uint64_t classified_total{};
-    const auto hero_asset_index = [](std::uint32_t mesh) -> std::uint32_t {
-        if (mesh == static_cast<std::uint32_t>(RenderMesh::Archer))
-            return 0u;
-        const auto first_monster = static_cast<std::uint32_t>(RenderMesh::MonsterMelee);
-        const auto last_monster = static_cast<std::uint32_t>(RenderMesh::BossFinal);
-        if (mesh >= first_monster && mesh <= last_monster)
-            return 1u + mesh - first_monster;
-        return UINT32_MAX;
-    };
     for (std::size_t variant = 0; variant < variant_counts.size(); ++variant)
     {
         const auto begin = static_cast<std::uint64_t>(counts[kVisibilityVariantCount + variant]);
@@ -2489,8 +2521,9 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                     sizeof(renderer_detail::GpuGeometryDrawRecord);
             renderer_detail::GpuGeometryDrawRecord geometry{};
             std::memcpy(&geometry, geometry_bytes, sizeof(geometry));
-            const auto hero_asset = hero_asset_index(geometry.mesh_id);
-            if ((geometry.flags & kGeometryBuiltin) != 0u || hero_asset == UINT32_MAX)
+            const auto mesh_id = geometry.mesh_id & HS_GEOMETRY_MESH_ID_MASK;
+            const auto binding_set = geometry.mesh_id >> HS_GEOMETRY_MATERIAL_SET_SHIFT;
+            if ((geometry.flags & kGeometryBuiltin) != 0u || binding_set == 0u)
             {
                 if ((record.flags & 0xffu) != variant)
                     return invalid(std::format(
@@ -2499,44 +2532,26 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
             }
             else
             {
-                const GeometryPageGpu *page{};
-                std::span<const render_data::CharacterMaterialBinding> bindings;
-                const auto base_page = hero_asset == 0u
-                    ? kArcherGeometryPage : kMonsterGeometryPage + hero_asset - 1u;
-                const auto reduced_page = hero_asset == 0u ? UINT32_MAX :
-                    kMonsterReducedGeometryPage + (hero_asset - 1u) * 2u;
-                if (geometry.page_slot != base_page &&
-                    (hero_asset == 0u ||
-                     (geometry.page_slot != reduced_page && geometry.page_slot != reduced_page + 1u)))
-                    return invalid(std::format(
-                        "Classified hero pixel {} page slot {} does not belong to mesh {}.",
-                        pixel, geometry.page_slot, geometry.mesh_id));
-                if (hero_asset == 0u)
-                    bindings = impl_->archer_material_bindings;
-                else
-                    bindings = impl_->monster_assets[hero_asset - 1u].material_bindings;
-                page = impl_->FindGeometryPage(geometry.page_slot);
+                const GeometryPageGpu *page = impl_->FindGeometryPage(geometry.page_slot);
                 if (!page)
                     return invalid(std::format(
-                        "Classified hero pixel {} mesh {} has no resident geometry page.",
-                        pixel, geometry.mesh_id));
+                        "Classified bound pixel {} mesh {} has no resident geometry page.",
+                        pixel, mesh_id));
                 if (page->page_slot != geometry.page_slot)
                     return invalid(std::format(
-                        "Classified hero pixel {} page slot {} mismatches mesh {} resident page {}.",
-                        pixel, geometry.page_slot, geometry.mesh_id, page->page_slot));
-                const auto expected_lod = geometry.page_slot == base_page ? 0u :
-                    geometry.page_slot == reduced_page ? 1u : 2u;
-                if(page->metadata.lod != expected_lod)
-                    return invalid(std::format(
-                        "Classified hero pixel {} page slot {} has LOD {} instead of {}.",
-                        pixel, geometry.page_slot, page->metadata.lod, expected_lod));
+                        "Classified bound pixel {} page slot {} mismatches resident page {}.",
+                        pixel, geometry.page_slot, page->page_slot));
                 if (page->generation != geometry.geometry_generation)
                     return invalid(std::format(
-                        "Classified hero pixel {} generation {} mismatches mesh {} resident page {}.",
-                        pixel, geometry.geometry_generation, geometry.mesh_id, page->generation));
+                        "Classified bound pixel {} generation {} mismatches resident page {}.",
+                        pixel, geometry.geometry_generation, page->generation));
+                if (page->metadata.lod != geometry.lod)
+                    return invalid(std::format(
+                        "Classified bound pixel {} LOD {} mismatches resident page {}.",
+                        pixel, geometry.lod, page->metadata.lod));
                 if (primitive > UINT32_MAX / 3u)
                     return invalid(std::format(
-                        "Classified hero pixel {} primitive {} overflows its canonical index offset.",
+                        "Classified bound pixel {} primitive {} overflows its canonical index offset.",
                         pixel, primitive));
                 const auto primitive_index = primitive * 3u;
                 const render_data::GeometrySubmesh *submesh{};
@@ -2545,7 +2560,7 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                 {
                     if (candidate.first_index > UINT32_MAX - candidate.index_count)
                         return invalid(std::format(
-                            "Classified hero pixel {} has an overflowing resident submesh range.",
+                            "Classified bound pixel {} has an overflowing resident submesh range.",
                             pixel));
                     if (primitive_index >= candidate.first_index &&
                         primitive_index < candidate.first_index + candidate.index_count)
@@ -2556,35 +2571,37 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                 }
                 if (submesh_matches != 1u || !submesh)
                     return invalid(std::format(
-                        "Classified hero pixel {} primitive {} does not resolve to exactly one resident submesh.",
+                        "Classified bound pixel {} primitive {} does not resolve to exactly one resident submesh.",
                         pixel, primitive));
-                const render_data::CharacterMaterialBinding *binding{};
-                std::size_t binding_matches{};
-                for (const auto &candidate : bindings)
-                    if (candidate.slot == submesh->material_index &&
-                        candidate.domain == render_data::CharacterMaterialDomain::Opaque)
-                    {
-                        binding = &candidate;
-                        ++binding_matches;
-                    }
-                if (binding_matches != 1u || !binding)
+                if (binding_set >= impl_->mesh_material_bindings_cpu.size())
                     return invalid(std::format(
-                        "Classified hero pixel {} material slot {} does not resolve to exactly one opaque binding.",
-                        pixel, submesh->material_index));
-                if (binding->hero_ordinal >= kCharacterMaterialNames.size())
+                        "Classified bound pixel {} has out-of-range binding set {}.",
+                        pixel, binding_set));
+                const auto header = impl_->mesh_material_bindings_cpu[binding_set];
+                if (header.x > impl_->mesh_material_bindings_cpu.size() ||
+                    header.y > impl_->mesh_material_bindings_cpu.size() - header.x)
                     return invalid(std::format(
-                        "Classified hero pixel {} has invalid opaque hero ordinal {}.",
-                        pixel, binding->hero_ordinal));
+                        "Classified bound pixel {} has an out-of-range binding set header.", pixel));
+                if (submesh->material_index >= header.y)
+                    return invalid(std::format(
+                        "Classified bound pixel {} material slot {} exceeds binding set count {}.",
+                        pixel, submesh->material_index, header.y));
+                const auto opaque_ordinal = impl_->mesh_material_bindings_cpu[
+                    header.x + submesh->material_index].x;
+                if (opaque_ordinal >= kCharacterMaterialNames.size())
+                    return invalid(std::format(
+                        "Classified bound pixel {} has invalid opaque material ordinal {}.",
+                        pixel, opaque_ordinal));
                 // Match HsCharacterVisibilityVariantBegin in the producer contract:
                 // variant zero is the builtin path, followed by authored materials.
-                if (variant != 1u + kAuthoredMaterialNames.size() + binding->hero_ordinal)
+                if (variant != 1u + kAuthoredMaterialNames.size() + opaque_ordinal)
                     return invalid(std::format(
-                        "Classified hero pixel {} variant {} mismatches opaque ordinal {}.",
-                        pixel, variant, binding->hero_ordinal));
-                if (metadata[pixel * 2] != 0x20000000u + binding->hero_ordinal)
+                        "Classified bound pixel {} variant {} mismatches opaque ordinal {}.",
+                        pixel, variant, opaque_ordinal));
+                if (metadata[pixel * 2] != 0x20000000u + opaque_ordinal)
                     return invalid(std::format(
-                        "Classified hero pixel {} metadata {} mismatches opaque ordinal {}.",
-                        pixel, metadata[pixel * 2], binding->hero_ordinal));
+                        "Classified bound pixel {} metadata {} mismatches opaque ordinal {}.",
+                        pixel, metadata[pixel * 2], opaque_ordinal));
             }
             seen[pixel] = 1;
         }

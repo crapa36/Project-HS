@@ -25,24 +25,22 @@ struct MonsterLodConsumer
 
 struct MonsterLodWorldSphere
 {
-    // Global coordinates; caller supplies a qualified interval enclosure for
+    // Arena-local metres; caller supplies a qualified interval enclosure for
     // every candidate LOD, including the current and previous pose if needed.
-    RenderWorldPosition center{};
+    Float3 center{};
     double radius{};
     bool pose_bounds_qualified{};
 };
 struct MonsterLodShadowWindow
 {
-    RenderWorldPosition scene_origin{};
     std::array<double,3> right{}, up{};
     double min_x{}, min_y{}, max_x{}, max_y{}, world_texel{};
 };
 
 struct MonsterLodProjectionInputs
 {
-    std::span<const RenderViewInput> camera_views;
+    std::span<const RenderViewSample> camera_views;
     std::span<const LightView> local_lights;
-    RenderWorldPosition local_light_scene_origin{};
     std::array<double, 3> csm_world_texels{}, vsm_world_texels{};
     double maximum_error_pixels{}; // Existing geometry quality policy.
     std::uint32_t local_shadow_face_resolution{};
@@ -95,7 +93,7 @@ struct MonsterLodPreparedConsumers
 namespace monster_lod_detail
 {
 using Vec3 = std::array<double, 3>;
-[[nodiscard]] inline Vec3 Vector(RenderWorldPosition value) noexcept
+[[nodiscard]] inline Vec3 Vector(Float3 value) noexcept
 { return {value.x, value.y, value.z}; }
 [[nodiscard]] inline Vec3 Difference(Vec3 a, Vec3 b) noexcept
 { return {a[0]-b[0], a[1]-b[1], a[2]-b[2]}; }
@@ -136,14 +134,6 @@ using Vec3 = std::array<double, 3>;
         (yscale*ymax/nearest)*(yscale*ymax/nearest)),permitted_pixels);
     return out.valid;
 }
-[[nodiscard]] inline double EmitterBound(const LightView &light) noexcept
-{
-    if (light.type == LightType::Rectangle)
-        return std::hypot(double(light.shape.x)*0.5,double(light.shape.y)*0.5);
-    if (light.type == LightType::Disk)
-        return std::max(double(light.shape.x),double(light.shape.y));
-    return double(light.emitter_radius);
-}
 [[nodiscard]] inline bool LocalShadowProjection(MonsterLodProjection &out,
     const MonsterLodWorldSphere &sphere, const MonsterLodPreparedLocalLight &light,
     double permitted_pixels) noexcept
@@ -165,8 +155,9 @@ using Vec3 = std::array<double, 3>;
 
 // Compute camera bases, light projections and global texel budgets once per
 // frame. The actor pass below only measures its qualified world sphere.
+template<class OutputExtentForView>
 [[nodiscard]] inline MonsterLodPreparedConsumers PrepareMonsterLodConsumers(
-    const MonsterLodProjectionInputs &inputs)
+    const MonsterLodProjectionInputs &inputs, OutputExtentForView &&output_extent_for_view)
 {
     MonsterLodPreparedConsumers prepared;
     prepared.maximum_error_pixels = inputs.maximum_error_pixels;
@@ -178,7 +169,8 @@ using Vec3 = std::array<double, 3>;
     for (const auto &view : inputs.camera_views)
     {
         if (!view.render_active.width || !view.render_active.height) continue;
-        if (!view.output_extent.width || !view.output_extent.height)
+        const auto output_extent = output_extent_for_view(view.id);
+        if (!output_extent.width || !output_extent.height)
         { projection.valid = false; return prepared; }
         const double tangent_y = std::tan(double(view.camera.vertical_fov_degrees)*
             std::numbers::pi / 360.0);
@@ -203,8 +195,8 @@ using Vec3 = std::array<double, 3>;
         camera.far_plane = view.far_plane;
         camera.tangent_x = tangent_x;
         camera.tangent_y = tangent_y;
-        camera.focal_x_pixels = 1.001*double(view.output_extent.width)/(2.0*tangent_x);
-        camera.focal_y_pixels = 1.001*double(view.output_extent.height)/(2.0*tangent_y);
+        camera.focal_x_pixels = 1.001*double(output_extent.width)/(2.0*tangent_x);
+        camera.focal_y_pixels = 1.001*double(output_extent.height)/(2.0*tangent_y);
         prepared.cameras.push_back(camera);
     }
     const auto add_texels = [&](bool active, const std::array<double,3> &texels) {
@@ -230,10 +222,9 @@ using Vec3 = std::array<double, 3>;
         {
             if (light.type == LightType::Directional ||
                 (light.shadow_flags & kLightShadowRequested) == 0) continue;
-            if (light.type != LightType::Point && light.type != LightType::Spot &&
-                light.type != LightType::Rectangle && light.type != LightType::Disk)
+            if (light.type != LightType::Point && light.type != LightType::Spot)
             { projection.valid = false; return prepared; }
-            const double emitter = monster_lod_detail::EmitterBound(light);
+            const double emitter = double(light.emitter_radius);
             const double tangent = light.type == LightType::Spot
                 ? std::tan(double(light.outer_cone_radians)) : 1.0;
             if (!inputs.local_shadow_face_resolution || !std::isfinite(light.range) ||
@@ -244,10 +235,8 @@ using Vec3 = std::array<double, 3>;
                      light.outer_cone_radians >= std::numbers::pi/2)))
             { projection.valid = false; return prepared; }
             MonsterLodPreparedLocalLight shadow;
-            shadow.center = {
-                inputs.local_light_scene_origin.x+double(light.position.x),
-                inputs.local_light_scene_origin.y+double(light.position.y),
-                inputs.local_light_scene_origin.z+double(light.position.z)};
+            shadow.center = {double(light.position.x), double(light.position.y),
+                double(light.position.z)};
             if (!std::isfinite(shadow.center[0]) || !std::isfinite(shadow.center[1]) ||
                 !std::isfinite(shadow.center[2]))
             { projection.valid = false; return prepared; }
@@ -255,8 +244,7 @@ using Vec3 = std::array<double, 3>;
             const float native_near = std::max(0.005f,
                 std::min(0.05f,light.range*0.001f));
             shadow.near_plane = std::nextafter(double(native_near),0.0);
-            shadow.far_plane = double(light.range)+
-                ((light.type == LightType::Rectangle || light.type == LightType::Disk) ? emitter : 0.0);
+            shadow.far_plane = double(light.range);
             shadow.angular = light.type == LightType::Spot ? tangent*tangent : 2.0;
             shadow.focal_pixels = 1.001*double(inputs.local_shadow_face_resolution)/(2.0*tangent);
             prepared.local_lights.push_back(shadow);
@@ -280,9 +268,8 @@ using Vec3 = std::array<double, 3>;
         { projection.valid = false; return projection; }
     for (const auto &window : consumers.shadow_windows)
     {
-        const auto relative=monster_lod_detail::Difference(center,monster_lod_detail::Vector(window.scene_origin));
-        const double x=monster_lod_detail::Dot(relative,window.right), y=monster_lod_detail::Dot(relative,window.up);
-        const double magnitude=std::abs(relative[0])+std::abs(relative[1])+std::abs(relative[2])+sphere.radius;
+        const double x=monster_lod_detail::Dot(center,window.right), y=monster_lod_detail::Dot(center,window.up);
+        const double magnitude=std::abs(center[0])+std::abs(center[1])+std::abs(center[2])+sphere.radius;
         const double radius=sphere.radius+std::max(0.001,16.0*std::numeric_limits<float>::epsilon()*magnitude);
         if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(radius) ||
             !std::isfinite(window.min_x) || !std::isfinite(window.min_y) ||

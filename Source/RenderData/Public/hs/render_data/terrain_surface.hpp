@@ -7,6 +7,7 @@
 namespace hs::render_data
 {
 inline constexpr std::uint32_t kTerrainSurfaceLayoutVersion = 6;
+inline constexpr std::uint32_t kTerrainSurfaceMaxTiles = 64;
 inline constexpr std::uint32_t kTerrainSurfacePageEdge = 4096;
 inline constexpr std::uint32_t kTerrainSurfacePageMips = 13;
 struct TerrainSurfaceSection

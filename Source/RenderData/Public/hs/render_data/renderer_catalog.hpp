@@ -5,12 +5,15 @@
 #include <hs/render_data/render_revision.hpp>
 #include <hs/render_data/vfx_mesh_descriptor.hpp>
 #include <deque>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <vector>
 
 namespace hs::render_data
 {
+inline constexpr std::uint32_t kRendererCatalogVersion = 4;
+
 struct RendererCatalogView
 {
     std::span<const RendererBulkDescriptor> bulks;

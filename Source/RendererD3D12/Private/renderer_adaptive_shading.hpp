@@ -98,7 +98,6 @@ class AdaptiveShadingSystem
     [[nodiscard]] std::uint64_t AllocatedBytes()const noexcept;
     [[nodiscard]] AdaptiveShadingStatus Status()const;
     [[nodiscard]] std::array<const AllocationResource *, 2> DiagnosticResources() const noexcept;
-    void SwapState(AdaptiveShadingSystem &other)noexcept{impl_.swap(other.impl_);}
   private:
     [[nodiscard]] Result RegisterFrame(RenderGraphBuilder &,const AdaptiveShadingInputs &,
         AdaptiveShadingOutputs &,AdaptiveShadingLayout *,const AdaptiveShadingLayout *);

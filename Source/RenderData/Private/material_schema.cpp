@@ -841,15 +841,14 @@ CharacterMaterialPackageData ReadCharacterMaterialPackage(const PackageView &pac
     result.surface = DecodeMaterialSurfaceLayout(surface_chunk.bytes);
     result.parameter_layout_hash = DecodeMaterialParameterLayout(find(ChunkType::MaterialParameterLayout).bytes);
     result.programs = DecodeMaterialPrograms(find(ChunkType::MaterialProgram).bytes, package.dependencies);
-    result.domain = (result.surface.capability_mask & 256u) != 0 ?
-        CharacterMaterialDomain::Translucent : CharacterMaterialDomain::Opaque;
     const bool translucent_program = std::ranges::any_of(result.programs, [](const MaterialProgram &program) {
         return program.kind == MaterialProgramKind::CharacterTranslucentPS;
     });
-    Require(translucent_program == (result.domain == CharacterMaterialDomain::Translucent) &&
-            ((result.domain == CharacterMaterialDomain::Translucent && result.programs.size() == 1) ||
-             (result.domain == CharacterMaterialDomain::Opaque && result.programs.size() == 4)),
-            "hero material surface capabilities disagree with its native domain");
+    result.domain = translucent_program ? CharacterMaterialDomain::Translucent : CharacterMaterialDomain::Opaque;
+    Require((result.programs.size() == (translucent_program ? 1u : 4u)) &&
+            (!(result.surface.capability_mask & 256u) || translucent_program) &&
+            (!translucent_program || !(result.surface.capability_mask & 128u)),
+            "hero material program, domain and surface profile contract mismatch");
     const auto parameter_id = "render/material/" + std::string(name) + "/parameters.rpkg";
     Require(std::ranges::find(package.dependencies, parameter_id) != package.dependencies.end(),
             "hero material is missing its parameter package dependency");

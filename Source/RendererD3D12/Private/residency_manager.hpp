@@ -171,6 +171,7 @@ class ResidencyManager
 
     void UpdateAdmissionTotals(ResidencyStorage storage, ResidencySegment segment,
         std::uint64_t previous, std::uint64_t next) noexcept;
+    static void AdjustAllocationTotals(ResidencyAccounting &, const Allocation &, bool add) noexcept;
 
     std::array<std::uint64_t, 2> gpu_reserved_{};
     std::uint64_t host_held_{};
@@ -179,6 +180,9 @@ class ResidencyManager
     ResidencyBudgetSnapshot budget_{};
     bool unified_memory_{};
     std::unordered_map<std::uint64_t, Allocation> allocations_;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    ResidencyAccounting allocation_totals_{};
+#endif
     std::uint64_t next_ticket_{1};
     std::uint64_t retiring_count_{};
     std::uint64_t reclaimed_total_{};

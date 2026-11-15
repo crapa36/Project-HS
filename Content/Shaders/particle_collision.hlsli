@@ -21,7 +21,7 @@ StructuredBuffer<HsTerrainPageSection> HsTerrainSections : register(HS_TERRAIN_J
 // Section transforms and particles share scene-relative coordinates.
 float ParticleCollisionFloor(ParticleData particle, float2 position)
 {
-    float floor_y = particle.CollisionMaterial.y - ParticleTerrain.y;
+    float floor_y = particle.CollisionMaterial.y;
     bool found = false;
     [loop] for (uint index=0u; index<asuint(ParticleTerrain.w); ++index)
     {
