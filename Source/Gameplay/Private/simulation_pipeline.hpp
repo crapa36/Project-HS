@@ -1,44 +1,31 @@
 #pragma once
 
-#include <array>
 #include <cstdint>
 
 namespace hs::gameplay_detail
 {
 
+#define HS_SIMULATION_PHASES(X) \
+    X(SessionTimer, SessionTimerPhase) \
+    X(Spawn, SpawnPhase) \
+    X(SpawnBarrier, CommitSpawnBarrier) \
+    X(AiIntent, AiIntentPhase) \
+    X(CastAttack, CastAttackPhase) \
+    X(AbilitySpawnBarrier, CommitAbilitySpawnBarrier) \
+    X(Movement, MovementPhase) \
+    X(SpatialGrid, SpatialGridPhase) \
+    X(CollisionHit, CollisionHitPhase) \
+    X(DamageStatus, DamageStatusPhase) \
+    X(DeathDrop, DeathDropPhase) \
+    X(XpCard, XpCardPhase) \
+    X(CleanupBarrier, CommitCleanupBarrier) \
+    X(GameplayHash, UpdateChecksum)
+
+#define HS_SIMULATION_PHASE_ID(name, method) name,
 enum class SimulationPhaseId : std::uint8_t
 {
-    SessionTimer,
-    Spawn,
-    SpawnBarrier,
-    AiIntent,
-    CastAttack,
-    AbilitySpawnBarrier,
-    Movement,
-    SpatialGrid,
-    CollisionHit,
-    DamageStatus,
-    DeathDrop,
-    XpCard,
-    CleanupBarrier,
-    GameplayHash,
+    HS_SIMULATION_PHASES(HS_SIMULATION_PHASE_ID)
 };
-
-inline constexpr std::array kSimulationPipeline{
-    SimulationPhaseId::SessionTimer,
-    SimulationPhaseId::Spawn,
-    SimulationPhaseId::SpawnBarrier,
-    SimulationPhaseId::AiIntent,
-    SimulationPhaseId::CastAttack,
-    SimulationPhaseId::AbilitySpawnBarrier,
-    SimulationPhaseId::Movement,
-    SimulationPhaseId::SpatialGrid,
-    SimulationPhaseId::CollisionHit,
-    SimulationPhaseId::DamageStatus,
-    SimulationPhaseId::DeathDrop,
-    SimulationPhaseId::XpCard,
-    SimulationPhaseId::CleanupBarrier,
-    SimulationPhaseId::GameplayHash,
-};
+#undef HS_SIMULATION_PHASE_ID
 
 } // namespace hs::gameplay_detail

@@ -51,7 +51,6 @@ struct TickResult
 class GameSimulation
 {
     struct SimulationWorld;
-    friend struct GameplayTestAccess;
   public:
     class ScopedTickReadView
     {
@@ -65,8 +64,7 @@ class GameSimulation
         const TickReadView &View() const && = delete;
       private:
         friend class GameSimulation;
-        ScopedTickReadView(SimulationWorld &owner, TickReadView view);
-        SimulationWorld *owner_{};
+        ScopedTickReadView(TickReadView view);
         TickReadView view_;
     };
     GameSimulation();

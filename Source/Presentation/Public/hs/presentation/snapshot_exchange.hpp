@@ -43,6 +43,7 @@ class RenderSnapshotExchange
     struct ReadPair : RenderSnapshotPair
     {
         std::shared_ptr<const UiFrame> ui_frame;
+        bool has_current{};
     };
 
     class Consumer

@@ -92,13 +92,13 @@ class PickupWorkOwner
         {
             if (pickup.globally_attracted || moving)
             {
-                RemoveStationary(pickup.id.value);
-                active_ids_.insert(pickup.id.value);
+                // Each live XP pickup belongs to exactly one of stationary or active.
+                if (RemoveStationary(pickup.id.value)) active_ids_.insert(pickup.id.value);
             }
             else
             {
-                Erase(active_ids_, pickup.id.value);
-                UpsertStationary(pickup.id.value, pickup.position);
+                if (UpsertStationary(pickup.id.value, pickup.position))
+                    Erase(active_ids_, pickup.id.value);
             }
         }
         indexed_ = true;
@@ -140,21 +140,18 @@ class PickupWorkOwner
         if (next_ == queued_ids_.size()) return std::nullopt;
         return queued_ids_[next_++];
     }
-    void AfterMagnet(std::span<const PickupActor> pickups, Id cursor, float arena_half_extent)
+    void ApplyMagnet(std::span<PickupActor> pickups, Id cursor, float arena_half_extent)
     {
         // Magnet is the exceptional all-XP operation. Earlier IDs become active
         // for the next tick; only later IDs may enter this tick's remaining work.
         if (!indexed_ || !has_extent_ || extent_ != arena_half_extent)
             Rebuild(pickups, arena_half_extent);
         indexed_ = false;
-        for (const auto &pickup : pickups)
+        for (auto &pickup : pickups)
         {
             if (pickup.dead || pickup.kind != PickupKind::Experience) continue;
-            if (pickup.globally_attracted)
-            {
-                RemoveStationary(pickup.id.value);
-                active_ids_.insert(pickup.id.value);
-            }
+            pickup.globally_attracted = true;
+            if (RemoveStationary(pickup.id.value)) active_ids_.insert(pickup.id.value);
             if (pickup.id.value > cursor) queued_ids_.push_back(pickup.id.value);
         }
         indexed_ = true;
@@ -181,10 +178,10 @@ class PickupWorkOwner
         return std::clamp(static_cast<int>(std::floor((value + extent_) / kGridCellSize)),
                           0, kGridDimension - 1);
     }
-    void RemoveStationary(Id id) noexcept
+    bool RemoveStationary(Id id) noexcept
     {
         const auto found = stationary_cells_.find(id);
-        if (found == stationary_cells_.end()) return;
+        if (found == stationary_cells_.end()) return false;
         const auto location = found->second;
         auto &bin = bins_[location.cell];
         const auto moved = bin.back();
@@ -193,16 +190,19 @@ class PickupWorkOwner
         if (moved != id) stationary_cells_.find(moved)->second.offset = location.offset;
         bin.pop_back();
         stationary_cells_.erase(found);
+        return true;
     }
-    void UpsertStationary(Id id, Float2 position)
+    bool UpsertStationary(Id id, Float2 position)
     {
         const auto cell = static_cast<std::size_t>(Coordinate(position.y) * kGridDimension + Coordinate(position.x));
         const auto found = stationary_cells_.find(id);
-        if (found != stationary_cells_.end() && found->second.cell == cell) return;
+        if (found != stationary_cells_.end() && found->second.cell == cell) return false;
+        const bool inserted = found == stationary_cells_.end();
         RemoveStationary(id);
         const auto offset = bins_[cell].size();
         bins_[cell].push_back(id);
         stationary_cells_.emplace(id, StationaryLocation{cell, offset});
+        return inserted;
     }
     void Index(const PickupActor &pickup, bool moving)
     {

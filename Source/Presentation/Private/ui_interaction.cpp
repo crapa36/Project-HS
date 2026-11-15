@@ -50,22 +50,58 @@ std::vector<const GraphicsSettingDescriptor *> GraphicsSettingsVisibleRows(const
 }
 std::string GraphicsSettingDisplayLabel(const GraphicsSettingDescriptor &descriptor)
 {
-    static constexpr std::array<std::string_view, kGraphicsSettingCount> labels{
-        "그래픽 품질", "화면 모드", "모니터", "출력 해상도", "수직 동기화", "최대 프레임",
-        "HDR 모드", "HDR 기준 밝기", "HDR 최대 밝기", "업스케일링 방식", "업스케일링 품질",
-        "해상도 설정 방식", "렌더링 해상도 비율", "동적 해상도", "목표 프레임",
-        "동적 해상도 최소 비율", "동적 해상도 최대 비율", "선명도", "프레임 생성 방식",
-        "프레임 생성 모드", "프레임 생성 배수", "입력 지연 줄이기", "텍스처 품질",
-        "텍스처 메모리 한도", "이방성 필터링", "모델 품질", "식생 품질", "재질 품질",
-        "표면 입체감 품질", "조명 품질", "그림자 방식", "그림자 품질", "그림자 표시 거리",
-        "접촉 그림자", "주변 음영 방식", "주변 음영 품질", "간접 조명 방식",
-        "반사 방식", "반사 품질", "투명 효과 품질", "굴절 품질", "안개와 광선 품질", "파티클 품질",
-        "빛 번짐", "빛 번짐 강도", "모션 블러", "피사계 심도",
-        "색 보정", "적응형 셰이딩"};
-    const auto definitions = GraphicsSettingDescriptors();
-    const auto found = std::ranges::find(definitions, descriptor.id, &GraphicsSettingDescriptor::id);
-    const auto index = static_cast<std::size_t>(found - definitions.begin());
-    return index < labels.size() ? std::string(labels[index]) : std::string(descriptor.key);
+    switch (descriptor.id)
+    {
+    case SettingId::Preset: return "그래픽 품질";
+    case SettingId::DisplayMode: return "화면 모드";
+    case SettingId::DisplayOutput: return "모니터";
+    case SettingId::OutputExtent: return "출력 해상도";
+    case SettingId::Vsync: return "수직 동기화";
+    case SettingId::FrameLimitFps: return "최대 프레임";
+    case SettingId::HdrMode: return "HDR 모드";
+    case SettingId::HdrPaperWhiteNits: return "HDR 기준 밝기";
+    case SettingId::HdrPeakNits: return "HDR 최대 밝기";
+    case SettingId::ReconstructionProvider: return "업스케일링 방식";
+    case SettingId::ReconstructionQuality: return "업스케일링 품질";
+    case SettingId::ResolutionMode: return "해상도 설정 방식";
+    case SettingId::ManualScalePercent: return "렌더링 해상도 비율";
+    case SettingId::DynamicResolution: return "동적 해상도";
+    case SettingId::TargetRenderFps: return "목표 프레임";
+    case SettingId::DynamicMinPercent: return "동적 해상도 최소 비율";
+    case SettingId::DynamicMaxPercent: return "동적 해상도 최대 비율";
+    case SettingId::Sharpening: return "선명도";
+    case SettingId::FrameGenerationProvider: return "프레임 생성 방식";
+    case SettingId::FrameGenerationMode: return "프레임 생성 모드";
+    case SettingId::FrameGenerationMultiplier: return "프레임 생성 배수";
+    case SettingId::LowLatency: return "입력 지연 줄이기";
+    case SettingId::TextureQuality: return "텍스처 품질";
+    case SettingId::TextureBudgetMib: return "텍스처 메모리 한도";
+    case SettingId::AnisotropicFiltering: return "이방성 필터링";
+    case SettingId::GeometryQuality: return "모델 품질";
+    case SettingId::FoliageQuality: return "식생 품질";
+    case SettingId::MaterialQuality: return "재질 품질";
+    case SettingId::PomQuality: return "표면 입체감 품질";
+    case SettingId::ShadowMode: return "그림자 방식";
+    case SettingId::ShadowQuality: return "그림자 품질";
+    case SettingId::ShadowDistanceM: return "그림자 표시 거리";
+    case SettingId::ContactShadows: return "접촉 그림자";
+    case SettingId::AoMode: return "주변 음영 방식";
+    case SettingId::AoQuality: return "주변 음영 품질";
+    case SettingId::GiMode: return "간접 조명 방식";
+    case SettingId::ReflectionMode: return "반사 방식";
+    case SettingId::ReflectionQuality: return "반사 품질";
+    case SettingId::TransparencyQuality: return "투명 효과 품질";
+    case SettingId::RefractionQuality: return "굴절 품질";
+    case SettingId::VolumetricQuality: return "안개와 광선 품질";
+    case SettingId::ParticleQuality: return "파티클 품질";
+    case SettingId::Bloom: return "빛 번짐";
+    case SettingId::BloomStrength: return "빛 번짐 강도";
+    case SettingId::MotionBlur: return "모션 블러";
+    case SettingId::DepthOfField: return "피사계 심도";
+    case SettingId::ColorGrading: return "색 보정";
+    case SettingId::AdaptiveShading: return "적응형 셰이딩";
+    default: return std::string(descriptor.key);
+    }
 }
 std::string GraphicsSettingDisplayValue(SettingId id, std::string_view token)
 {

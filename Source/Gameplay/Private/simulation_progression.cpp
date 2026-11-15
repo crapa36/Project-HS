@@ -42,9 +42,7 @@ void GameSimulation::SimulationWorld::CollectPickup(PickupActor &pickup)
     }
     else if (pickup.kind == PickupKind::Magnet)
     {
-        for (auto &experience : actors.pickups)
-            if (!experience.dead && experience.kind == PickupKind::Experience)
-                experience.globally_attracted = true;
+        progression.pickup_work.ApplyMagnet(actors.pickups, pickup.id.value, rules.arena_half_extent);
         DomainSignalGeometry geometry{};
         geometry.kind = DomainSignalGeometryKind::Circle;
         geometry.radius = rules.arena_half_extent * 3.0f;
@@ -451,9 +449,7 @@ void GameSimulation::SimulationWorld::XpCardPhase()
             rules.growth.experience_pickup_radius *
                 rules.growth.experience_pickup_radius)
         {
-            const auto magnet = pickup.kind == PickupKind::Magnet;
             CollectPickup(pickup);
-            if (magnet) work.AfterMagnet(actors.pickups, *id, rules.arena_half_extent);
         }
         else
             work.Update(pickup, attracted && rules.growth.experience_pickup_speed > 0.0f);

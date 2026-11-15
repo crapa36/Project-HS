@@ -32,7 +32,6 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
-#include <thread>
 
 namespace hs::gameplay_detail
 {
@@ -542,9 +541,7 @@ struct GameSimulation::SimulationWorld
 
     struct ObservationState
     {
-        std::uint32_t mutation_depth{}, active_borrows{};
         bool small_facts_dirty{true}, checksum_dirty{true};
-        std::optional<std::thread::id> owner_thread;
     };
     mutable ObservationState observation;
     struct SmallReadFacts
@@ -559,15 +556,6 @@ struct GameSimulation::SimulationWorld
         std::size_t enemies{}, projectiles{}, areas{}, pickups{}, mini_bombs{}, spawn_warnings{}, deliveries{};
     };
     mutable SmallReadFacts read_facts;
-    void RequireOwnerThread() const;
-    struct MutationScope
-    {
-        SimulationWorld &world;
-        explicit MutationScope(SimulationWorld &world);
-        ~MutationScope() noexcept;
-        MutationScope(const MutationScope &) = delete;
-        MutationScope &operator=(const MutationScope &) = delete;
-    };
     void InitializeContentReadFacts();
     void RefreshSmallReadFacts() const;
     SessionProbe BuildSessionProbe() const;

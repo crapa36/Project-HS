@@ -91,12 +91,14 @@ struct NavigationGrid
         requested_target = target;
         flow_dirty = true;
     }
-    void RebuildFlow(Float2 target) noexcept
+    void RebuildFlow(Float2 target)
     {
-        flow_dirty = false;
+        requested_target = target;
+        flow_dirty = true;
+        for (auto &bucket : flow_pending) bucket.clear();
         distance.fill(kUnreachableNavigationDistance);
         const auto target_index = NearestClearCell(target);
-        if (target_index < 0) return;
+        if (target_index < 0) { flow_dirty = false; return; }
         distance[target_index] = 0;
         flow_pending[0].emplace_back(0, target_index);
         std::size_t pending_count = 1;
@@ -125,8 +127,9 @@ struct NavigationGrid
                 ++pending_count;
             }
         }
+        flow_dirty = false;
     }
-    Float2 NextWaypoint(Float2 from, Float2 fallback) noexcept
+    Float2 NextWaypoint(Float2 from, Float2 fallback)
     {
         // Use the cell-gate position, even if the player moved before this first query.
         if (flow_dirty) RebuildFlow(requested_target);

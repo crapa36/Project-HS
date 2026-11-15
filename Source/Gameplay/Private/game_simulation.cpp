@@ -81,55 +81,21 @@ GameSimulation::GameSimulation() : impl_(std::make_unique<SimulationWorld>())
 {
 }
 
-GameSimulation::~GameSimulation()
-{
-    assert(impl_->observation.active_borrows == 0 && "Read scope must end before its simulation owner.");
-}
+GameSimulation::~GameSimulation() = default;
 
-void GameSimulation::SimulationWorld::RequireOwnerThread() const
-{
-    const auto current = std::this_thread::get_id();
-    if (!observation.owner_thread) observation.owner_thread = current;
-    if (*observation.owner_thread != current)
-        throw std::logic_error("Gameplay read/mutation must remain on its owner thread.");
-}
-
-GameSimulation::SimulationWorld::MutationScope::MutationScope(SimulationWorld &owner) : world(owner)
-{
-    world.RequireOwnerThread();
-    if (world.observation.active_borrows != 0)
-        throw std::logic_error("Gameplay mutation attempted while TickReadView is borrowed.");
-    // Input bookkeeping can change the checksum without changing displayed facts.
-    world.observation.checksum_dirty = true;
-    ++world.observation.mutation_depth;
-}
-GameSimulation::SimulationWorld::MutationScope::~MutationScope() noexcept
-{
-    assert(world.observation.mutation_depth != 0);
-    --world.observation.mutation_depth;
-}
-GameSimulation::ScopedTickReadView::ScopedTickReadView(SimulationWorld &owner, TickReadView view)
-    : owner_(&owner), view_(std::move(view)) { ++owner_->observation.active_borrows; }
-GameSimulation::ScopedTickReadView::ScopedTickReadView(ScopedTickReadView &&other) noexcept
-    : owner_(std::exchange(other.owner_, nullptr)), view_(other.view_) {}
-GameSimulation::ScopedTickReadView::~ScopedTickReadView()
-{
-    if (owner_) { assert(owner_->observation.active_borrows != 0); --owner_->observation.active_borrows; }
-}
+GameSimulation::ScopedTickReadView::ScopedTickReadView(TickReadView view)
+    : view_(std::move(view)) {}
+GameSimulation::ScopedTickReadView::ScopedTickReadView(ScopedTickReadView &&other) noexcept = default;
+GameSimulation::ScopedTickReadView::~ScopedTickReadView() = default;
 const TickReadView &GameSimulation::ScopedTickReadView::View() const &
 {
-    if (!owner_) throw std::logic_error("TickReadView scope was moved from.");
-    owner_->RequireOwnerThread();
     return view_;
 }
 GameSimulation::ScopedTickReadView GameSimulation::BorrowTickReadView() const
 {
-    impl_->RequireOwnerThread();
-    if (impl_->observation.mutation_depth != 0)
-        throw std::logic_error("TickReadView cannot be borrowed during mutation.");
     if (impl_->initialized) impl_->UpdateChecksum();
     if (impl_->observation.small_facts_dirty) impl_->RefreshSmallReadFacts();
-    return {*impl_, impl_->MakeTickReadView()};
+    return {impl_->MakeTickReadView()};
 }
 
 void GameSimulation::SimulationWorld::RebuildNavigation()
@@ -153,7 +119,7 @@ Result GameSimulation::Initialize(const SimulationConfig &config)
 Result GameSimulation::Initialize(const SimulationConfig &config,
                                   const SimulationRules &rules)
 {
-    SimulationWorld::MutationScope mutation(*impl_);
+    impl_->observation.checksum_dirty = true;
     if (impl_->initialized)
     {
         return Result::Failure(ErrorCode::InvalidState, "hs_gameplay",
@@ -194,7 +160,8 @@ TickResult GameSimulation::TickFixed(const InputFrame &input)
     {
         return {};
     }
-    SimulationWorld::MutationScope mutation(*impl_);
+    // Input bookkeeping can change the checksum without changing displayed facts.
+    impl_->observation.checksum_dirty = true;
 #ifdef HS_DEVELOPMENT_TOOLS
     impl_->ResetTimings();
 #endif
@@ -237,9 +204,6 @@ TickResult GameSimulation::TickFixed(const InputFrame &input)
 
 GameplayChecksum GameSimulation::ComputeChecksum() const
 {
-    impl_->RequireOwnerThread();
-    if (impl_->observation.mutation_depth != 0)
-        throw std::logic_error("Checksum cannot observe an active mutation.");
     if (!impl_->initialized) return impl_->checksum;
     impl_->UpdateChecksum();
     return impl_->config.capture_checksums
@@ -310,7 +274,7 @@ Result GameSimulation::ApplyDebugCommand(const DebugCommand &command)
     return Result::Failure(ErrorCode::InvalidState, "hs_gameplay",
                            "Debug commands are unavailable in this build.");
 #else
-    SimulationWorld::MutationScope mutation(*impl_);
+    impl_->observation.checksum_dirty = true;
     if (!impl_->initialized)
     {
         return Result::Failure(ErrorCode::InvalidState, "hs_gameplay",
@@ -453,7 +417,7 @@ Result GameSimulation::ApplyDebugCommand(const DebugCommand &command)
 
 Result GameSimulation::ApplySimulationRules(const SimulationRules &rules)
 {
-    SimulationWorld::MutationScope mutation(*impl_);
+    impl_->observation.checksum_dirty = true;
     if (!impl_->initialized || impl_->session_phase != SessionPhase::MainMenu)
         return Result::Failure(ErrorCode::InvalidState, "hs_gameplay",
                                "Gameplay data Hot Reload requires the main menu.");
@@ -492,7 +456,6 @@ SimulationDiagnostics GameSimulation::GetDiagnostics() const
 SimulationTimingDiagnostics GameSimulation::GetTimingDiagnostics() const
 {
 #ifdef HS_DEVELOPMENT_TOOLS
-    impl_->RequireOwnerThread();
     return impl_->timings;
 #else
     return {};
@@ -502,7 +465,7 @@ SimulationTimingDiagnostics GameSimulation::GetTimingDiagnostics() const
 void GameSimulation::ApplyUiAction(const UiAction &action)
 {
     const auto checksum_was_dirty = impl_->observation.checksum_dirty;
-    SimulationWorld::MutationScope mutation(*impl_);
+    impl_->observation.checksum_dirty = true;
     const auto changed = impl_->ApplyUiAction(action);
     impl_->observation.small_facts_dirty |= changed;
     if (!changed) impl_->observation.checksum_dirty = checksum_was_dirty;
@@ -584,7 +547,6 @@ void GameSimulation::SimulationWorld::InitializeContentReadFacts()
 void GameSimulation::SimulationWorld::RefreshSmallReadFacts() const
 {
     auto timing = Measure(SimulationTimingId::SmallFacts);
-    assert(observation.active_borrows == 0);
     auto &facts = read_facts;
     facts.session = BuildSessionProbe();
     facts.charge_range = facts.charge_radius = 0.0f;
@@ -812,15 +774,12 @@ std::span<const DomainSignal> GameSimulation::PendingDomainSignals() const noexc
 
 void GameSimulation::ClearDomainSignals()
 {
-    impl_->RequireOwnerThread();
-    if (impl_->observation.active_borrows != 0 || impl_->observation.mutation_depth != 0)
-        throw std::logic_error("Domain signals cannot clear during a read/mutation scope.");
     impl_->combat_state.domain_signals.clear();
 }
 
 Result GameSimulation::Shutdown()
 {
-    SimulationWorld::MutationScope mutation(*impl_);
+    impl_->observation.checksum_dirty = true;
     if (!impl_->initialized)
     {
         return Result::Success();

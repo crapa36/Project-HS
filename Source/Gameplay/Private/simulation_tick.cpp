@@ -554,39 +554,16 @@ std::optional<ConstEnemyRow> GameSimulation::SimulationWorld::NearestEnemy(Float
 
 void GameSimulation::SimulationWorld::RunPipeline()
 {
-    for (const auto phase_id : gameplay_detail::kSimulationPipeline)
-    {
-        pipeline_phase = phase_id;
 #ifdef HS_DEVELOPMENT_TOOLS
-        static constexpr std::array timing_ids{
-            SimulationTimingId::SessionTimer, SimulationTimingId::Spawn, SimulationTimingId::SpawnBarrier,
-            SimulationTimingId::AiIntent, SimulationTimingId::CastAttack, SimulationTimingId::AbilitySpawnBarrier,
-            SimulationTimingId::Movement, SimulationTimingId::SpatialGrid, SimulationTimingId::CollisionHit,
-            SimulationTimingId::DamageStatus, SimulationTimingId::DeathDrop, SimulationTimingId::XpCard,
-            SimulationTimingId::CleanupBarrier, SimulationTimingId::GameplayHash};
-        static_assert(timing_ids.size() == kSimulationPipeline.size());
-        auto phase_timing = Measure(timing_ids[static_cast<std::size_t>(phase_id)]);
+#define HS_RUN_SIMULATION_PHASE(name, method) \
+    { pipeline_phase = SimulationPhaseId::name; auto phase_timing = Measure(SimulationTimingId::name); method(); }
+#else
+#define HS_RUN_SIMULATION_PHASE(name, method) \
+    { pipeline_phase = SimulationPhaseId::name; method(); }
 #endif
-        switch (phase_id)
-        {
-        case SimulationPhaseId::SessionTimer: SessionTimerPhase(); break;
-        case SimulationPhaseId::Spawn: SpawnPhase(); break;
-        case SimulationPhaseId::SpawnBarrier: CommitSpawnBarrier(); break;
-        case SimulationPhaseId::AiIntent: AiIntentPhase(); break;
-        case SimulationPhaseId::CastAttack: CastAttackPhase(); break;
-        case SimulationPhaseId::AbilitySpawnBarrier:
-            CommitAbilitySpawnBarrier();
-            break;
-        case SimulationPhaseId::Movement: MovementPhase(); break;
-        case SimulationPhaseId::SpatialGrid: SpatialGridPhase(); break;
-        case SimulationPhaseId::CollisionHit: CollisionHitPhase(); break;
-        case SimulationPhaseId::DamageStatus: DamageStatusPhase(); break;
-        case SimulationPhaseId::DeathDrop: DeathDropPhase(); break;
-        case SimulationPhaseId::XpCard: XpCardPhase(); break;
-        case SimulationPhaseId::CleanupBarrier: CommitCleanupBarrier(); break;
-        case SimulationPhaseId::GameplayHash: UpdateChecksum(); break;
-        }
-    }
+    HS_SIMULATION_PHASES(HS_RUN_SIMULATION_PHASE)
+#undef HS_RUN_SIMULATION_PHASE
+#undef HS_SIMULATION_PHASES
 }
 
 void GameSimulation::SimulationWorld::CommitSpawnBarrier()
