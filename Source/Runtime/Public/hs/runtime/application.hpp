@@ -90,7 +90,6 @@ struct ApplicationConfig
     BarrierMode barrier_mode{BarrierMode::Automatic};
     std::filesystem::path artifact_directory{"Artifacts/runtime"};
     std::filesystem::path generation_pointer;
-    std::filesystem::path heartbeat_path;
     std::filesystem::path playtest_output_directory;
     std::filesystem::path replay_directory;
     std::vector<ApplicationTimelineAction> timeline_actions;

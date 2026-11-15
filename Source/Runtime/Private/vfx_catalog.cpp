@@ -53,6 +53,8 @@ VfxCatalog &VfxCatalog::operator=(VfxCatalog &&other) noexcept
 Result VfxCatalog::Bind(const VfxImage &image)
 {
     if (&image == &image_) return Result::Success();
+    if (image.definitions.size() != image.legacy_effect_policies.size())
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX legacy effect policy count is invalid.");
     PreparedVfxFresnelRecipeView recipe_view;
     if (auto result = PreparedVfxFresnelRecipeView::Create(image.fresnel_recipes, recipe_view); !result)
         return result;
@@ -65,15 +67,6 @@ Result VfxCatalog::Bind(const VfxImage &image)
     mesh_recipe_view_ = mesh_recipe_view;
     return Result::Success();
 }
-void VfxCatalog::Swap(VfxCatalog &prepared) noexcept
-{
-    using std::swap;
-    swap(image_, prepared.image_);
-    swap(fresnel_recipe_view_, prepared.fresnel_recipe_view_);
-    swap(mesh_recipe_view_, prepared.mesh_recipe_view_);
-    swap(owned_, prepared.owned_);
-}
-
 const CookedParticleSprite *VfxCatalog::FindSprite(AssetId id) const noexcept
 {
     const auto found = std::lower_bound(image_.sprites.begin(), image_.sprites.end(), id.value,
@@ -118,7 +111,7 @@ Result VfxCatalog::PrepareEvent(const PresentationEvent &event, float decorative
     }
     if (!std::isfinite(decorative_fraction) || decorative_fraction < 0 || decorative_fraction > 1)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Decorative particle fraction is invalid.");
-    const bool decorative = image_.decorative_definitions[static_cast<std::size_t>(definition - image_.definitions.data())] != 0;
+    const auto &policy = image_.legacy_effect_policies[static_cast<std::size_t>(definition - image_.definitions.data())];
     const auto parameters = DecodeVfxParameters(event.parameters);
     const auto direction_length = std::hypot(parameters.direction.x, parameters.direction.z);
     const auto finite = [](Float3 value) noexcept {
@@ -134,14 +127,10 @@ Result VfxCatalog::PrepareEvent(const PresentationEvent &event, float decorative
     VfxPreparedLegacyEvent candidate;
     candidate.event = &event; candidate.definition = definition;
     candidate.parameters = parameters; candidate.forward = forward; candidate.right = right;
-    candidate.decorative_fraction = decorative_fraction; candidate.decorative = decorative;
+    candidate.decorative_fraction = decorative_fraction; candidate.decorative = policy.decorative;
     candidate.particles_replaced = particles_replaced; candidate.mesh_replaced = mesh_replaced;
     candidate.first_index = old_index_size;
-    const auto typed = std::lower_bound(image_.effect_lookup_by_id.begin(), image_.effect_lookup_by_id.end(),
-        event.asset.value, [](const auto &effect, std::uint64_t id) { return effect.effect_id < id; });
-    if (typed != image_.effect_lookup_by_id.end() && typed->effect_id == event.asset.value &&
-        typed->handle && typed->handle <= image_.program.effects.size())
-        candidate.importance = image_.program.effects[typed->handle - 1].importance;
+    candidate.importance = policy.importance;
     if (definition->kind != VfxDefinitionKind::Line && ground_suppression.all_particles)
         return Result::Success();
     if (definition->kind == VfxDefinitionKind::Line)
@@ -158,38 +147,25 @@ Result VfxCatalog::PrepareEvent(const PresentationEvent &event, float decorative
     // owns this boundary for the area's entire lifetime.
     const bool typed_wavefront = event.asset.value == kShockwaveRelease.value &&
         event.geometry.kind == PresentationGeometryKind::RingGaps && image_.has_typed_wavefront;
-    try
+    for (std::uint32_t index = 0; index < definition->emitter_count; ++index)
     {
-        for (std::uint32_t index = 0; index < definition->emitter_count; ++index)
-        {
-            const auto emitter_index = definition->first_emitter + index;
-            const auto &emitter = image_.emitters[emitter_index];
-            if ((ground_suppression.ground_ring && emitter.renderer == VfxRenderer::Ground &&
-                 emitter.primitive == VfxPrimitive::Ring) ||
-                (ground_suppression.ground_disc && emitter.renderer == VfxRenderer::Ground &&
-                 emitter.primitive == VfxPrimitive::Disc) ||
-                (ground_suppression.segment_solid_trail && emitter.renderer == VfxRenderer::Segment &&
-                 emitter.primitive == VfxPrimitive::SolidTrail))
-                continue;
-            if (typed_wavefront && emitter.renderer == VfxRenderer::Ground && emitter.primitive == VfxPrimitive::Ring)
-                continue;
-            emitter_indices.push_back(emitter_index);
-        }
-    }
-    catch (...)
-    {
-        emitter_indices.resize(old_index_size);
-        prepared = {};
-        return Result::Failure(ErrorCode::TaskFailed, "hs_vfx", "Preparing legacy VFX emitter indices failed.");
+        const auto emitter_index = definition->first_emitter + index;
+        const auto &emitter = image_.emitters[emitter_index];
+        if ((ground_suppression.ground_ring && emitter.renderer == VfxRenderer::Ground &&
+             emitter.primitive == VfxPrimitive::Ring) ||
+            (ground_suppression.ground_disc && emitter.renderer == VfxRenderer::Ground &&
+             emitter.primitive == VfxPrimitive::Disc) ||
+            (ground_suppression.segment_solid_trail && emitter.renderer == VfxRenderer::Segment &&
+             emitter.primitive == VfxPrimitive::SolidTrail))
+            continue;
+        if (typed_wavefront && emitter.renderer == VfxRenderer::Ground && emitter.primitive == VfxPrimitive::Ring)
+            continue;
+        emitter_indices.push_back(emitter_index);
     }
     candidate.index_count = emitter_indices.size() - candidate.first_index;
     if (auto result = SetPreparedReplacements(candidate, emitter_indices,
             particles_replaced, mesh_replaced); !result)
-    {
-        emitter_indices.resize(old_index_size);
-        prepared = {};
         return result;
-    }
     prepared = candidate;
     return Result::Success();
 }

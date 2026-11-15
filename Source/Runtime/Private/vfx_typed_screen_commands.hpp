@@ -21,6 +21,7 @@ struct VfxLowHealthPulseState
     [[nodiscard]] float EntryFade(double display_tick) const noexcept;
 };
 [[nodiscard]] bool IsVfxTypedScreenEffect(const VfxImage &, VfxEffectHandle) noexcept;
+// The image must be prepared and remain immutable during consumption.
 [[nodiscard]] Result BuildVfxTypedScreenCommands(const VfxImage &,
     VfxEventView, std::span<const VfxPersistentInput>, Tick observation_tick,
     double display_tick,

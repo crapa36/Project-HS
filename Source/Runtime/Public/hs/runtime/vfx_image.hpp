@@ -24,7 +24,7 @@ struct VfxLightRecipe
     float seconds{}, radius{};
     std::array<float,4> knots{};
     Float3 rgb{};
-    float hdr{}, alpha{};
+    float intensity_scale{};
     VfxRange curve_keys{};
     std::uint32_t interpolation{};
     bool hero{};
@@ -32,20 +32,19 @@ struct VfxLightRecipe
 // Prepared immutable ballistic mesh outputs. One row corresponds to one
 // accepted source/output pair, in authored order; runtime builders only bind
 // live event or persistent-owner data to these constants.
+enum class VfxBallisticDirection : std::uint8_t { Up, EventNormal, ProjectileVelocity };
 struct VfxBallisticRecipe
 {
     std::uint64_t effect_id{};
-    std::uint32_t effect_handle{}, source_index{}, source_stable_id{}, payload_kind{}, importance{}, timing_kind{};
-    std::uint32_t shape{}, min_quality{}, gradient_row{}, mesh_index{}, count{};
-    std::uint32_t knot_count{};
-    VfxSourceType source_type{};
-    VfxMotionKind motion{};
-    std::array<float, 4> knots{};
-    float seconds{}, min_size{}, max_size{}, min_speed{}, max_speed{};
+    std::uint32_t source_seed_salt{}, payload_kind{}, importance{}, min_quality{}, gradient_row{}, mesh_index{}, count{};
+    VfxBallisticDirection direction{};
+    bool persistent_status{}, cosmetic{};
+    double birth_floor_ticks{}, birth_ceil_ticks{};
+    float birth_fraction{}, event_lifetime{}, end_knot{}, seconds{};
+    float min_size{}, max_size{}, min_speed{}, max_speed{};
     float gravity{}, bounce{}, drag{.8f}, speed{-1}, cone{}, min_spin{}, max_spin{};
     Float4 color{};
     float hdr{};
-    bool persistent_status{};
 };
 struct VfxDistortionRecipe
 {
@@ -77,6 +76,17 @@ enum class VfxGroundRecipeKind : std::uint8_t
 };
 inline constexpr std::uint32_t kVfxGroundEventDirectAdd = 1u;
 inline constexpr std::uint32_t kVfxGroundEventDirectSoft = 2u;
+inline constexpr std::uint32_t kVfxGroundEventFixedDuration = 4u;
+inline constexpr std::uint32_t kVfxGroundEventOwnerDuration = 8u;
+inline constexpr std::uint32_t kVfxGroundEventChargedPulse = 16u;
+inline constexpr std::uint32_t kVfxGroundEventWaveStart = 32u;
+inline constexpr std::uint32_t kVfxGroundEventWaveWarning = 64u;
+inline constexpr std::uint32_t kVfxGroundEntityPolar = 1u << 7;
+inline constexpr std::uint32_t kVfxGroundEntityState = 1u << 8;
+inline constexpr std::uint32_t kVfxGroundEntityCrown = 1u << 9;
+inline constexpr std::uint32_t kVfxGroundEntityPickup = 1u << 10;
+inline constexpr std::uint32_t kVfxGroundEntityRelic = 1u << 11;
+inline constexpr std::uint32_t kVfxGroundEntityCharged = 1u << 12;
 struct VfxGroundRecipe
 {
     std::uint64_t effect_id{};
@@ -102,73 +112,39 @@ struct VfxGroundRecipe
     };
     std::array<MaskVariant,3> mask_variants{};
     bool texture_contract_valid{};
-    std::uint32_t source_output_count{}, effect_lookup_count{};
+    std::uint32_t source_output_count{};
     bool source_parameters_empty{};
     // Aggregated once per effect; only the first row in its range carries these bits.
-    std::uint32_t event_admission_profiles{};
+    std::uint32_t admission_profiles{};
 };
-// Ground is consumed by both the canonical identity writer and release C++
-// codegen. Keep its semantic field inventory in one typed list so a new field
-// cannot silently be omitted by either sink.
-template <typename Visit>
-constexpr void VisitVfxGroundMaskVariantFields(const VfxGroundRecipe::MaskVariant &mask, Visit &&visit)
+enum class VfxFlashEventKind : std::uint8_t
 {
-    visit("slices", mask.slices);
-    visit("strength", mask.strength);
-    visit("valid", mask.valid);
-    visit("present", mask.present);
-}
-template <typename Visit>
-constexpr void VisitVfxGroundRecipeFields(const VfxGroundRecipe &r, Visit &&visit)
+    Unsupported,
+    Point,
+    Context,
+    ProjectileContact,
+    ConeMuzzle,
+    ConeBossEnergy,
+    RingBossEnergy,
+    Circle,
+    PickupCollect
+};
+
+struct VfxFlashEffectRecipe
 {
-    visit("effect_id", r.effect_id);
-    visit("effect_handle", r.effect_handle);
-    visit("source_index", r.source_index);
-    visit("source_stable_id", r.source_stable_id);
-    visit("output_index", r.output_index);
-    visit("gradient_row", r.gradient_row);
-    visit("payload_kind", r.payload_kind);
-    visit("timing_kind", r.timing_kind);
-    visit("min_quality", r.min_quality);
-    visit("source_type", r.source_type);
-    visit("profile", r.profile);
-    visit("motion", r.motion);
-    visit("kind", r.kind);
-    visit("knot_count", r.knot_count);
-    visit("knots", r.knots);
-    visit("pulse_curve_keys", r.pulse_curve_keys);
-    visit("pulse_curve_interpolation", r.pulse_curve_interpolation);
-    visit("tick_count", r.tick_count);
-    visit("seconds", r.seconds);
-    visit("primary", r.primary);
-    visit("secondary", r.secondary);
-    visit("rgb", r.rgb);
-    visit("hdr", r.hdr);
-    visit("alpha", r.alpha);
-    visit("motion_rate_hz", r.motion_rate_hz);
-    visit("motion_amplitude", r.motion_amplitude);
-    visit("motion_inset_fraction", r.motion_inset_fraction);
-    visit("tertiary", r.tertiary);
-    visit("mask_variants", r.mask_variants);
-    visit("texture_contract_valid", r.texture_contract_valid);
-    visit("source_output_count", r.source_output_count);
-    visit("effect_lookup_count", r.effect_lookup_count);
-    visit("source_parameters_empty", r.source_parameters_empty);
-    visit("event_admission_profiles", r.event_admission_profiles);
-}
+    VfxRange outputs{};
+    VfxFlashEventKind kind{VfxFlashEventKind::Unsupported};
+    std::uint32_t importance{};
+};
+
 struct VfxFlashRecipe
 {
-    std::uint64_t effect_id{};
-    std::uint32_t effect_handle{}, source_index{}, source_stable_id{}, output_index{};
-    std::uint32_t payload_kind{}, min_quality{};
-    std::array<float,2> knots{};
-    float seconds{};
-    std::uint32_t coverage_quality{};
-    VfxFlashSpawnInput spawn{};
+    std::uint32_t source_index{}, source_stable_id{}, output_index{};
+    VfxFlashTemplate spawn{};
     std::array<VfxRange,3> mask_slice_ranges{};
     std::array<float,3> mask_strengths{};
     std::uint8_t supported_quality_mask{}, mask_present_mask{};
-    bool unique_effect_identity{};
+    bool cosmetic{}, suppress_smoke_motion{};
 };
 struct VfxPersistentStampRecipe
 {
@@ -176,7 +152,7 @@ struct VfxPersistentStampRecipe
     std::uint32_t effect_handle{}, source_visual_kind{}, payload_kind{}, source_stable_id{};
     std::uint32_t timing_kind{};
     float fixed_seconds{}, source_end{};
-    VfxFlashSpawnInput spawn{};
+    VfxFlashTemplate spawn{};
     std::array<VfxRange,3> mask_slices{};
     std::array<float,3> mask_strengths{};
     std::uint8_t supported_quality_mask{}, mask_present_mask{};
@@ -187,7 +163,7 @@ struct VfxPersistentFireRecipe
     std::uint64_t effect_id{};
     std::uint32_t effect_handle{}, source_stable_id{}, rate{};
     float radius_scale{};
-    VfxFlashSpawnInput spawn{};
+    VfxFlashTemplate spawn{};
     VfxRange mask_slices{};
     float mask_strength{};
     bool authoritative{};
@@ -196,8 +172,7 @@ struct VfxOwnedStatusTickRecipe
 {
     std::uint64_t tick_effect_id{}, status_effect_id{};
     std::uint32_t tick_effect_handle{}, status_effect_handle{}, min_quality{};
-    float tick_seconds{}, delay_fraction{}, lifetime_fraction{};
-    VfxFlashSpawnInput spawn{};
+    VfxFlashTemplate spawn{};
     std::array<std::uint32_t,3> mask_slices{};
     float mask_strength{};
     bool bleed{};
@@ -205,6 +180,24 @@ struct VfxOwnedStatusTickRecipe
 // Mote source/output records keep immutable authored parameter and texture
 // interpretation out of per-event and per-frame builders. Rows are indexed by
 // their source/output table index, so ordinary lookups are bounds checks.
+inline constexpr std::uint32_t kVfxMoteBurstPoint = 1u << 0;
+inline constexpr std::uint32_t kVfxMoteBurstContext = 1u << 1;
+inline constexpr std::uint32_t kVfxMoteResidualEntity = 1u << 2;
+inline constexpr std::uint32_t kVfxMoteTrapPoint = 1u << 3;
+inline constexpr std::uint32_t kVfxMoteSuicideCircle = 1u << 4;
+inline constexpr std::uint32_t kVfxMoteTrapPending = 1u << 5;
+inline constexpr std::uint32_t kVfxMoteTrapArmed = 1u << 6;
+inline constexpr std::uint32_t kVfxMoteTrapRetreat = 1u << 7;
+inline constexpr std::uint32_t kVfxMoteBleedTick = 1u << 8;
+inline constexpr std::uint32_t kVfxMoteBurnTick = 1u << 9;
+inline constexpr std::uint32_t kVfxMoteBleedOwner = 1u << 10;
+inline constexpr std::uint32_t kVfxMoteBurnOwner = 1u << 11;
+inline constexpr std::uint32_t kVfxMoteStatusPresence = 1u << 12;
+inline constexpr std::uint32_t kVfxMotePickupPresence = 1u << 13;
+inline constexpr std::uint32_t kVfxMoteChargedPresence = 1u << 14;
+inline constexpr std::uint32_t kVfxMoteSuicidePresence = 1u << 15;
+inline constexpr std::uint32_t kVfxMoteProjectileSpark = 1u << 16;
+inline constexpr std::uint32_t kVfxMoteSafeSector = 1u << 17;
 struct VfxMoteSourceRecipe
 {
     std::uint32_t count{};
@@ -212,30 +205,32 @@ struct VfxMoteSourceRecipe
     float curl{.2f}, drag{.8f}, speed{}, cone_degrees{};
     bool common_params_valid{}, rate_valid{}, residual_valid{}, spark_valid{};
     std::uint64_t effect_id{};
-    std::uint32_t effect_handle{}, effect_lookup_count{}, stable_id{};
+    std::uint32_t effect_handle{}, effect_routes{}, stable_id{};
     VfxRange output_range{};
     std::array<float,2> knots{};
     bool output_range_valid{}, common_route_valid{}, residual_route_valid{}, rate_route_valid{}, tick_route_valid{}, spark_route_valid{};
+    bool cosmetic{};
 };
 struct VfxMoteOutputRecipe
 {
-    std::uint32_t min_quality{}, gradient_row{};
+    std::uint32_t min_quality{};
     std::array<VfxRange,3> mask_slices{};
     std::array<float,3> mask_strengths{};
     std::uint32_t persistent_curve_row{0xffffffffu};
-    float persistent_size{}, hdr{};
-    Float4 color{};
+    float persistent_size{};
+    VfxFlashAppearance appearance;
     std::uint8_t mask_present_mask{}, mask_quality_mask{0x7};
     bool output_color_valid{}, persistent_params_valid{}, spark_textures_valid{};
     std::uint32_t common_recipe_index{0xffffffffu};
     bool empty_parameters_valid{}, residual_route_valid{}, rate_route_valid{}, tick_route_valid{}, persistent_route_valid{}, spark_route_valid{};
 };
+enum class VfxScreenRoute : std::uint8_t { Unsupported=0, EventHit=1, PersistentLowHealth=2 };
 struct VfxScreenEffectRecipe
 {
     std::uint64_t effect_id{};
     float seconds{};
     VfxRange outputs{};
-    bool route_valid{};
+    VfxScreenRoute route{VfxScreenRoute::Unsupported};
 };
 struct VfxScreenRecipe
 {
@@ -245,12 +240,13 @@ struct VfxScreenRecipe
     Float3 rgb{};
     float alpha{}, hdr{}, center_clear{0.62f}, edge_power{2.8f};
 };
+enum class VfxVolumeRoute : std::uint8_t { Unsupported=0, EventContext=1, EventPoint=2, PersistentEntity=3 };
 struct VfxVolumeEffectRecipe
 {
     std::uint64_t effect_id{};
     float seconds{};
     VfxRange outputs{};
-    bool route_valid{};
+    VfxVolumeRoute route{VfxVolumeRoute::Unsupported};
 };
 struct VfxVolumeRecipe
 {
@@ -261,13 +257,12 @@ struct VfxVolumeRecipe
     std::uint32_t steps{}, half_resolution{};
     Float3 rgb{};
 };
+enum class VfxEntitySurfaceRoute : std::uint8_t { Unsupported=0, EventPhase=1, EventDeath=2, PersistentTransition=3 };
 struct VfxEntitySurfaceEffectRecipe
 {
-    std::uint64_t effect_id{};
-    std::uint32_t importance{}, payload_kind{}, input_mode{}, timing_kind{};
     float seconds{};
     VfxRange outputs{};
-    bool identity_unique{};
+    VfxEntitySurfaceRoute route{VfxEntitySurfaceRoute::Unsupported};
 };
 struct VfxEntitySurfaceRecipe
 {
@@ -407,10 +402,9 @@ struct VfxRibbonLinkEffectRecipe
 };
 struct VfxRibbonEventSourceRecipe
 {
-    std::uint32_t effect_handle{}, source_id{}, knot_count{};
-    bool axial_source{};
+    std::uint32_t source_id{}, knot_count{};
     std::array<float,4> knots{};
-    float history_seconds{};
+    float history_seconds{}, start_seconds{}, end_seconds{};
     std::array<float,3> recoil_arc_by_quality{35.0f,35.0f,35.0f};
     std::array<float,3> axial_arc_by_quality{35.0f,35.0f,35.0f};
     VfxRange outputs{};
@@ -446,6 +440,12 @@ struct VfxMeshEffectRecipe
     VfxRange outputs{};
     bool route_valid{};
 };
+struct VfxLegacyEffectPolicy
+{
+    std::uint32_t importance{};
+    bool decorative{};
+};
+
 // Borrowed immutable rows. Generated storage lives for the process; developer
 // storage must remain alive until all users of the adopted image have stopped.
 struct VfxImage
@@ -454,7 +454,7 @@ struct VfxImage
     std::span<const CookedParticleEmitter> emitters;
     std::span<const CookedParticleSprite> sprites;
     std::span<const std::uint8_t> authored_mesh_indices;
-    std::span<const std::uint8_t> decorative_definitions;
+    std::span<const VfxLegacyEffectPolicy> legacy_effect_policies;
     VfxProgramView program;
     bool has_typed_wavefront{};
     std::uint32_t sprite_count{};
@@ -472,7 +472,7 @@ struct VfxImage
     std::span<const VfxDecalRecipe> decal_recipes;
     std::span<const VfxRange> ground_effect_ranges;
     std::span<const VfxGroundRecipe> ground_recipes;
-    std::span<const VfxRange> flash_effect_ranges;
+    std::span<const VfxFlashEffectRecipe> flash_effect_recipes;
     std::span<const VfxFlashRecipe> flash_recipes;
     std::span<const VfxRange> persistent_stamp_effect_ranges;
     std::span<const VfxPersistentStampRecipe> persistent_stamp_recipes;
@@ -540,8 +540,8 @@ struct VfxImage
     }
     [[nodiscard]] bool HasFlashRecipes(std::uint32_t handle) const noexcept
     {
-        if (!handle || handle > flash_effect_ranges.size()) return false;
-        const auto range = flash_effect_ranges[handle - 1];
+        if (!handle || handle > flash_effect_recipes.size()) return false;
+        const auto range = flash_effect_recipes[handle - 1].outputs;
         return range.count && range.first <= flash_recipes.size() &&
             range.count <= flash_recipes.size() - range.first;
     }

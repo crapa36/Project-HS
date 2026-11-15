@@ -1,27 +1,22 @@
 #include "vfx_typed_mote_commands.hpp"
-#include "vfx_generation_rebind.hpp"
 #include "vfx_workspace_size.hpp"
 #include <hs/render_data/render_snapshot_values.hpp>
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
+#include <functional>
 #include <iterator>
 #include <numbers>
 #include <limits>
 #include <optional>
 #include <stdexcept>
-#include <string_view>
 #include <type_traits>
 
 namespace hs::runtime_detail
 {
 namespace
 {
-constexpr std::uint32_t Hash(std::string_view s)
-{ std::uint32_t h = 2166136261u; for (const unsigned char c : s) { h ^= c; h *= 16777619u; } return h; }
-constexpr std::uint64_t Hash64(std::string_view s)
-{ std::uint64_t h = 14695981039346656037ull; for (const unsigned char c : s) { h ^= c; h *= 1099511628211ull; } return h; }
 template<class T> bool Range(VfxRange r, std::span<const T> v)
 { return r.first <= v.size() && r.count <= v.size() - r.first; }
 bool Finite(Float3 v) { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
@@ -35,32 +30,20 @@ constexpr Recipe recipes[]{
     {VfxImpactShape::SmallMote, .025f, .08f, .1f, 0},
     {VfxImpactShape::DiamondMote, .035f, .15f, .6f, 5}
 };
-struct SourceParams { std::uint32_t count{}; float curl{.2f}, drag{.8f}; };
-std::optional<SourceParams> DecodeParams(const VfxImage &image, std::size_t source_index)
+const VfxMoteSourceRecipe *EffectRecipe(const VfxImage &image, const VfxEffectRecord &effect,
+                                      VfxEffectHandle handle)
 {
-    if (source_index >= image.mote_source_recipes.size()) return {};
-    const auto &recipe = image.mote_source_recipes[source_index];
-    if (!recipe.common_params_valid) return {};
-    return SourceParams{recipe.count, recipe.curl, recipe.drag};
-}
-const VfxMoteSourceRecipe *EffectIdentity(const VfxImage &image, const VfxEffectRecord &effect)
-{
-    if (!Range(effect.sources, image.mote_source_recipes) || effect.sources.count == 0) return nullptr;
+    if (effect.handle != handle || !Range(effect.sources, image.mote_source_recipes) ||
+        effect.sources.count == 0) return nullptr;
     const auto &recipe = image.mote_source_recipes[effect.sources.first];
-    return recipe.effect_handle == effect.handle && recipe.effect_lookup_count != 0 && recipe.effect_id != 0
+    return recipe.effect_handle == effect.handle && recipe.effect_routes != 0
         ? &recipe : nullptr;
-}
-bool UniqueEffectIdentity(const VfxImage &image, const VfxEffectRecord &effect, std::uint64_t id)
-{
-    const auto *identity = EffectIdentity(image, effect);
-    return identity && identity->effect_lookup_count == 1 && identity->effect_id == id;
 }
 VfxMoteRowQuota *QuotaForSource(const VfxImage &image, std::size_t source_index,
                                 VfxMoteRowQuota *quota) noexcept
 {
-    if (!quota || source_index >= image.program.sources.size()) return nullptr;
-    const auto &source = image.program.sources[source_index];
-    return source.type == VfxSourceType::CurlMotes && source.authoritative == 0 ? quota : nullptr;
+    if (!quota || source_index >= image.mote_source_recipes.size()) return nullptr;
+    return image.mote_source_recipes[source_index].cosmetic ? quota : nullptr;
 }
 bool AdmitMoteRow(VfxMoteRowQuota *quota) noexcept
 {
@@ -107,7 +90,7 @@ bool DecodeMask(const VfxImage &image, std::size_t output_index, const Input &in
     if (recipe.mask_present_mask & (1u << quality))
     {
         const auto slices = recipe.mask_slices[quality];
-        if (out.mask_slice != 0xffffffffu || !Range(slices, program.slice_indices) || slices.count == 0)
+        if (out.mask_slice != 0xffffffffu)
             return false;
         const auto choices = program.slice_indices.subspan(slices.first, slices.count);
         out.mask_slice = choices[input.stable_seed % choices.size()];
@@ -115,17 +98,6 @@ bool DecodeMask(const VfxImage &image, std::size_t output_index, const Input &in
     }
     return true;
 }
-constexpr std::array kStatusMoteEffects{
-    Hash64("persistent.status.slow"), Hash64("persistent.status.mark")};
-constexpr std::array kPickupIdleMoteEffects{
-    Hash64("particle.pickup.xp.idle"), Hash64("particle.pickup.heal.idle"),
-    Hash64("particle.pickup.magnet.idle"), Hash64("particle.pickup.relic_chest.idle")};
-constexpr auto kChargedOverchargeLoop = Hash64("particle.upgrade.charged.overcharge_loop");
-constexpr auto kEntityPayload = Hash("EntityAttachmentPayload");
-constexpr auto kCirclePayload = Hash("CircleAreaPayload");
-constexpr auto kTrapArmedEffect = Hash64("persistent.trap.armed");
-constexpr auto kTrapPendingEffect = Hash64("persistent.trap.pending");
-constexpr auto kAmbientMotes = Hash("ambient_motes");
 constexpr float kPersistentMoteLifetimeTicks = 39.0f;
 
 struct PersistentMoteParameters
@@ -134,11 +106,10 @@ struct PersistentMoteParameters
     std::uint32_t curve_row{0xffffffffu};
 };
 
-std::optional<PersistentMoteParameters> DecodePersistentMoteParameters(
-    const VfxImage &image, std::size_t output_index, float footprint)
+std::optional<PersistentMoteParameters> EvaluatePersistentMoteParameters(
+    const VfxMoteOutputRecipe &recipe, float footprint)
 {
-    if (output_index >= image.mote_output_recipes.size() || !std::isfinite(footprint) || footprint <= 0.0f) return {};
-    const auto &recipe = image.mote_output_recipes[output_index];
+    if (!std::isfinite(footprint) || footprint <= 0.0f) return {};
     if (!recipe.persistent_params_valid) return {};
     const float size = recipe.persistent_size == 0.0f ? .05f * footprint : recipe.persistent_size;
     return std::isfinite(size) && size > 0.0f ?
@@ -170,45 +141,7 @@ std::optional<std::int64_t> PersistentBirthTick(double start_ticks,
         return {};
     return static_cast<std::int64_t>(value);
 }
-constexpr std::array kSparkEffects{
-    Hash64("particle.basic_attack"), Hash64("particle.skill.charged_shot"),
-    Hash64("particle.skill.explosive_arrow"), Hash64("particle.skill.piercing_shot"),
-    Hash64("particle.skill.ricochet_arrow"),
-    Hash64("particle.upgrade.arrow_rain.incoming_arrow")};
 struct SparkParams { std::uint32_t count{}; float cone_degrees{}, drag{}; };
-std::optional<SparkParams> DecodeSparkParams(const VfxProgramView &p,
-                                             const VfxSourceRecord &source)
-{
-    if (!Range(source.parameters, p.parameters) || source.parameters.count != 3) return {};
-    bool count_seen = false, cone_seen = false, drag_seen = false;
-    SparkParams result;
-    for (const auto &parameter : std::span(p.parameters).subspan(
-             source.parameters.first, source.parameters.count))
-    {
-        if (parameter.key == Hash("count") && parameter.type == VfxParameterType::Int &&
-            !count_seen && parameter.bits > 0 && parameter.bits <= 64)
-        { result.count = parameter.bits; count_seen = true; }
-        else if (parameter.key == Hash("cone_deg") && parameter.type == VfxParameterType::Float &&
-                 !cone_seen)
-        {
-            result.cone_degrees = std::bit_cast<float>(parameter.bits);
-            cone_seen = true;
-        }
-        else if (parameter.key == Hash("drag") && parameter.type == VfxParameterType::Float &&
-                 !drag_seen)
-        {
-            result.drag = std::bit_cast<float>(parameter.bits);
-            drag_seen = true;
-        }
-        else return {};
-    }
-    if (!count_seen || !cone_seen || !drag_seen ||
-        !std::isfinite(result.cone_degrees) || result.cone_degrees <= 0 ||
-        result.cone_degrees > 90 || !std::isfinite(result.drag) ||
-        result.drag < 0 || result.drag > 10)
-        return {};
-    return result;
-}
 Float3 Cross(Float3 a, Float3 b)
 { return {a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x}; }
 Float3 SparkDirection(Float3 velocity, float cone_degrees, std::uint32_t seed)
@@ -244,10 +177,7 @@ void AppendRateMotes(const VfxImage &image, const Input &owner,
     {
         if (source_index >= image.mote_source_recipes.size()) continue;
         const auto &source_recipe = image.mote_source_recipes[source_index];
-        if (!source_recipe.rate_route_valid || source_recipe.effect_handle != effect.handle ||
-            source_recipe.stable_id != kAmbientMotes ||
-            source_recipe.knots[0] != 0.0f || source_recipe.knots[1] != 1.0f ||
-            source_recipe.output_range.count != 1 || source_recipe.rate != 3) continue;
+        if (!source_recipe.rate_route_valid || source_recipe.effect_handle != effect.handle) continue;
         auto *source_quota = QuotaForSource(image, source_index, quota);
 
         const double start_ticks = 0.0;
@@ -276,11 +206,9 @@ void AppendRateMotes(const VfxImage &image, const Input &owner,
         if (output_index >= image.mote_output_recipes.size()) continue;
         const auto &output_recipe = image.mote_output_recipes[output_index];
         if (!output_recipe.rate_route_valid ||
-            !output_recipe.output_color_valid ||
-            output_recipe.min_quality != static_cast<std::uint32_t>(VfxQuality::Medium) ||
             output_recipe.min_quality > static_cast<std::uint32_t>(owner.quality))
             continue;
-        const auto params = DecodePersistentMoteParameters(image, output_index, extent);
+        const auto params = EvaluatePersistentMoteParameters(output_recipe, extent);
         if (!params)
             continue;
 
@@ -323,14 +251,9 @@ void AppendRateMotes(const VfxImage &image, const Input &owner,
             mote.direction = {velocity.x / horizontal, 0.0f, velocity.z / horizontal};
             mote.initial_offset = offset;
             mote.initial_velocity = velocity;
-            mote.gradient_row = output_recipe.gradient_row;
+            mote.appearance = std::cref(output_recipe.appearance);
             mote.curve_row = params->curve_row;
-            mote.hdr = output_recipe.hdr;
-            mote.color = output_recipe.color;
-            if (Finite(mote.position) &&
-                Finite({mote.color.x, mote.color.y, mote.color.z}) &&
-                std::isfinite(mote.color.w) && mote.color.w >= 0.0f &&
-                mote.color.w <= 1.0f && DecodeMask(image, output_index, owner, mote))
+            if (Finite(mote.position) && DecodeMask(image, output_index, owner, mote))
                 result.push_back(mote);
             if (ordinal == std::numeric_limits<std::uint64_t>::max()) break;
         }
@@ -360,21 +283,12 @@ void AppendPersistentTrapMotes(const VfxImage &image,
         return;
 
     const auto &effect = program.effects[owner.effect_handle - 1];
-    if (effect.handle != owner.effect_handle || effect.input_mode != 1 ||
-        effect.timing_kind != 1 || effect.payload_kind != kCirclePayload ||
-        !Range(effect.sources, program.sources))
-        return;
-    const auto *lookup = EffectIdentity(image, effect);
-    if (!lookup || lookup->effect_lookup_count != 1 ||
-        (lookup->effect_id != kTrapArmedEffect && lookup->effect_id != kTrapPendingEffect &&
-         lookup->effect_id != Hash64("particle.upgrade.retreat.start_trap")))
-        return;
-
+    const auto *lookup = EffectRecipe(image, effect, owner.effect_handle);
     const auto phase = static_cast<PersistentVfxKind>(owner.source_visual_kind);
-    if ((lookup->effect_id == kTrapPendingEffect && phase != PersistentVfxKind::TrapPending) ||
-        (lookup->effect_id == kTrapArmedEffect && phase != PersistentVfxKind::TrapArmed) ||
-        (lookup->effect_id == Hash64("particle.upgrade.retreat.start_trap") &&
-         phase != PersistentVfxKind::TrapPending && phase != PersistentVfxKind::TrapArmed))
+    const auto routes = phase == PersistentVfxKind::TrapPending
+        ? kVfxMoteTrapPending | kVfxMoteTrapRetreat
+        : phase == PersistentVfxKind::TrapArmed ? kVfxMoteTrapArmed | kVfxMoteTrapRetreat : 0u;
+    if (!lookup || !(lookup->effect_routes & routes))
         return;
 
     const double elapsed_ticks = owner.elapsed_ticks >= 0.0 && std::isfinite(owner.elapsed_ticks)
@@ -406,14 +320,11 @@ void PrepareVfxTypedMoteBursts(const VfxImage &image, VfxEventView inputs,
         if (std::ranges::binary_search(consumed_event_sequences, input.sequence)) continue;
         if (input.effect_handle == 0 || input.effect_handle > program.effects.size() || static_cast<std::uint32_t>(input.quality) > 2) continue;
         const auto &effect = program.effects[input.effect_handle - 1];
-        if (effect.handle != input.effect_handle || effect.input_mode != 0 || effect.timing_kind != 0 ||
-            !std::isfinite(effect.seconds) || effect.seconds <= 0 || !Range(effect.sources, program.sources)) continue;
-        const auto *lookup = EffectIdentity(image, effect);
+        const auto *lookup = EffectRecipe(image, effect, input.effect_handle);
         if (!lookup) continue;
         if (const auto *entity = std::get_if<VfxEntityPayload>(&input.payload))
         {
-            if (lookup->effect_id != Hash64("particle.skill.charged_shot.cancel") ||
-                effect.payload_kind != kEntityPayload || input.sequence == 0 ||
+            if (!(lookup->effect_routes & kVfxMoteResidualEntity) || input.sequence == 0 ||
                 entity->render_instance_id == 0 || !std::isfinite(entity->footprint_radius) ||
                 entity->footprint_radius <= 0) continue;
             const Float3 anchor{input.world_transform[12], input.world_transform[13],
@@ -434,27 +345,22 @@ void PrepareVfxTypedMoteBursts(const VfxImage &image, VfxEventView inputs,
                     const auto &output_recipe = image.mote_output_recipes[output_index];
                     if (!output_recipe.residual_route_valid ||
                         !output_recipe.output_color_valid ||
-                        output_recipe.min_quality > static_cast<std::uint32_t>(input.quality) ||
-                        output_recipe.min_quality > 2) continue;
+                        output_recipe.min_quality > static_cast<std::uint32_t>(input.quality)) continue;
                     VfxFlashSpawnInput base;
                     base.position = anchor;
                     base.shape = VfxImpactShape::SmallMote;
                     base.size = .025f;
                     base.lifetime = effect.seconds;
                     base.event_tick = input.event_tick;
-                    base.gradient_row = output_recipe.gradient_row;
-                    base.hdr = output_recipe.hdr;
-                    base.color = output_recipe.color;
-                    if (!Finite({base.color.x, base.color.y, base.color.z}) ||
-                        !DecodeMask(image, output_index, input, base)) continue;
-                    const auto &source = program.sources[si];
+                    base.appearance = std::cref(output_recipe.appearance);
+                    if (!DecodeMask(image, output_index, input, base)) continue;
                     prepared.push_back({base, count, count,
                         input.stable_seed ^ Mix(static_cast<std::uint32_t>(lookup->effect_id)) ^
                             Mix(static_cast<std::uint32_t>(lookup->effect_id >> 32)) ^
                             Mix(source_recipe.stable_id),
                         effect.importance, 1.0f, 0.0f, speed, speed * effect.seconds,
                         VfxPreparedMoteSampler::Residual,
-                        source.type == VfxSourceType::CurlMotes && source.authoritative == 0});
+                        source_recipe.cosmetic});
                 }
             }
             continue;
@@ -462,12 +368,12 @@ void PrepareVfxTypedMoteBursts(const VfxImage &image, VfxEventView inputs,
         Float3 position{}; float scale = 1;
         if (const auto *point = std::get_if<VfxPointPayload>(&input.payload))
         {
-            if (effect.payload_kind != Hash("PointEventPayload")) continue;
+            if (!(lookup->effect_routes & kVfxMoteBurstPoint)) continue;
             position = point->position; scale = point->authored_scale;
         }
         else if (std::holds_alternative<VfxContextPayload>(input.payload))
         {
-            if (effect.payload_kind != Hash("PresentationContextPayload")) continue;
+            if (!(lookup->effect_routes & kVfxMoteBurstContext)) continue;
             position = {input.world_transform[12], input.world_transform[13], input.world_transform[14]};
         }
         else continue;
@@ -477,8 +383,6 @@ void PrepareVfxTypedMoteBursts(const VfxImage &image, VfxEventView inputs,
             if (si >= image.mote_source_recipes.size()) continue;
             const auto &source_recipe = image.mote_source_recipes[si];
             if (!source_recipe.common_route_valid || source_recipe.effect_handle != effect.handle) continue;
-            const auto params = DecodeParams(image, si);
-            if (!params) continue;
             const auto source_seed = Mix(input.stable_seed ^ Mix(static_cast<std::uint32_t>(lookup->effect_id)) ^
                 Mix(static_cast<std::uint32_t>(lookup->effect_id >> 32)) ^ Mix(source_recipe.stable_id));
             for (std::size_t output_index = source_recipe.output_range.first;
@@ -494,18 +398,15 @@ void PrepareVfxTypedMoteBursts(const VfxImage &image, VfxEventView inputs,
                 VfxFlashSpawnInput base;
                 base.position = position; base.shape = recipe.kind; base.size = recipe.size * scale;
                 base.delay = source_recipe.knots[0] * effect.seconds; base.lifetime = (source_recipe.knots[1] - source_recipe.knots[0]) * effect.seconds;
-                base.event_tick = input.event_tick; base.gradient_row = output_recipe.gradient_row; base.hdr = output_recipe.hdr;
-                base.color = output_recipe.color;
-                base.drag = params->drag; base.orbit_rate = recipe.rate;
-                base.orbit_radius = (recipe.kind == VfxImpactShape::LeafMote ? params->curl : recipe.kind == VfxImpactShape::SmallMote ? 0.0f : .15f) * scale;
+                base.event_tick = input.event_tick; base.appearance = std::cref(output_recipe.appearance);
+                base.drag = source_recipe.drag; base.orbit_rate = recipe.rate;
+                base.orbit_radius = (recipe.kind == VfxImpactShape::LeafMote ? source_recipe.curl : recipe.kind == VfxImpactShape::SmallMote ? 0.0f : .15f) * scale;
                 if (!std::isfinite(base.size) || base.size <= 0 || !std::isfinite(base.delay) || !std::isfinite(base.lifetime) || base.lifetime <= 0 ||
-                    !std::isfinite(base.orbit_radius) || !std::isfinite(base.hdr) || base.hdr <= 0 || !Finite({base.color.x, base.color.y, base.color.z}) ||
-                    !std::isfinite(base.color.w) || base.color.w < 0 || base.color.w > 1 || !DecodeMask(image, output_index, input, base)) continue;
-                const auto &source = program.sources[si];
-                prepared.push_back({base, params->count, params->count, source_seed,
+                    !std::isfinite(base.orbit_radius) || !DecodeMask(image, output_index, input, base)) continue;
+                prepared.push_back({base, source_recipe.count, source_recipe.count, source_seed,
                     effect.importance, scale, recipe.radius, recipe.speed, 0.0f,
                     VfxPreparedMoteSampler::Common,
-                    source.type == VfxSourceType::CurlMotes && source.authoritative == 0});
+                    source_recipe.cosmetic});
             }
         }
     }
@@ -651,12 +552,10 @@ void PrepareVfxOwnedStatusTickMoteBursts(
             event.status_episode_generation == 0 || static_cast<std::uint32_t>(event.quality) > 2 ||
             !std::holds_alternative<VfxPointPayload>(event.payload)) continue;
         const auto &tick = program.effects[event.effect_handle - 1];
-        const bool bleed = UniqueEffectIdentity(image, tick, Hash64("particle.status.bleed_tick"));
-        const bool burn = UniqueEffectIdentity(image, tick, Hash64("particle.status.burn_tick"));
-        if (bleed == burn || tick.handle != event.effect_handle || tick.input_mode != 0 ||
-            tick.timing_kind != 0 || tick.payload_kind != Hash("PointEventPayload") ||
-            !std::isfinite(tick.seconds) || tick.seconds <= 0) continue;
-        const auto status_id = bleed ? Hash64("persistent.status.bleed") : Hash64("persistent.status.burn");
+        const auto *tick_recipe = EffectRecipe(image, tick, event.effect_handle);
+        if (!tick_recipe || !(tick_recipe->effect_routes & (kVfxMoteBleedTick | kVfxMoteBurnTick))) continue;
+        const auto status_route = tick_recipe->effect_routes & kVfxMoteBleedTick
+            ? kVfxMoteBleedOwner : kVfxMoteBurnOwner;
         const auto render_id = (2ull << 60) | event.geometry_owner_id;
         const auto event_plan_begin = prepared.size();
         for (const auto &owner : owners)
@@ -671,17 +570,14 @@ void PrepareVfxOwnedStatusTickMoteBursts(
                 entity->lifetime01 != owner.normalized_age || static_cast<std::uint32_t>(owner.quality) > 2)
                 continue;
             const auto &status = program.effects[owner.effect_handle - 1];
-            if (!UniqueEffectIdentity(image, status, status_id) || status.handle != owner.effect_handle ||
-                status.input_mode != 1 || status.timing_kind != 1 || status.payload_kind != kEntityPayload ||
-                !Range(status.sources, program.sources)) continue;
+            const auto *status_recipe = EffectRecipe(image, status, owner.effect_handle);
+            if (!status_recipe || !(status_recipe->effect_routes & status_route)) continue;
             const Float3 anchor{owner.current_transform[12], owner.current_transform[13], owner.current_transform[14]};
             for (std::size_t si = status.sources.first; si < static_cast<std::size_t>(status.sources.first) + status.sources.count; ++si)
             {
                 if (si >= image.mote_source_recipes.size()) continue;
                 const auto &source_recipe = image.mote_source_recipes[si];
-                const auto params = DecodeParams(image, si);
-                if (!source_recipe.tick_route_valid || source_recipe.effect_handle != status.handle ||
-                    !params || params->count != 3) continue;
+                if (!source_recipe.tick_route_valid || source_recipe.effect_handle != status.handle) continue;
                 for (std::size_t output_index = source_recipe.output_range.first;
                      output_index < static_cast<std::size_t>(source_recipe.output_range.first) + source_recipe.output_range.count;
                      ++output_index)
@@ -689,18 +585,17 @@ void PrepareVfxOwnedStatusTickMoteBursts(
                     if (output_index >= image.mote_output_recipes.size()) continue;
                     const auto &output_recipe = image.mote_output_recipes[output_index];
                     if (!output_recipe.tick_route_valid ||
-                        !output_recipe.output_color_valid || output_recipe.min_quality > 2 ||
+                        !output_recipe.output_color_valid ||
                         output_recipe.min_quality > static_cast<std::uint32_t>(event.quality) ||
                         output_recipe.min_quality > static_cast<std::uint32_t>(owner.quality)) continue;
                     VfxFlashSpawnInput base;
                     base.position = anchor; base.shape = VfxImpactShape::SmallMote;
                     base.size = recipes[1].size; base.lifetime = tick.seconds; base.event_tick = event.event_tick;
-                    base.drag = params->drag; base.gradient_row = output_recipe.gradient_row; base.hdr = output_recipe.hdr;
-                    base.color = output_recipe.color;
-                    if (!Finite({base.color.x, base.color.y, base.color.z}) || !DecodeMask(image, output_index, event, base)) continue;
-                    const auto seed = Mix(event.stable_seed ^ Mix(static_cast<std::uint32_t>(status_id)) ^
-                        Mix(static_cast<std::uint32_t>(status_id >> 32)) ^ Mix(source_recipe.stable_id));
-                    prepared.push_back({base, params->count, params->count, seed,
+                    base.drag = source_recipe.drag; base.appearance = std::cref(output_recipe.appearance);
+                    if (!DecodeMask(image, output_index, event, base)) continue;
+                    const auto seed = Mix(event.stable_seed ^ Mix(static_cast<std::uint32_t>(status_recipe->effect_id)) ^
+                        Mix(static_cast<std::uint32_t>(status_recipe->effect_id >> 32)) ^ Mix(source_recipe.stable_id));
+                    prepared.push_back({base, source_recipe.count, source_recipe.count, seed,
                         status.importance, 1.0f, recipes[1].radius, recipes[1].speed,
                         0.0f, VfxPreparedMoteSampler::StatusTick, false, event.sequence});
                 }
@@ -750,18 +645,16 @@ void AppendVfxOwnedMoteCommands(const VfxImage &image,
                 !Finite(point->position) || !std::isfinite(point->authored_scale) || point->authored_scale <= 0 ||
                 static_cast<std::uint32_t>(input.quality) > 2) continue;
             const auto &effect = program.effects[input.effect_handle - 1];
-            constexpr auto id = Hash64("particle.skill.trap");
-            if (effect.handle != input.effect_handle || effect.input_mode != 0 || effect.timing_kind != 0 ||
-                effect.seconds != .65f || effect.payload_kind != Hash("PointEventPayload") ||
-                !Range(effect.sources, program.sources) || !UniqueEffectIdentity(image, effect, id)) continue;
-            AppendRateMotes(image, input, point->position, point->authored_scale, effect, id,
+            const auto *recipe = EffectRecipe(image, effect, input.effect_handle);
+            if (!recipe || !(recipe->effect_routes & kVfxMoteTrapPoint)) continue;
+            AppendRateMotes(image, input, point->position, point->authored_scale, effect, recipe->effect_id,
                 (current_tick - input.event_tick), 39.0, result, quota);
             continue;
         }
         if (const auto *circle = std::get_if<VfxCirclePayload>(&input.payload))
         {
             if (input.effect_handle == 0 || input.effect_handle > program.effects.size() ||
-                input.geometry_owner_id == 0 || input.geometry_effect_id != Hash64("particle.enemy.suicide.charge") ||
+                input.geometry_owner_id == 0 ||
                 current_tick < input.geometry_start_tick || current_tick >= input.geometry_end_tick ||
                 input.geometry_end_tick <= input.geometry_start_tick ||
                 static_cast<std::uint32_t>(input.quality) > 2 ||
@@ -771,9 +664,9 @@ void AppendVfxOwnedMoteCommands(const VfxImage &image,
                 !std::isfinite(circle->lifetime01) || circle->lifetime01 < 0 || circle->lifetime01 >= 1)
                 continue;
             const auto &effect = program.effects[input.effect_handle - 1];
-            if (effect.handle != input.effect_handle || effect.input_mode != 0 || effect.timing_kind != 0 ||
-                effect.payload_kind != kCirclePayload || !Range(effect.sources, program.sources) ||
-                !UniqueEffectIdentity(image, effect, input.geometry_effect_id))
+            const auto *recipe = EffectRecipe(image, effect, input.effect_handle);
+            if (!recipe || !(recipe->effect_routes & kVfxMoteSuicideCircle) ||
+                recipe->effect_id != input.geometry_effect_id)
                 continue;
             // The fixed recipe retains its identity. Emission follows the real
             // attack-telegraph owner, which RefreshVfxGroundEventOwners retires.
@@ -794,10 +687,8 @@ void AppendVfxOwnedMoteCommands(const VfxImage &image,
         const float direction_length = std::hypot(sector->direction.x, sector->direction.z);
         if (!std::isfinite(direction_length) || direction_length < .0001f) continue;
         const auto &effect = program.effects[input.effect_handle-1];
-        if (effect.handle != input.effect_handle || effect.input_mode != 0 || effect.timing_kind != 1 ||
-            effect.payload_kind != Hash("SafeGapSectorPayload") || !Range(effect.sources,program.sources)) continue;
-        const auto *identity = EffectIdentity(image, effect);
-        if (!identity) continue;
+        const auto *identity = EffectRecipe(image, effect, input.effect_handle);
+        if (!identity || !(identity->effect_routes & kVfxMoteSafeSector)) continue;
         // Retain tick units for boundary decisions so exact 39-tick lifetimes do
         // not gain a frame from subtracting independently rounded seconds.
         const double elapsed = static_cast<double>(current_tick-input.geometry_start_tick);
@@ -825,8 +716,7 @@ void AppendVfxOwnedMoteCommands(const VfxImage &image,
                 if (output_index >= image.mote_output_recipes.size()) continue;
                 const auto &output_recipe = image.mote_output_recipes[output_index];
                 if(!output_recipe.persistent_route_valid||
-                    !output_recipe.output_color_valid||output_recipe.min_quality>static_cast<std::uint32_t>(input.quality)||
-                    output_recipe.min_quality > 2)continue;
+                    output_recipe.min_quality>static_cast<std::uint32_t>(input.quality))continue;
                 const auto first_ordinal = static_cast<std::uint32_t>(first_value);
                 const auto last_ordinal = static_cast<std::uint32_t>(last_value);
                 ReserveAppendWithinQuota(result,
@@ -846,9 +736,8 @@ void AppendVfxOwnedMoteCommands(const VfxImage &image,
                     mote.initial_velocity={-std::cos(angle)*speed,.08f,-std::sin(angle)*speed};
                     mote.shape=VfxImpactShape::SoftDisc;mote.size=.035f;mote.lifetime=static_cast<float>(lifetime);
                     mote.normalized_age=static_cast<float>((elapsed-birth)/lifetime_ticks);mote.event_tick=input.geometry_start_tick;
-                    mote.gradient_row=output_recipe.gradient_row;mote.hdr=output_recipe.hdr;
-                    mote.color=output_recipe.color;
-                    if(Finite(mote.position)&&Finite({mote.color.x,mote.color.y,mote.color.z})&&DecodeMask(image,output_index,input,mote))result.push_back(mote);
+                    mote.appearance = std::cref(output_recipe.appearance);
+                    if(Finite(mote.position)&&DecodeMask(image,output_index,input,mote))result.push_back(mote);
                 }
             }
         }
@@ -895,19 +784,13 @@ void AppendVfxPersistentMoteCommandsImpl(
             continue;
 
         const auto &effect = program.effects[owner.effect_handle - 1];
-        if (effect.handle != owner.effect_handle || effect.input_mode != 1 ||
-            effect.timing_kind != 1 || effect.payload_kind != kEntityPayload ||
-            !Range(effect.sources, program.sources)) continue;
-        const auto *lookup = EffectIdentity(image, effect);
-        if (!lookup || lookup->effect_lookup_count != 1)
+        const auto *lookup = EffectRecipe(image, effect, owner.effect_handle);
+        if (!lookup || !(lookup->effect_routes & (kVfxMoteStatusPresence | kVfxMotePickupPresence |
+                kVfxMoteChargedPresence | kVfxMoteSuicidePresence)))
             continue;
-        const bool pickup_idle = std::find(kPickupIdleMoteEffects.begin(),
-            kPickupIdleMoteEffects.end(), lookup->effect_id) != kPickupIdleMoteEffects.end();
-        const bool charged_overcharge = lookup->effect_id == kChargedOverchargeLoop;
-        const bool suicide_countdown = lookup->effect_id == Hash64("particle.enemy.suicide.countdown_loop");
-        if (!pickup_idle && !charged_overcharge && !suicide_countdown && std::find(kStatusMoteEffects.begin(),
-                kStatusMoteEffects.end(), lookup->effect_id) == kStatusMoteEffects.end())
-            continue;
+        const bool pickup_idle = (lookup->effect_routes & kVfxMotePickupPresence) != 0;
+        const bool charged_overcharge = (lookup->effect_routes & kVfxMoteChargedPresence) != 0;
+        const bool suicide_countdown = (lookup->effect_routes & kVfxMoteSuicidePresence) != 0;
         if (!charged_overcharge &&
             (owner.normalized_age >= 1.0f || entity->lifetime01 >= 1.0f))
             continue;
@@ -939,10 +822,6 @@ void AppendVfxPersistentMoteCommandsImpl(
             if (!source_recipe.rate_route_valid || source_recipe.effect_handle != effect.handle) continue;
             auto *source_quota = QuotaForSource(image, source_index, quota);
             const auto rate_value = source_recipe.rate;
-            if (rate_value <= 0 || rate_value > 1024 ||
-                (charged_overcharge && rate_value != 3) ||
-                (pickup_idle && (rate_value != 3 || source_recipe.knots[0] != 0.0f ||
-                                 source_recipe.knots[1] != 1.0f))) continue;
             const float rate = static_cast<float>(rate_value);
 
             const double start_ticks = std::isfinite(duration_ticks)
@@ -1005,16 +884,10 @@ void AppendVfxPersistentMoteCommandsImpl(
                     if (output_index >= image.mote_output_recipes.size()) continue;
                     const auto &output_recipe = image.mote_output_recipes[output_index];
                     if (!output_recipe.persistent_route_valid ||
-                        !output_recipe.output_color_valid ||
-                        (charged_overcharge && output_recipe.min_quality !=
-                            static_cast<std::uint32_t>(VfxQuality::Medium)) ||
-                        (pickup_idle && output_recipe.min_quality !=
-                            static_cast<std::uint32_t>(VfxQuality::Medium)) ||
-                        output_recipe.min_quality > static_cast<std::uint32_t>(owner.quality) ||
-                        output_recipe.min_quality > 2)
+                        output_recipe.min_quality > static_cast<std::uint32_t>(owner.quality))
                         continue;
-                    const auto params = DecodePersistentMoteParameters(
-                        image, output_index, entity->footprint_radius);
+                    const auto params = EvaluatePersistentMoteParameters(
+                        output_recipe, entity->footprint_radius);
                     if (!params) continue;
                     if (!AdmitMoteRow(source_quota)) continue;
                     if (!geometry_ready)
@@ -1051,14 +924,9 @@ void AppendVfxPersistentMoteCommandsImpl(
                                       velocity.z / horizontal};
                     mote.initial_offset = offset;
                     mote.initial_velocity = velocity;
-                    mote.gradient_row = output_recipe.gradient_row;
+                    mote.appearance = std::cref(output_recipe.appearance);
                     mote.curve_row = params->curve_row;
-                    mote.hdr = output_recipe.hdr;
-                    mote.color = output_recipe.color;
-                    if (Finite(mote.position) &&
-                        Finite({mote.color.x, mote.color.y, mote.color.z}) &&
-                        std::isfinite(mote.color.w) && mote.color.w >= 0.0f &&
-                        mote.color.w <= 1.0f && DecodeMask(image, output_index, owner, mote))
+                    if (Finite(mote.position) && DecodeMask(image, output_index, owner, mote))
                         result.push_back(mote);
                 }
                 if (ordinal == std::numeric_limits<std::uint64_t>::max()) break;
@@ -1085,56 +953,7 @@ void AppendVfxPersistentMoteCommands(const VfxImage &image,
 std::size_t VfxPersistentSparkState::RetainedCapacityBytes() const noexcept
 {
     using namespace vfx_retained_size;
-    return Add(Vector(cursors_), Add(Vector(changed_), Add(Vector(pending_), Vector(change_slots_))));
-}
-
-std::uint64_t VfxPersistentSparkState::Rebind(const VfxProgramView &previous,
-                                          const VfxProgramView &next) noexcept
-{
-    changed_.clear();
-    pending_.clear();
-    change_slots_.clear();
-    const auto count = cursors_.size();
-    std::erase_if(cursors_, [&](Cursor &cursor) {
-        const auto old_handle = cursor.effect_handle;
-        if (cursor.source_index >= previous.sources.size() ||
-            previous.sources[cursor.source_index].effect != old_handle) return true;
-        const auto &old_source = previous.sources[cursor.source_index];
-        if (RebindVfxGenerationHandle(previous, next, cursor.effect_handle, 1u) !=
-            VfxGenerationRebindOutcome::Retained) return true;
-        const auto &old_effect = previous.effects[old_handle - 1u];
-        const auto &effect = next.effects[cursor.effect_handle - 1u];
-        if (effect.timing_kind != 0 || !std::isfinite(effect.seconds) || effect.seconds <= 0 ||
-            effect.seconds > 60 || !std::isfinite(old_effect.seconds) || old_effect.seconds <= 0 ||
-            old_effect.seconds > 60 || !Range(effect.sources, next.sources)) return true;
-        const auto sources = std::span(next.sources).subspan(effect.sources.first, effect.sources.count);
-        const auto found = std::find_if(sources.begin(), sources.end(),
-            [&](const auto &source) { return source.stable_id == old_source.stable_id; });
-        if (found == sources.end() || std::count_if(sources.begin(), sources.end(),
-                [&](const auto &source) { return source.stable_id == old_source.stable_id; }) != 1 ||
-            found->effect != effect.handle || found->type != old_source.type ||
-            found->type != VfxSourceType::CurlMotes || found->stable_id != Hash("micro_sparks") ||
-            found->knot_count != 2 || !std::isfinite(found->knots[0]) || !std::isfinite(found->knots[1]) ||
-            found->knots[0] < 0 || found->knots[1] > 1 || found->knots[1] <= found->knots[0] ||
-            !DecodeSparkParams(next, *found) || !Range(found->outputs, next.outputs) ||
-            found->outputs.count != 1) return true;
-        const auto &output = next.outputs[found->outputs.first];
-        const auto source_index = effect.sources.first + static_cast<std::uint32_t>(found - sources.begin());
-        if (output.source != source_index || output.profile != VfxOutputProfile::SpriteAdd ||
-            output.shape != Hash("velocity_billboard") || output.motion != VfxMotionKind::SparseRearwardSparks)
-            return true;
-        const auto old_duration = static_cast<Tick>(std::ceil(static_cast<double>(old_effect.seconds) * 60.0));
-        const auto duration = static_cast<Tick>(std::ceil(static_cast<double>(effect.seconds) * 60.0));
-        if (cursor.expires_tick < old_duration) return true;
-        const auto started = cursor.expires_tick - old_duration;
-        if (duration > std::numeric_limits<Tick>::max() - started) return true;
-        cursor.effect_handle = effect.handle;
-        cursor.source_index = source_index;
-        cursor.expires_tick = started + duration;
-        // The actual owner clock and already consumed birth ordinals survive.
-        return false;
-    });
-    return count - cursors_.size();
+    return Add(Vector(cursors_), Vector(cursor_slots_));
 }
 
 void VfxPersistentSparkState::Append(
@@ -1143,17 +962,12 @@ void VfxPersistentSparkState::Append(
     VfxMoteRowQuota *quota)
 {
     const auto &program = image.program;
-    changed_.clear();
-    pending_.clear();
-    change_slots_.clear();
-    if (owners.empty())
-    {
-        std::erase_if(cursors_, [current_tick](const Cursor &cursor) {
-            return current_tick >= cursor.expires_tick;
-        });
-        return;
-    }
-    const auto base_cursor_count = cursors_.size();
+    cursor_slots_.clear();
+    std::erase_if(cursors_, [current_tick](const Cursor &cursor) {
+        return current_tick >= cursor.expires_tick;
+    });
+    if (owners.empty()) return;
+    // Runtime terminates on allocation failure, so retry copies are unnecessary.
     constexpr auto no_slot = std::numeric_limits<std::size_t>::max();
     const auto hash_key = [](std::uint64_t owner_id, VfxEffectHandle effect,
                              std::uint32_t source) noexcept {
@@ -1164,67 +978,48 @@ void VfxPersistentSparkState::Append(
         value ^= value >> 31;
         return static_cast<std::size_t>(value);
     };
-    const auto cursor_for_token = [&](std::size_t token) -> const Cursor & {
-        return token < base_cursor_count ? cursors_[token] : changed_[token - base_cursor_count].cursor;
-    };
-    const auto key_matches = [&](std::size_t token, std::uint64_t owner_id,
+    const auto key_matches = [&](std::size_t index, std::uint64_t owner_id,
                                  VfxEffectHandle effect, std::uint32_t source) {
-        const auto &cursor = cursor_for_token(token);
+        const auto &cursor = cursors_[index];
         return cursor.owner_id == owner_id && cursor.effect_handle == effect &&
             cursor.source_index == source;
     };
-    const auto insert_token = [&](std::size_t token, bool replace_existing) {
-        const auto &cursor = cursor_for_token(token);
-        auto slot = hash_key(cursor.owner_id, cursor.effect_handle, cursor.source_index) % change_slots_.size();
-        while (change_slots_[slot] != no_slot)
+    const auto insert_index = [&](std::size_t index) {
+        const auto &cursor = cursors_[index];
+        auto slot = hash_key(cursor.owner_id, cursor.effect_handle, cursor.source_index) % cursor_slots_.size();
+        while (cursor_slots_[slot] != no_slot)
         {
-            if (key_matches(change_slots_[slot], cursor.owner_id, cursor.effect_handle, cursor.source_index))
-            {
-                if (replace_existing) change_slots_[slot] = token;
-                return;
-            }
-            slot = (slot + 1) % change_slots_.size();
+            if (key_matches(cursor_slots_[slot], cursor.owner_id, cursor.effect_handle, cursor.source_index)) return;
+            slot = (slot + 1) % cursor_slots_.size();
         }
-        change_slots_[slot] = token;
+        cursor_slots_[slot] = index;
     };
     const auto rebuild_index = [&] {
-        std::fill(change_slots_.begin(), change_slots_.end(), no_slot);
-        for (std::size_t index = 0; index < base_cursor_count; ++index)
-            if (current_tick < cursors_[index].expires_tick) insert_token(index, false);
-        for (std::size_t index = 0; index < changed_.size(); ++index)
-            insert_token(base_cursor_count + index, true);
+        std::fill(cursor_slots_.begin(), cursor_slots_.end(), no_slot);
+        for (std::size_t index = 0; index < cursors_.size(); ++index) insert_index(index);
     };
     const auto ensure_index_capacity = [&](std::size_t required_entries) {
-        const auto maximum = change_slots_.max_size();
+        const auto maximum = cursor_slots_.max_size();
         if (required_entries > maximum / 2)
             throw std::length_error("persistent spark index exceeds vector capacity");
         const auto required_slots = std::max<std::size_t>(8, required_entries * 2);
-        if (change_slots_.size() >= required_slots) return false;
-        auto target = std::max<std::size_t>(8, change_slots_.size());
+        if (cursor_slots_.size() >= required_slots) return false;
+        auto target = std::max<std::size_t>(8, cursor_slots_.size());
         while (target < required_slots)
             target = target > maximum / 2 ? required_slots : target * 2;
-        change_slots_.reserve(target);
-        change_slots_.resize(target, no_slot);
+        cursor_slots_.reserve(target);
+        cursor_slots_.resize(target, no_slot);
         rebuild_index();
         return true;
     };
-    std::size_t live_cursor_count{};
-    for (const auto &cursor : cursors_)
-        if (current_tick < cursor.expires_tick) ++live_cursor_count;
-    if (!ensure_index_capacity(live_cursor_count)) rebuild_index();
-    std::size_t indexed_entries = live_cursor_count;
+    if (!ensure_index_capacity(cursors_.size())) rebuild_index();
     const auto find_slot = [&](std::uint64_t owner_id, VfxEffectHandle effect,
                                std::uint32_t source) {
-        auto slot = hash_key(owner_id, effect, source) % change_slots_.size();
-        while (change_slots_[slot] != no_slot &&
-               !key_matches(change_slots_[slot], owner_id, effect, source))
-            slot = (slot + 1) % change_slots_.size();
+        auto slot = hash_key(owner_id, effect, source) % cursor_slots_.size();
+        while (cursor_slots_[slot] != no_slot &&
+               !key_matches(cursor_slots_[slot], owner_id, effect, source))
+            slot = (slot + 1) % cursor_slots_.size();
         return slot;
-    };
-    const auto change_token = [&](std::size_t index) {
-        if (index >= no_slot - base_cursor_count)
-            throw std::length_error("persistent spark change index overflow");
-        return base_cursor_count + index;
     };
     for (const auto &owner : owners)
     {
@@ -1251,15 +1046,9 @@ void VfxPersistentSparkState::Append(
         const auto owner_tick = static_cast<std::int64_t>(std::llround(elapsed_ticks));
         if (static_cast<std::uint64_t>(owner_tick) > current_tick) continue;
         const auto &effect = program.effects[owner.effect_handle - 1];
-        if (effect.handle != owner.effect_handle || effect.input_mode != 1 ||
-            effect.timing_kind != 0 || effect.payload_kind != Hash("ProjectilePayload") ||
-            !std::isfinite(effect.seconds) || effect.seconds <= 0 || effect.seconds > 60 ||
-            owner.elapsed_seconds >= effect.seconds || !Range(effect.sources, program.sources))
-            continue;
-        const auto *lookup = EffectIdentity(image, effect);
-        if (!lookup ||
-            std::find(kSparkEffects.begin(), kSparkEffects.end(), lookup->effect_id) ==
-                kSparkEffects.end()) continue;
+        const auto *lookup = EffectRecipe(image, effect, owner.effect_handle);
+        if (!lookup || !(lookup->effect_routes & kVfxMoteProjectileSpark) ||
+            owner.elapsed_seconds >= effect.seconds) continue;
         for (std::size_t source_index = effect.sources.first;
              source_index < static_cast<std::size_t>(effect.sources.first) + effect.sources.count;
              ++source_index)
@@ -1280,42 +1069,29 @@ void VfxPersistentSparkState::Append(
                 const auto &output_recipe = image.mote_output_recipes[output_index];
                 const auto source = static_cast<std::uint32_t>(source_index);
                 auto slot = find_slot(owner.stable_id, owner.effect_handle, source);
-                auto token = change_slots_[slot];
-                std::size_t change_index{};
-                if (token == no_slot)
+                auto index = cursor_slots_[slot];
+                if (index == no_slot)
                 {
-                    if (indexed_entries == std::numeric_limits<std::size_t>::max())
+                    if (cursors_.size() == std::numeric_limits<std::size_t>::max())
                         throw std::length_error("persistent spark index entry count overflow");
-                    ensure_index_capacity(indexed_entries + 1);
+                    ensure_index_capacity(cursors_.size() + 1);
                     slot = find_slot(owner.stable_id, owner.effect_handle, source);
-                    ReserveAppend(changed_, 1);
-                    change_index = changed_.size();
-                    const auto token_for_change = change_token(change_index);
+                    ReserveAppend(cursors_, 1);
+                    index = cursors_.size();
                     const auto expiry_offset = static_cast<Tick>(
                         std::ceil(static_cast<double>(effect.seconds) * 60.0));
-                    changed_.push_back({no_slot,
-                        {owner.stable_id, owner.effect_handle, source, 0,
-                         current_tick - static_cast<Tick>(owner_tick) + expiry_offset}, true});
-                    change_slots_[slot] = token_for_change;
-                    ++indexed_entries;
+                    cursors_.push_back({owner.stable_id, owner.effect_handle, source, 0,
+                         current_tick - static_cast<Tick>(owner_tick) + expiry_offset});
+                    cursor_slots_[slot] = index;
                 }
-                else if (token < base_cursor_count)
-                {
-                    ReserveAppend(changed_, 1);
-                    change_index = changed_.size();
-                    const auto token_for_change = change_token(change_index);
-                    changed_.push_back({token, cursors_[token], false});
-                    change_slots_[slot] = token_for_change;
-                }
-                else change_index = token - base_cursor_count;
-                auto &cursor = changed_[change_index].cursor;
+                auto &cursor = cursors_[index];
                 const double start = static_cast<double>(source_recipe.knots[0]) * effect.seconds;
                 const double window = static_cast<double>(source_recipe.knots[1] - source_recipe.knots[0]) *
                     effect.seconds;
                 const double spacing = params.count > 1 ?
                     window / static_cast<double>(params.count - 1) : window;
                 if (!std::isfinite(spacing) || spacing <= 0) continue;
-                ReserveAppendWithinQuota(pending_,
+                ReserveAppendWithinQuota(result,
                     static_cast<std::size_t>(params.count - cursor.next_ordinal), source_quota);
                 while (cursor.next_ordinal < params.count)
                 {
@@ -1344,42 +1120,14 @@ void VfxPersistentSparkState::Append(
                     spark.lifetime = static_cast<float>(spacing);
                     spark.event_tick = current_tick;
                     spark.stable_seed = seed;
-                    spark.gradient_row = output_recipe.gradient_row;
-                    spark.hdr = output_recipe.hdr;
-                    spark.color = output_recipe.color;
+                    spark.appearance = std::cref(output_recipe.appearance);
                     spark.drag = params.drag;
-                    pending_.push_back(spark);
+                    result.push_back(spark);
                 }
             }
         }
     }
 
-    const auto new_cursors = static_cast<std::size_t>(std::ranges::count_if(changed_,
-        [](const CursorChange &change) { return change.is_new; }));
-    if (new_cursors > cursors_.max_size() - cursors_.size() ||
-        pending_.size() > result.max_size() - result.size())
-        throw std::length_error("persistent spark append exceeds vector capacity");
-    ReserveAppend(cursors_, new_cursors);
-    if (quota)
-        ReserveAppendWithinQuota(result, pending_.size(), quota, pending_.size());
-    else
-        ReserveAppend(result, pending_.size());
-
-    // Commit cursor ordinals and output together after all allocating work succeeds.
-    static_assert(std::is_nothrow_copy_assignable_v<Cursor>);
-    static_assert(std::is_nothrow_move_assignable_v<Cursor>);
-    static_assert(std::is_nothrow_move_constructible_v<Cursor>);
-    static_assert(std::is_nothrow_move_constructible_v<VfxFlashSpawnInput>);
-    for (const auto &change : changed_)
-        if (!change.is_new) cursors_[change.index] = change.cursor;
-    std::erase_if(cursors_, [current_tick](const Cursor &cursor) {
-        return current_tick >= cursor.expires_tick;
-    });
-    for (auto &change : changed_)
-        if (change.is_new) cursors_.push_back(std::move(change.cursor));
-    for (auto &spark : pending_) result.push_back(std::move(spark));
-    changed_.clear();
-    pending_.clear();
 }
 
 std::vector<VfxFlashSpawnInput> VfxPersistentSparkState::Emit(

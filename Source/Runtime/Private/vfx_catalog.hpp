@@ -69,6 +69,7 @@ class VfxCatalog
                                 bool particles_replaced = false,
                                 bool mesh_replaced = false,
                                 VfxLegacyGroundSuppression ground_suppression = {}) const;
+    // A failed activation is terminal; discard its emitter scratch.
     [[nodiscard]] Result PrepareEvent(const PresentationEvent &event, float decorative_fraction,
         VfxPreparedLegacyEvent &prepared, std::vector<std::uint32_t> &emitter_indices,
         bool particles_replaced = false, bool mesh_replaced = false,
@@ -82,8 +83,6 @@ class VfxCatalog
     [[nodiscard]] std::uint64_t PayloadHash() const noexcept { return image_.payload_hash; }
     [[nodiscard]] std::uint32_t SpriteCount() const noexcept { return image_.sprite_count; }
     [[nodiscard]] const VfxProgramView &Program() const noexcept { return image_.program; }
-    void Swap(VfxCatalog &prepared) noexcept;
-
   private:
     VfxImage image_{};
     PreparedVfxFresnelRecipeView fresnel_recipe_view_{};

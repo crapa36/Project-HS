@@ -186,24 +186,18 @@ struct VfxRibbonFrameBounds
         if (effect.effect_handle == handle)
         {
             const auto sources = checked_range(effect.sources, image.ribbon_event_sources.size());
-            const bool projectile_event = effect.payload_kind ==
-                VfxRibbonBoundsHash32("ProjectilePayload");
             for (std::uint32_t quality = 0; quality <= 2; ++quality)
             {
                 Bound at_quality{};
                 for (const auto &source : std::span(image.ribbon_event_sources).subspan(
                          sources.first, sources.count))
                 {
-                    if (source.effect_handle != handle ||
-                        (projectile_event && !source.axial_source)) continue;
                     const auto outputs = checked_range(source.outputs,
                         image.ribbon_event_outputs.size());
                     std::uint32_t source_outputs{};
                     for (const auto &output : std::span(image.ribbon_event_outputs).subspan(
                              outputs.first, outputs.count))
-                        if ((!projectile_event || (output.axial &&
-                                output.output.profile == VfxOutputProfile::RibbonAdd)) &&
-                            (projectile_event || !output.axial) && output.min_quality <= quality)
+                        if (output.min_quality <= quality)
                             add(source_outputs, 1);
                     if (source_outputs != 0)
                     {

@@ -8,7 +8,7 @@ namespace hs::runtime_detail
 {
 namespace
 {
-constexpr std::uint32_t Hash(std::string_view s){std::uint32_t h=2166136261u;for(unsigned char c:s){h^=c;h*=16777619u;}return h;}
+consteval std::uint32_t Hash(std::string_view s){std::uint32_t h=2166136261u;for(unsigned char c:s){h^=c;h*=16777619u;}return h;}
 bool Finite(Float3 v){return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z);}
 std::uint64_t Mix(std::uint64_t v){v^=v>>30;v*=0xbf58476d1ce4e5b9ull;v^=v>>27;v*=0x94d049bb133111ebull;return v^(v>>31);}
 std::optional<Float3> Center(const VfxEventInput &input,std::uint32_t schema)
@@ -36,9 +36,6 @@ std::vector<VfxLightInput> BuildVfxTypedLightCommands(const VfxImage &image,VfxE
 void AppendVfxTypedLightCommands(const VfxImage &image,VfxEventView inputs,double current_tick,
  std::vector<VfxLightInput> &result)
 {
- const auto original_size=result.size();
- try
- {
  for(const auto &input:inputs)
  {
   if(static_cast<std::uint32_t>(input.quality)>2 || !input.effect_handle || input.effect_handle>image.light_effect_ranges.size() || current_tick<input.event_tick)continue;
@@ -75,12 +72,10 @@ void AppendVfxTypedLightCommands(const VfxImage &image,VfxEventView inputs,doubl
      pulse=std::lerp(keys[k-1].value,keys[k].value,t);break;
     }
    }
-   const float intensity=r.hdr*r.alpha*pulse*envelope;if(!std::isfinite(intensity)||intensity<=0)continue;
+   const float intensity=r.intensity_scale*pulse*envelope;if(!std::isfinite(intensity)||intensity<=0)continue;
    auto stable=Mix(input.sequence^r.seed_xor);if(stable==0)stable=1;
    result.push_back({stable,*center,r.radius,r.rgb,intensity,input.importance_override?input.importance_override:r.importance,input.quality});
   }
  }
- }
- catch(...){result.resize(original_size);throw;}
 }
 }

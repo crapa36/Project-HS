@@ -5,17 +5,16 @@
 
 namespace hs::runtime_detail
 {
-// Resolve into a candidate. A click emits at most one command; publication is
-// the commit point. Pure navigation does not depend on either queue's capacity.
+// Resolve into a candidate. Publication is the commit point. Pure navigation
+// does not depend on either queue's capacity.
 inline bool AdmitPresentedUiInteraction(UiInteraction &interaction,
     PresentationUiState &candidate, const PresentationUiState &previous,
     const UiFrame &displayed,
     BoundedSpscQueue<UiActionEnvelope, 64> &actions,
     BoundedSpscQueue<UiCommand, 64> &commands, std::uint64_t &rejected) noexcept
 {
-    const bool has_one_command = !(interaction.gameplay_action && interaction.runtime_command);
-    bool admitted = has_one_command;
-    if (admitted && interaction.gameplay_action)
+    bool admitted = true;
+    if (interaction.gameplay_action)
     {
         UiActionEnvelope envelope;
         envelope.action = *interaction.gameplay_action;
@@ -24,7 +23,7 @@ inline bool AdmitPresentedUiInteraction(UiInteraction &interaction,
         envelope.displayed_session = displayed.session;
         admitted = actions.TryPush(envelope);
     }
-    if (admitted && interaction.runtime_command)
+    else if (interaction.runtime_command)
         admitted = commands.TryPush(*interaction.runtime_command);
     if (!admitted)
     {

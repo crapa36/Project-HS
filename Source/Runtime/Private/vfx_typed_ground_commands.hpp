@@ -48,6 +48,7 @@ struct VfxGroundEventAdmission
 [[nodiscard]] VfxGroundEventAdmission ClassifyVfxTypedEventGroundAdmission(
     const VfxImage &image, const VfxEventInput &input) noexcept;
 
+// Builders require an immutable prepared and admitted image; live events and owners remain mutable.
 // Converts authored persistent CircleAreaPayload boundaries and interior fills.
 // Callers retain the owner identity and world-space edge width alongside the
 // legacy spawn command until the renderer's exact-ring path consumes them.

@@ -30,16 +30,11 @@ VfxVisibleMoteAdmission PrepareVisibleMoteOutputs(const VfxImage &image, VfxSess
     auto &active_flashes = session.decoded.flashes;
     visible_flashes.reserve(Add(active_flashes.size(), required_suffix));
     const auto held = measure_held_bytes();
-    const std::array unused_rows{
-        active_flashes.capacity() - active_flashes.size(),
-        visible_flashes.capacity() - active_flashes.size() - required_suffix,
-        persistent_sparks.PendingCapacityRows()};
-    const auto growth_rows = held < kVfxWorkspaceSoftBudgetBytes
-        ? (kVfxWorkspaceSoftBudgetBytes - held) / sizeof(VfxFlashSpawnInput) : 0;
-    const auto maximum_rows = Add(std::ranges::min(unused_rows), growth_rows);
-    // Staging, retained births and their visible copies coexist through publication.
-    VfxMoteRowQuota quota{AppendRowsWithinBudget<VfxFlashSpawnInput>(
-        maximum_rows, held, kVfxWorkspaceSoftBudgetBytes, unused_rows)};
+    const auto reserved = Add(held, Multiply(Add(visible_flashes.size(), required_suffix),
+        sizeof(VfxFlashSpawnInput)));
+    const auto remaining = reserved < kVfxWorkspaceSoftBudgetBytes
+        ? kVfxWorkspaceSoftBudgetBytes - reserved : 0;
+    VfxMoteRowQuota quota{remaining / (2 * sizeof(VfxFlashSpawnInput))};
     persistent_sparks.Append(image, persistent, ground_tick, interpolation, active_flashes, &quota);
 
     // The retained prefix plus every newly retained row bounds the visible projection.
@@ -92,15 +87,14 @@ VfxVisibleFireAdmission AppendVisibleFireAndStamps(
         const auto fire_limit = available > required_suffix ? available - required_suffix : 0;
         const auto admitted = std::min(decorative_fire, fire_limit);
         budget_limited = admitted < decorative_fire;
-        const auto previous_capacity = visible_flashes.capacity();
         visible_flashes.reserve(Add(Add(visible_flashes.size(), required_suffix), admitted));
-        admission_bytes = Add(admission_bytes,
-            Multiply(visible_flashes.capacity() - previous_capacity, sizeof(VfxFlashSpawnInput)));
         const auto before = visible_flashes.size();
         AppendVfxPreparedFireFlameCommands(prepared_fire_sources, admitted, visible_flashes);
         emitted_rows = visible_flashes.size() - before;
     }
     visible_flashes.insert(visible_flashes.end(), status_stamp_flashes.begin(), status_stamp_flashes.end());
+    if (!prepared_fire_sources.empty())
+        admission_bytes = Add(admission_bytes, Multiply(visible_flashes.size(), sizeof(VfxFlashSpawnInput)));
     return {emitted_rows, admission_bytes, budget_limited};
 }
 }

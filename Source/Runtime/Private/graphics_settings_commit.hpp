@@ -3,9 +3,7 @@
 #include <hs/core/graphics_settings_request.hpp>
 #include <hs/runtime/settings_projection.hpp>
 
-#include <algorithm>
 #include <array>
-#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <type_traits>
@@ -52,35 +50,11 @@ class GraphicsSettingsCommit
     [[nodiscard]] bool HasUnsentEdits() const noexcept { return graphics_dirty_ || timeout_restore_requested_; }
     [[nodiscard]] bool IsRecovering() const noexcept { return timeout_restore_requested_ || in_flight_timeout_restore_; }
     [[nodiscard]] bool TimedOut() const noexcept { return timed_out_; }
-    [[nodiscard]] bool PreparationFailed() const noexcept { return preparation_failed_; }
-    void SuspendUnsentAfterAllocationFailure() noexcept { preparation_failed_ = true; }
-    [[nodiscard]] bool FollowupRejected() const noexcept { return followup_rejected_; }
     [[nodiscard]] std::uint64_t CommittedGeneration() const noexcept { return committed_generation_; }
     [[nodiscard]] const GraphicsSettings &ApplyTargetGraphics() const noexcept
     { return timeout_restore_requested_ ? persisted_.graphics : requested_.graphics; }
     [[nodiscard]] const SettingsData &ApplyTargetEffective() const noexcept
     { return timeout_restore_requested_ ? persisted_effective_ : desired_effective_; }
-
-    void EditDisplayOutput(GraphicsDisplayId output)
-    {
-        auto candidate = requested_;
-        candidate.graphics.display_output = output;
-        candidate.graphics.preset = GraphicsPreset::Custom;
-        if (!ValidateGraphicsSettings(candidate.graphics).empty()) return;
-        requested_ = std::move(candidate);
-        followup_display_output_ = std::move(output);
-        graphics_dirty_ = true;
-        preparation_failed_ = false;
-    }
-
-    void EditDisplayIntent(const GraphicsSettings &graphics)
-    {
-        EditDisplayOutput(graphics.display_output);
-        requested_.graphics.output_extent = graphics.output_extent;
-        followup_display_extent_ = graphics.output_extent;
-        (void)EditGraphics({UiCommandKind::SetBorderless,
-            graphics.display_mode == GraphicsDisplayMode::BorderlessFullscreen ? 1u : 0u});
-    }
 
     void SetDesiredOutputExtent(std::uint32_t width, std::uint32_t height) noexcept
     {
@@ -93,14 +67,10 @@ class GraphicsSettingsCommit
         }
     }
 
-    // Validate before changing either intent or a coalesced slot. The slot key is
-    // the actual setting ID, and serial order preserves preset/field ordering.
     bool EditGraphics(const UiCommand &command)
     {
         auto canonical = CanonicalGraphicsEdit(command);
         if (!canonical) return false;
-        const auto index = GraphicsEditIndex(*canonical);
-        if (!index) return false;
         auto candidate = requested_;
         if (!ApplySettingsEdit(candidate, *canonical)) return false;
         auto projection = ProjectSettingsDocument(candidate);
@@ -109,9 +79,7 @@ class GraphicsSettingsCommit
         if (mute_audio_) projection.master_volume = 0;
         requested_ = std::move(candidate);
         desired_effective_ = projection;
-        followup_edits_[*index] = PendingEdit{*canonical, ++edit_serial_};
         graphics_dirty_ = true;
-        preparation_failed_ = false;
         return true;
     }
 
@@ -151,7 +119,7 @@ class GraphicsSettingsCommit
 
     [[nodiscard]] std::optional<GraphicsSettingsCommitRequest> NextRequest(const GraphicsSettings &graphics)
     {
-        if (HasPending() || !HasUnsentEdits() || preparation_failed_) return std::nullopt;
+        if (HasPending() || !HasUnsentEdits()) return std::nullopt;
         // All allocating copies precede publication. OOM leaves the previous
         // snapshot and requested intent intact, with no outstanding read lease.
         auto document = timeout_restore_requested_ ? persisted_ : requested_;
@@ -166,8 +134,7 @@ class GraphicsSettingsCommit
         timeout_restore_requested_ = false;
         timed_out_ = false;
         pending_generation_ = ++next_generation_;
-        graphics_dirty_ = false;
-        if (!in_flight_timeout_restore_) ClearFollowups();
+        if (!in_flight_timeout_restore_) graphics_dirty_ = false;
         return GraphicsSettingsCommitRequest{pending_generation_, projection, &in_flight_graphics_,
             in_flight_timeout_restore_ ? GraphicsSettingsRequestCause::Recovery
                                         : GraphicsSettingsRequestCause::User};
@@ -189,7 +156,6 @@ class GraphicsSettingsCommit
         requested_ = std::move(restored);
         desired_effective_ = effective_;
         graphics_dirty_ = timeout_restore_requested_ = false;
-        ClearFollowups();
     }
 
     // Called only after a successful schema-2 atomic save.
@@ -206,12 +172,22 @@ class GraphicsSettingsCommit
         persisted_effective_ = effective_;
     }
 
-    // Display confirmation cancel restores the last accepted display profile.
-    void RestorePersistedDisplay() noexcept
+    // Display confirmation cancel restores the accepted display fields while
+    // preserving unrelated graphics edits and the current client extent.
+    void RestoreDisplay(const GraphicsSettings &accepted_display)
     {
         if (HasPending()) return;
-        timeout_restore_requested_ = true;
-        preparation_failed_ = false;
+        auto candidate = requested_;
+        candidate.graphics.display_output = accepted_display.display_output;
+        candidate.graphics.output_extent = accepted_display.output_extent;
+        candidate.graphics.display_mode = accepted_display.display_mode;
+        auto projection = ProjectSettingsDocument(candidate);
+        projection.width = desired_effective_.width;
+        projection.height = desired_effective_.height;
+        if (mute_audio_) projection.master_volume = 0;
+        requested_ = std::move(candidate);
+        desired_effective_ = projection;
+        graphics_dirty_ = true;
     }
 
     // Keep the immutable packet alive while waiting for a late acknowledgment.
@@ -227,10 +203,15 @@ class GraphicsSettingsCommit
         CopyImmediateProjection(requested_, next_effective);
         const auto was_timeout = timed_out_;
         const auto was_timeout_restore = in_flight_timeout_restore_;
-        // Replay allocates only before completing the main-thread commit. A
-        // caller can retain and retry this ack if its UI/document allocation fails.
-        ReplayFollowupEdits(was_timeout ? persisted_ : next_committed,
-                            was_timeout ? persisted_effective_ : next_effective);
+        if (!graphics_dirty_)
+        {
+            auto next_requested = was_timeout ? persisted_ : next_committed;
+            CopyImmediate(requested_, next_requested);
+            auto next_desired = was_timeout ? persisted_effective_ : next_effective;
+            CopyImmediateProjection(requested_, next_desired);
+            requested_ = std::move(next_requested);
+            desired_effective_ = next_desired;
+        }
         committed_ = std::move(next_committed);
         effective_ = next_effective;
         if (ack.error == ErrorCode::None) committed_generation_ = ack.generation;
@@ -244,21 +225,6 @@ class GraphicsSettingsCommit
     }
 
   private:
-    struct PendingEdit { UiCommand command; std::uint64_t serial; };
-    static constexpr std::size_t kEditSlots = kGraphicsSettingCount + 1;
-
-    [[nodiscard]] static std::optional<std::size_t> GraphicsEditIndex(const UiCommand &command) noexcept
-    {
-        if (command.kind == UiCommandKind::SetVfxScreenOverlayIntensityPercent)
-            return kGraphicsSettingCount;
-        if (command.kind != UiCommandKind::SetGraphicsSetting) return std::nullopt;
-        for (std::size_t i = 0; i < GraphicsSettingDescriptors().size(); ++i)
-        {
-            if (GraphicsSettingDescriptors()[i].id == command.graphics_setting) return i;
-        }
-        return std::nullopt;
-    }
-
     static void CopyImmediate(const SettingsDocument &source, SettingsDocument &target) noexcept
     {
         target.master_volume = source.master_volume;
@@ -275,38 +241,6 @@ class GraphicsSettingsCommit
         target.sfx_volume = source.sfx_volume;
         target.ui_volume = source.ui_volume;
         target.skill_virtual_keys = source.skill_virtual_keys;
-    }
-
-    void ClearFollowups() noexcept
-    {
-        for (auto &edit : followup_edits_) edit.reset();
-        followup_display_output_.reset();
-        followup_display_extent_.reset();
-    }
-
-    void ReplayFollowupEdits(const SettingsDocument &base, SettingsData projection)
-    {
-        auto candidate = base;
-        CopyImmediate(requested_, candidate);
-        if (followup_display_output_) candidate.graphics.display_output = *followup_display_output_;
-        if (followup_display_extent_) candidate.graphics.output_extent = *followup_display_extent_;
-        std::array<std::size_t, kEditSlots> order{};
-        std::size_t count{};
-        for (std::size_t i = 0; i < kEditSlots; ++i) if (followup_edits_[i]) order[count++] = i;
-        std::sort(order.begin(), order.begin() + count, [&](auto a, auto b) {
-            return followup_edits_[a]->serial < followup_edits_[b]->serial;
-        });
-        bool rejected{};
-        for (std::size_t i = 0; i < count; ++i)
-            if (!ApplySettingsEdit(candidate, followup_edits_[order[i]]->command)) rejected = true;
-        auto projected = ProjectSettingsDocument(candidate);
-        projected.width = projection.width;
-        projected.height = projection.height;
-        CopyImmediateProjection(candidate, projected);
-        requested_ = std::move(candidate);
-        desired_effective_ = projected;
-        followup_rejected_ = rejected;
-        graphics_dirty_ = count != 0 || followup_display_output_.has_value() || followup_display_extent_.has_value();
     }
 
     static void ApplyEffectiveEdit(SettingsData &effective, const UiCommand &command) noexcept
@@ -332,12 +266,9 @@ class GraphicsSettingsCommit
     SettingsDocument requested_, committed_, persisted_, in_flight_document_;
     GraphicsSettings in_flight_graphics_;
     SettingsData effective_, desired_effective_, persisted_effective_, in_flight_effective_;
-    std::array<std::optional<PendingEdit>, kEditSlots> followup_edits_{};
-    std::optional<GraphicsDisplayId> followup_display_output_;
-    std::optional<GraphicsOutputExtent> followup_display_extent_;
-    std::uint64_t edit_serial_{}, next_generation_{}, pending_generation_{}, committed_generation_{};
+    std::uint64_t next_generation_{}, pending_generation_{}, committed_generation_{};
     bool graphics_dirty_{}, mute_audio_{}, timeout_restore_requested_{}, in_flight_timeout_restore_{};
-    bool timed_out_{}, followup_rejected_{}, preparation_failed_{};
+    bool timed_out_{};
 };
 
 } // namespace hs

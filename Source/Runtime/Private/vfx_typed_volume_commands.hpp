@@ -15,7 +15,7 @@ namespace hs::runtime_detail
 // Runtime retains event inputs until their cooked fixed effect deadline, then
 // rebuilds these commands at the fractional display tick (60 ticks/second). Persistent commands
 // exist only while their actual snapshot owner exists. Below High, output is
-// empty. Malformed allowlisted recipes fail the whole conversion visibly.
+// empty. The image must be immutable and admitted; live inputs are validated.
 [[nodiscard]] Result BuildVfxTypedVolumeCommands(const VfxImage &,
     VfxEventView, std::span<const VfxPersistentInput>, double current_tick,
     VfxQuality admission, std::vector<VfxVolumeInput> &);

@@ -67,6 +67,8 @@ Result LoadPreparedContent(SelectedGeneration generation, PreparedContent &outpu
     if (auto result = candidate.generation->Require("game-data/presentation-catalog", path); !result) return result;
     if (auto result = LoadPresentationCatalog(path, candidate.presentation, &candidate.content_hash); !result) return result;
     if (auto result = LoadPreparedVfx(*candidate.generation, candidate.vfx); !result) return result;
+    if (!candidate.vfx.has_required_sprite_bindings)
+        return Result::Failure(ErrorCode::InvalidArgument, "ShippingImage", "VFX omits required sprite bindings.");
     if (auto result = PrepareAudio(candidate.generation->product_paths, candidate.prepared_audio); !result) return result;
     output = std::move(candidate);
     return Result::Success();

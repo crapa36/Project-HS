@@ -11,13 +11,6 @@
 
 namespace hs::runtime_detail::vfx_retained_size
 {
-struct BirthStorage
-{
-    std::size_t row_bytes{};
-    std::array<std::size_t, 3> unused_rows{};
-    std::size_t destinations{};
-};
-
 struct BirthRequest
 {
     std::size_t count{};
@@ -26,110 +19,43 @@ struct BirthRequest
     std::size_t storage{};
 };
 
-inline std::size_t AppendRowsWithinBudget(std::size_t row_bytes,
-    std::size_t requested, std::size_t held_bytes, std::size_t budget_bytes,
-    std::span<const std::size_t> unused_rows) noexcept;
-
-// Select optional row prefixes against free slots and a remaining byte budget.
-// The caller reserves order.capacity() and accounts for it in held_bytes before
-// calling; the all-fit path leaves that scratch vector completely untouched.
+// The all-fit path leaves the scratch vector untouched.
 inline std::size_t SelectBirthRows(std::span<BirthRequest> requests,
-    std::span<BirthStorage> storages, std::size_t held_bytes,
+    std::span<const std::size_t> row_bytes, std::size_t held_bytes,
     std::size_t budget_bytes, std::vector<std::size_t> &order)
 {
-    for (const auto &storage : storages)
-        if (storage.row_bytes == 0 || storage.destinations == 0 || storage.destinations > 3)
-            throw std::logic_error("invalid VFX birth storage descriptor");
-    for (const auto &request : requests)
-        if (!request.admitted || request.storage >= storages.size())
-            throw std::logic_error("invalid VFX birth request descriptor");
-
-    const auto growth_budget = held_bytes < budget_bytes ? budget_bytes - held_bytes : 0;
+    const auto available = held_bytes < budget_bytes ? budget_bytes - held_bytes : 0;
+    auto remaining = available;
     bool all_fit = true;
-    std::size_t all_fit_growth{};
-    for (std::size_t storage_index = 0; storage_index < storages.size() && all_fit; ++storage_index)
+    for (const auto &request : requests)
     {
-        const auto &storage = storages[storage_index];
-        std::size_t requested{};
-        for (const auto &request : requests)
-        {
-            if (request.storage != storage_index) continue;
-            if (request.count > std::numeric_limits<std::size_t>::max() - requested)
-            {
-                all_fit = false;
-                break;
-            }
-            requested += request.count;
-        }
-        if (!all_fit) break;
-        const auto remaining_budget = growth_budget - all_fit_growth;
-        const auto max_growth_rows = remaining_budget / storage.row_bytes;
-        std::size_t growth_rows{};
-        for (std::size_t destination = 0; destination < storage.destinations; ++destination)
-        {
-            const auto growth = requested > storage.unused_rows[destination]
-                ? requested - storage.unused_rows[destination] : 0;
-            if (growth > max_growth_rows - growth_rows)
-            {
-                all_fit = false;
-                break;
-            }
-            growth_rows += growth;
-        }
-        if (all_fit)
-        {
-            const auto bytes = growth_rows * storage.row_bytes;
-            all_fit_growth += bytes;
-        }
+        const auto bytes = row_bytes[request.storage];
+        if (request.count > remaining / bytes) { all_fit = false; break; }
+        remaining -= request.count * bytes;
     }
     if (all_fit)
     {
         for (auto &request : requests) *request.admitted = request.count;
-        for (const auto &request : requests)
-        {
-            auto &storage = storages[request.storage];
-            for (std::size_t destination = 0; destination < storage.destinations; ++destination)
-                storage.unused_rows[destination] -=
-                    std::min(request.count, storage.unused_rows[destination]);
-        }
-        return all_fit_growth;
+        return available - remaining;
     }
-
-    if (order.capacity() < requests.size())
-        throw std::logic_error("VFX birth order scratch was not reserved by caller");
     order.clear();
-    for (std::size_t index = 0; index < requests.size(); ++index)
-        order.push_back(index);
+    order.reserve(requests.size());
+    for (std::size_t index = 0; index < requests.size(); ++index) order.push_back(index);
     std::sort(order.begin(), order.end(), [&](std::size_t left, std::size_t right) {
         if (requests[left].importance != requests[right].importance)
             return requests[left].importance > requests[right].importance;
         return left < right;
     });
-    for (auto &request : requests) *request.admitted = 0;
-
-    auto remaining_bytes = growth_budget;
-    std::size_t growth_bytes{};
+    remaining = available;
     for (const auto index : order)
     {
         auto &request = requests[index];
-        auto &storage = storages[request.storage];
-        const auto unused = std::span<const std::size_t>(
-            storage.unused_rows.data(), storage.destinations);
-        const auto low = AppendRowsWithinBudget(storage.row_bytes, request.count, 0,
-            remaining_bytes, unused);
-        *request.admitted = low;
-        std::size_t added_growth_rows{};
-        for (std::size_t destination = 0; destination < storage.destinations; ++destination)
-        {
-            const auto reused = std::min(low, storage.unused_rows[destination]);
-            storage.unused_rows[destination] -= reused;
-            added_growth_rows += low - reused;
-        }
-        const auto added_bytes = added_growth_rows * storage.row_bytes;
-        remaining_bytes -= added_bytes;
-        growth_bytes += added_bytes;
+        const auto bytes = row_bytes[request.storage];
+        const auto admitted = std::min(request.count, remaining / bytes);
+        *request.admitted = admitted;
+        remaining -= admitted * bytes;
     }
-    return growth_bytes;
+    return available - remaining;
 }
 
 inline std::size_t Add(std::size_t a, std::size_t b) noexcept
@@ -138,67 +64,6 @@ inline std::size_t Add(std::size_t a, std::size_t b) noexcept
 inline std::size_t Multiply(std::size_t count, std::size_t size) noexcept
 { return count && size > std::numeric_limits<std::size_t>::max() / count
     ? std::numeric_limits<std::size_t>::max() : count * size; }
-
-inline std::size_t NativeCopyGrowthBytes(std::size_t pending_rows,
-    std::size_t frozen_capacity, std::size_t reusable_capacity, std::size_t row_bytes) noexcept
-{
-    const auto capacity = std::max(frozen_capacity, reusable_capacity);
-    // A freeze copies at most the smaller partition; the larger keeps the original backing.
-    const auto copied = pending_rows / 2;
-    return Multiply(copied - std::min(copied, capacity), row_bytes);
-}
-
-template<class Rows>
-std::size_t NativeCopyGrowthBytes(const Rows &pending, const Rows &frozen,
-    const Rows &prepared) noexcept
-{
-    return NativeCopyGrowthBytes(pending.size(), frozen.capacity(),
-        prepared.empty() ? prepared.capacity() : 0, sizeof(typename Rows::value_type));
-}
-
-inline std::size_t AppendRowsWithinBudget(std::size_t row_bytes, std::size_t requested,
-    std::size_t held_bytes, std::size_t budget_bytes,
-    std::span<const std::size_t> unused_rows) noexcept
-{
-    if (unused_rows.empty() || row_bytes == 0) return 0;
-    const auto growth_rows = held_bytes < budget_bytes ? (budget_bytes - held_bytes) / row_bytes : 0;
-    const auto fits = [&](std::size_t count) {
-        auto remaining = growth_rows;
-        for (const auto unused : unused_rows)
-        {
-            const auto growth = count > unused ? count - unused : 0;
-            if (growth > remaining) return false;
-            remaining -= growth;
-        }
-        return true;
-    };
-    if (fits(requested)) return requested;
-    auto remaining = growth_rows;
-    auto admitted = requested;
-    for (const auto unused : unused_rows)
-        if (unused < admitted) admitted = unused;
-    // Cross each free-capacity threshold once; production has at most three destinations.
-    while (admitted < requested)
-    {
-        std::size_t destinations{}, next = requested;
-        for (const auto unused : unused_rows)
-            if (unused <= admitted) ++destinations;
-            else next = std::min(next, unused);
-        const auto affordable = remaining / destinations;
-        const auto distance = next - admitted;
-        if (affordable < distance) return admitted + affordable;
-        remaining -= distance * destinations;
-        admitted = next;
-    }
-    return admitted;
-}
-
-template<class T>
-std::size_t AppendRowsWithinBudget(std::size_t requested, std::size_t held_bytes,
-    std::size_t budget_bytes, std::span<const std::size_t> unused_rows) noexcept
-{
-    return AppendRowsWithinBudget(sizeof(T), requested, held_bytes, budget_bytes, unused_rows);
-}
 
 template<class T, class Allocator>
 void ReserveAppend(std::vector<T, Allocator> &items, std::size_t count)
@@ -221,10 +86,8 @@ std::size_t Vector(const std::vector<T, Allocator> &items) noexcept
 }
 
 template<class Map>
-std::size_t HashTable(const Map &items) noexcept
+std::size_t MapValues(const Map &items) noexcept
 {
-    // MSVC uses two bucket links and a list sentinel. Allocator/debug metadata is excluded.
-    return Add(Multiply(items.bucket_count(), 2 * sizeof(void *)),
-        Multiply(Add(items.size(), 1), sizeof(typename Map::value_type) + 3 * sizeof(void *)));
+    return Multiply(items.size(), sizeof(typename Map::value_type));
 }
 }

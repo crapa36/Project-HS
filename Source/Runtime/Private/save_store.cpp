@@ -6,17 +6,13 @@
 
 #include <algorithm>
 #include <cmath>
-#include <exception>
 #include <format>
 #include <limits>
-#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <type_traits>
-#include <unordered_set>
 #include <utility>
-#include <vector>
 
 namespace hs
 {
@@ -193,6 +189,20 @@ template <typename Integer>
     return true;
 }
 
+[[nodiscard]] bool ValidSkillKeys(const std::array<std::uint16_t, 4> &keys) noexcept
+{
+    for (std::size_t index = 0; index < keys.size(); ++index)
+    {
+        if (keys[index] == 0 || keys[index] > 0xFE ||
+            std::find(keys.begin(), keys.begin() + index, keys[index]) !=
+                keys.begin() + index)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 [[nodiscard]] bool ValidSettings(const SettingsData &settings) noexcept
 {
     if (settings.schema_version != SettingsData::kSchemaVersion || settings.width < 640 ||
@@ -212,32 +222,7 @@ template <typename Integer>
         return false;
     }
 
-    for (std::size_t index = 0; index < settings.skill_virtual_keys.size(); ++index)
-    {
-        const auto key = settings.skill_virtual_keys[index];
-        if (key == 0 || key > 0xFE ||
-            std::find(settings.skill_virtual_keys.begin(),
-                      settings.skill_virtual_keys.begin() + index,
-                      key) != settings.skill_virtual_keys.begin() + index)
-        {
-            return false;
-        }
-    }
-    return true;
-}
-
-[[nodiscard]] bool ValidSkillKeys(const std::array<std::uint16_t, 4> &keys) noexcept
-{
-    for (std::size_t index = 0; index < keys.size(); ++index)
-    {
-        if (keys[index] == 0 || keys[index] > 0xFE ||
-            std::find(keys.begin(), keys.begin() + index, keys[index]) !=
-                keys.begin() + index)
-        {
-            return false;
-        }
-    }
-    return true;
+    return ValidSkillKeys(settings.skill_virtual_keys);
 }
 
 [[nodiscard]] bool ValidVolume(float value) noexcept
@@ -265,40 +250,6 @@ template <typename Integer>
         keys[index] = static_cast<std::uint16_t>(value.get<std::uint64_t>());
     }
     return ValidSkillKeys(keys);
-}
-
-[[nodiscard]] bool ParseJsonNoDuplicates(std::string_view text, Json &parsed)
-{
-    bool duplicate{};
-    std::vector<std::unordered_set<std::string>> object_keys;
-    try
-    {
-        parsed = Json::parse(text.begin(), text.end(),
-                             [&](int, Json::parse_event_t event, Json &value) {
-                                 if (event == Json::parse_event_t::object_start)
-                                 {
-                                     object_keys.emplace_back();
-                                 }
-                                 else if (event == Json::parse_event_t::object_end)
-                                 {
-                                     object_keys.pop_back();
-                                 }
-                                 else if (event == Json::parse_event_t::key &&
-                                          !object_keys.back()
-                                               .insert(value.get<std::string>())
-                                               .second)
-                                 {
-                                     duplicate = true;
-                                 }
-                                 return true;
-                             },
-                             false);
-    }
-    catch (const Json::exception &)
-    {
-        return false;
-    }
-    return !duplicate && !parsed.is_discarded();
 }
 
 [[nodiscard]] bool ValidProfile(const ProfileData &profile) noexcept
@@ -432,13 +383,14 @@ template <typename T>
 {
     return key == "ray_tracing_enabled" || key == "rt_trace_distance_m" ||
            key == "neural_ray_reconstruction" || key == "ray_reconstruction_provider" ||
-           key == "gi_quality" || key == "outline" || key == "outline_width_px";
+           key == "gi_quality" || key == "lighting_quality" || key == "outline" || key == "outline_width_px";
 }
 
 [[nodiscard]] bool ParseExtensions(std::string_view text, Json &extensions)
 {
-    if (text.size() > kMaximumSaveBytes || !ParseJsonNoDuplicates(text, extensions) ||
-        !extensions.is_object()) return false;
+    if (text.size() > kMaximumSaveBytes) return false;
+    extensions = Json::parse(text, nullptr, false);
+    if (extensions.is_discarded() || !extensions.is_object()) return false;
     for (auto iterator = extensions.begin(); iterator != extensions.end(); ++iterator)
     {
         if ((iterator.key() != "top" && iterator.key() != "graphics") ||
@@ -453,9 +405,8 @@ template <typename T>
     return true;
 }
 
-[[nodiscard]] bool ValidSettingsDocument(const SettingsDocument &settings)
+[[nodiscard]] bool ValidSettingsValues(const SettingsDocument &settings)
 {
-    Json extensions;
     const auto extent = settings.graphics.output_extent;
     const bool valid_extent = !extent ||
         (extent->width >= 640 && extent->width <= 16'384 &&
@@ -466,11 +417,10 @@ template <typename T>
            ValidVolume(settings.sfx_volume) && ValidVolume(settings.ui_volume) &&
            ValidVolume(settings.screen_overlay_intensity) &&
            ValidSkillKeys(settings.skill_virtual_keys) &&
-           ValidateGraphicsSettings(settings.graphics).empty() &&
-           ParseExtensions(settings.opaque_optional_json, extensions);
+           ValidateGraphicsSettings(settings.graphics).empty();
 }
 
-[[nodiscard]] Json ToJson(const SettingsDocument &settings)
+[[nodiscard]] Json ToJson(const SettingsDocument &settings, const Json &extensions)
 {
     Json graphics = Json::object();
 #define HS_GRAPHICS_SETTING(id, name, field, type, kind, default_value, default_token, minimum, maximum, group, label_key) \
@@ -485,9 +435,6 @@ template <typename T>
                   {"ui_volume", settings.ui_volume},
                   {"skill_virtual_keys", settings.skill_virtual_keys},
                   {"screen_overlay_intensity", settings.screen_overlay_intensity}};
-    Json extensions;
-    if (!ParseExtensions(settings.opaque_optional_json, extensions))
-        throw std::invalid_argument("Invalid optional settings JSON.");
     for (const auto &scope : {"top", "graphics"})
     {
         const auto iterator = extensions.find(scope);
@@ -499,23 +446,10 @@ template <typename T>
     return document;
 }
 
-[[nodiscard]] Json ToJson(const SettingsData &settings)
+[[nodiscard]] Json ToJson(const SettingsDocument &settings)
 {
-    return {{"schema_version", settings.schema_version},
-            {"width", settings.width},
-            {"height", settings.height},
-            {"borderless", settings.borderless},
-            {"vsync", settings.vsync},
-            {"frame_cap", settings.frame_cap},
-            {"render_scale_percent", settings.render_scale_percent},
-            {"shadow_resolution", settings.shadow_resolution},
-            {"particle_percentage", settings.particle_percentage},
-            {"bloom", settings.bloom},
-            {"master_volume", settings.master_volume},
-            {"bgm_volume", settings.bgm_volume},
-            {"sfx_volume", settings.sfx_volume},
-            {"ui_volume", settings.ui_volume},
-            {"skill_virtual_keys", settings.skill_virtual_keys}};
+    // Recovery writes only documents already admitted by ReadDocument.
+    return ToJson(settings, Json::parse(settings.opaque_optional_json));
 }
 
 [[nodiscard]] Json ToJson(const ProfileData &profile)
@@ -614,7 +548,8 @@ template <typename T>
             extensions["graphics"][iterator.key()] = iterator.value();
     }
     parsed.opaque_optional_json = extensions.dump();
-    if (!ValidSettingsDocument(parsed)) return false;
+    if (!ValidSettingsValues(parsed) || parsed.opaque_optional_json.size() > kMaximumSaveBytes)
+        return false;
     settings = std::move(parsed);
     return true;
 }
@@ -692,59 +627,40 @@ template <typename Data>
 
     try
     {
-        Json json;
-        const bool no_duplicates = ParseJsonNoDuplicates(text, json);
-        if constexpr (std::is_same_v<Data, SettingsData> ||
-                      std::is_same_v<Data, SettingsDocument> || std::is_same_v<Data, ProfileData>)
+        Json json = Json::parse(text, nullptr, false);
+        if (json.is_discarded())
         {
-            // A future document is read-only even when it uses a field layout
-            // that this version's strict parser would reject.
-            if (!no_duplicates)
+            status = ReadStatus::Corrupt;
+            return Result::Success();
+        }
+        std::uint64_t schema{};
+        if (json.is_object() && ReadUnsigned(json, "schema_version", schema))
+        {
+            if (schema > Data::kSchemaVersion)
             {
-                const auto loose = Json::parse(text, nullptr, false);
-                std::uint64_t schema{};
-                if (loose.is_object() &&
-                    ReadUnsigned(loose, "schema_version", schema) &&
-                    schema > Data::kSchemaVersion)
+                status = ReadStatus::Future;
+                return Result::Success();
+            }
+            if constexpr (std::is_same_v<Data, SettingsDocument>)
+            {
+                if (schema == SettingsData::kSchemaVersion)
                 {
-                    status = ReadStatus::Future;
+                    SettingsData old;
+                    if (FromJson(json, old))
+                    {
+                        data = MigrateSettings(old);
+                        status = ReadStatus::Valid;
+                        return Result::Success();
+                    }
+                    status = ReadStatus::Corrupt;
                     return Result::Success();
                 }
             }
         }
-        if (no_duplicates)
+        if (FromJson(json, data))
         {
-            if constexpr (std::is_same_v<Data, SettingsData> ||
-                          std::is_same_v<Data, SettingsDocument> || std::is_same_v<Data, ProfileData>)
-            {
-                std::uint64_t schema{};
-                if (json.is_object() && ReadUnsigned(json, "schema_version", schema))
-                {
-                    if (schema > Data::kSchemaVersion)
-                    {
-                        status = ReadStatus::Future;
-                        return Result::Success();
-                    }
-                    if constexpr (std::is_same_v<Data, SettingsDocument>)
-                    {
-                        if (schema == SettingsData::kSchemaVersion)
-                        {
-                            SettingsData old;
-                            if (FromJson(json, old))
-                            {
-                                data = MigrateSettings(old);
-                                status = ReadStatus::Valid;
-                                return Result::Success();
-                            }
-                        }
-                    }
-                }
-            }
-            if (FromJson(json, data))
-            {
-                status = ReadStatus::Valid;
-                return Result::Success();
-            }
+            status = ReadStatus::Valid;
+            return Result::Success();
         }
     }
     catch (const Json::exception &)
@@ -832,19 +748,18 @@ template <typename Data>
     return Result::Success();
 }
 
-template <typename Data>
-[[nodiscard]] Result WriteDocument(const std::filesystem::path &path, const Data &data)
+[[nodiscard]] Result WriteDocument(const std::filesystem::path &path, const Json &document)
 {
     try
     {
-        auto text = ToJson(data).dump(2);
+        auto text = document.dump(2);
         text.push_back('\n');
         if (text.size() > kMaximumSaveBytes)
             return Result::Failure(ErrorCode::InvalidArgument, "hs_runtime",
                                    "Serialized save exceeds the size limit.");
         return WriteText(path, text);
     }
-    catch (const std::exception &exception)
+    catch (const Json::exception &exception)
     {
         return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                                std::format("Serializing save failed: {}", exception.what()));
@@ -928,7 +843,7 @@ template <typename Data>
                 return preserved;
             }
         }
-        if (auto restored = WriteDocument(path, backup); !restored)
+        if (auto restored = WriteDocument(path, ToJson(backup)); !restored)
         {
             return restored;
         }
@@ -960,7 +875,7 @@ template <typename Data>
         // The corrupt copies are already preserved above; leave the primary absent.
         if constexpr (std::is_same_v<Data, SettingsDocument>)
             return Result::Success();
-        return WriteDocument(path, data);
+        return WriteDocument(path, ToJson(data));
     }
     return Result::Success();
 }
@@ -968,6 +883,15 @@ template <typename Data>
 template <typename Data>
 [[nodiscard]] Result Save(const std::filesystem::path &path, const Data &data)
 {
+    Json selected;
+    if constexpr (std::is_same_v<Data, SettingsDocument>)
+    {
+        if (!ValidSettingsValues(data) || !ParseExtensions(data.opaque_optional_json, selected))
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_runtime",
+                                   "SettingsDocument is invalid.");
+    }
+    else if (!ValidProfile(data))
+        return Result::Failure(ErrorCode::InvalidArgument, "hs_runtime", "ProfileData is invalid.");
     if (path.parent_path().empty())
     {
         return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
@@ -988,16 +912,10 @@ template <typename Data>
         return read;
     }
     if (backup_status == ReadStatus::Future) return FutureSaveFailure();
-    Data to_write = data;
     if constexpr (std::is_same_v<Data, SettingsDocument>)
     {
-        Json selected;
-        if (!ParseExtensions(to_write.opaque_optional_json, selected))
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_runtime",
-                                   "Invalid optional settings fields.");
         const auto retain = [&](const Data &old) {
-            Json previous;
-            if (!ParseExtensions(old.opaque_optional_json, previous)) return;
+            const auto previous = Json::parse(old.opaque_optional_json);
             for (const auto &scope : {"top", "graphics"})
             {
                 const auto previous_scope = previous.find(scope);
@@ -1012,8 +930,7 @@ template <typename Data>
         };
         if (status == ReadStatus::Valid) retain(existing);
         if (backup_status == ReadStatus::Valid) retain(existing_backup);
-        to_write.opaque_optional_json = selected.dump();
-        if (!ValidSettingsDocument(to_write))
+        if (selected.dump().size() > kMaximumSaveBytes)
             return Result::Failure(ErrorCode::InvalidArgument, "hs_runtime",
                                    "Merged settings document is invalid.");
     }
@@ -1024,7 +941,10 @@ template <typename Data>
             return preserved;
         }
     }
-    return WriteDocument(path, to_write);
+    if constexpr (std::is_same_v<Data, SettingsDocument>)
+        return WriteDocument(path, ToJson(data, selected));
+    else
+        return WriteDocument(path, ToJson(data));
 }
 
 } // namespace
@@ -1052,21 +972,6 @@ SaveStore::SaveStore(std::optional<std::filesystem::path> root_override)
 {
 }
 
-Result SaveStore::LoadSettings(SettingsData &settings) const
-{
-    return Load(root_ / kSettingsName, settings);
-}
-
-Result SaveStore::SaveSettings(const SettingsData &settings) const
-{
-    if (!ValidSettings(settings))
-    {
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_runtime",
-                               "SettingsData is invalid.");
-    }
-    return Save(root_ / kSettingsName, settings);
-}
-
 Result SaveStore::LoadSettingsV2(SettingsDocument &settings,
                                  bool *loaded_from_file) const
 {
@@ -1075,11 +980,6 @@ Result SaveStore::LoadSettingsV2(SettingsDocument &settings,
 
 Result SaveStore::SaveSettingsV2(const SettingsDocument &settings) const
 {
-    if (!ValidSettingsDocument(settings))
-    {
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_runtime",
-                               "SettingsDocument is invalid.");
-    }
     return Save(root_ / kSettingsName, settings);
 }
 
@@ -1090,11 +990,6 @@ Result SaveStore::LoadProfile(ProfileData &profile) const
 
 Result SaveStore::SaveProfile(const ProfileData &profile) const
 {
-    if (!ValidProfile(profile))
-    {
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_runtime",
-                               "ProfileData is invalid.");
-    }
     return Save(root_ / kProfileName, profile);
 }
 

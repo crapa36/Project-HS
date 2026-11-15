@@ -1,5 +1,4 @@
 #include "vfx_typed_frame_adapter.hpp"
-#include "vfx_generation_rebind.hpp"
 #include "vfx_persistent_state.hpp"
 #include "vfx_workspace_size.hpp"
 
@@ -392,9 +391,9 @@ std::uint64_t SupplementalStableId(std::uint64_t stable_id,
     return stable_id ^ effect_id ^ 0xd6e8feb86659fd93ull;
 }
 
-void Diagnose(VfxTypedFrameInputs &result, std::uint64_t effect_id)
+void Diagnose(VfxTypedFrameInputs &result)
 {
-    result.unsupported_effect_ids.push_back(effect_id);
+    ++result.unsupported_input_count;
 }
 
 std::optional<float> Lifetime(const PersistentVfxVisual &visual,
@@ -747,8 +746,8 @@ std::size_t PreparedPairFacts::CaptureHash::operator()(const CaptureKey &key) co
 std::size_t PreparedPairFacts::RetainedCapacityBytes() const noexcept
 {
     using namespace vfx_retained_size;
-    return Add(Add(Add(HashTable(previous_), HashTable(current_)), Vector(current_aliases_)),
-        Add(HashTable(instances_), HashTable(captures_)));
+    return Add(Add(Add(MapValues(previous_), MapValues(current_)), Vector(current_aliases_)),
+        Add(MapValues(instances_), MapValues(captures_)));
 }
 
 bool PreparedPairFacts::Prepare(Key key,
@@ -841,7 +840,7 @@ void BuildVfxTypedFrameInputs(
         (current_tick != 0 ? 1.0 - interpolation : 0.0);
     result.events.clear();
     result.persistent.clear();
-    result.unsupported_effect_ids.clear();
+    result.unsupported_input_count = 0;
     result.events.reserve(events.size());
     result.persistent.reserve(current.size());
 
@@ -863,7 +862,7 @@ void BuildVfxTypedFrameInputs(
             continue; // Authoritative snapshot presence owns these visuals.
         if (!lookup || !effect || effect->input_mode != 0)
         {
-            Diagnose(result, effect_id);
+            Diagnose(result);
             continue;
         }
         const bool pickup_collect = IsPickupCollectEffect(effect_id);
@@ -877,13 +876,13 @@ void BuildVfxTypedFrameInputs(
               event.geometry.kind != PresentationGeometryKind::None ||
               event.sequence == 0)))
         {
-            Diagnose(result, effect_id);
+            Diagnose(result);
             continue;
         }
         const auto parameters = DecodeVfxParameters(event.parameters);
         if (!Finite(event.position) || !Finite(parameters))
         {
-            Diagnose(result, effect_id);
+            Diagnose(result);
             continue;
         }
         VfxEventInput input;
@@ -898,7 +897,7 @@ void BuildVfxTypedFrameInputs(
         {
             if ((parameters.flags & static_cast<std::uint32_t>(VfxEventFlag::HasTarget)) == 0)
             {
-                Diagnose(result, effect_id);
+                Diagnose(result);
                 continue;
             }
             VfxLinkPayload link{};
@@ -910,7 +909,7 @@ void BuildVfxTypedFrameInputs(
         {
             if (parameters.scale <= 0.0f)
             {
-                Diagnose(result, effect_id);
+                Diagnose(result);
                 continue;
             }
             VfxPointPayload point;
@@ -929,7 +928,7 @@ void BuildVfxTypedFrameInputs(
                 event.geometry.end_tick != event.tick ||
                 event.geometry.start_tick > event.geometry.end_tick)
             {
-                Diagnose(result, effect_id);
+                Diagnose(result);
                 continue;
             }
             input.world_transform = Transform(event.position,
@@ -951,7 +950,7 @@ void BuildVfxTypedFrameInputs(
                 // presentation scale, independently of ratio-based outputs.
                 if (parameters.scale <= 0.0f)
                 {
-                    Diagnose(result, effect_id);
+                    Diagnose(result);
                     continue;
                 }
                 context.scalar0 = parameters.scale;
@@ -962,7 +961,7 @@ void BuildVfxTypedFrameInputs(
                 if (!std::isfinite(event.vfx_ratio01) || event.vfx_ratio01 < 0.0f ||
                     event.vfx_ratio01 > 1.0f || event.upgrade_owner_id == 0)
                 {
-                    Diagnose(result, effect_id);
+                    Diagnose(result);
                     continue;
                 }
                 context.owner_id = event.upgrade_owner_id;
@@ -975,7 +974,7 @@ void BuildVfxTypedFrameInputs(
             if (!MakeEventGeometry(event, parameters, effect->payload_kind,
                                    input.payload))
             {
-                Diagnose(result, effect_id);
+                Diagnose(result);
                 continue;
             }
         }
@@ -983,7 +982,7 @@ void BuildVfxTypedFrameInputs(
         {
             // EventStream does not carry a Circle/Cone/RingGaps or path
             // payload. In particular, scale is never reinterpreted as radius.
-            Diagnose(result, effect_id);
+            Diagnose(result);
             continue;
         }
         if (IsStatusTickEffect(effect_id))
@@ -994,7 +993,7 @@ void BuildVfxTypedFrameInputs(
                 event.geometry.end_tick <= event.geometry.start_tick ||
                 !WarningShapeMatches(*warning, input.payload))
             {
-                Diagnose(result, effect_id);
+                Diagnose(result);
                 continue;
             }
             input.geometry_owner_id = event.geometry.source_id;
@@ -1011,7 +1010,7 @@ void BuildVfxTypedFrameInputs(
                 const auto *marker = marker_lookup ? FindEffect(cooked, marker_lookup->handle) : nullptr;
                 if (!marker || marker->input_mode != 0 || marker->payload_kind != kSafeSectorPayload ||
                     marker->timing_kind != 1)
-                    Diagnose(result, kSafeMarkerEffect);
+                    Diagnose(result);
                 else
                 {
                     vfx_retained_size::ReserveAppend(result.events, gap_count + 1u);
@@ -1087,7 +1086,7 @@ void BuildVfxTypedFrameInputs(
                 visual.effect_asset.value != id || visual.stable_id == 0 ||
                 !Finite(visual.position) || !std::isfinite(visual.radius) || visual.radius <= 0 ||
                 visual.active_tick > display_tick || visual.source_horizon_tick <= display_tick)
-            { Diagnose(result, id); continue; }
+            { Diagnose(result); continue; }
             const auto window = static_cast<Tick>(std::ceil(effect->seconds * 60.0f));
             if (visual.source_horizon_tick - display_tick > window) continue;
             const auto start = visual.source_horizon_tick > window
@@ -1135,7 +1134,7 @@ void BuildVfxTypedFrameInputs(
                 visual.active_tick > display_tick || visual.expires <= visual.active_tick ||
                 !Finite(visual.position) || !std::isfinite(visual.radius) || visual.radius <= 0)
             {
-                Diagnose(result, kArrowRainIncomingEffect);
+                Diagnose(result);
                 continue;
             }
             const auto &effect = *arrow_rain_facts->effect;
@@ -1196,14 +1195,14 @@ void BuildVfxTypedFrameInputs(
                 visual.projectile_owner_id == 0 ||
                 visual.projectile_spawned_tick > display_tick)
             {
-                Diagnose(result, visual.effect_asset.value);
+                Diagnose(result);
                 continue;
             }
             if (visual.skill == 3 && visual.source_upgrade == 2 &&
                 (!UpgradeBindingContains(cooked, Hash64("skill.charged_shot"), 3,
                                          effect->handle) || visual.cast_id == 0))
             {
-                Diagnose(result, visual.effect_asset.value);
+                Diagnose(result);
                 continue;
             }
             VfxPersistentInput input;
@@ -1226,7 +1225,7 @@ void BuildVfxTypedFrameInputs(
                                                effect->handle);
             if (!MakeProjectileHead(visual, input.payload))
             {
-                Diagnose(result, visual.effect_asset.value);
+                Diagnose(result);
                 continue;
             }
             result.persistent.push_back(std::move(input));
@@ -1236,7 +1235,7 @@ void BuildVfxTypedFrameInputs(
             [&visual](const PersistentBinding &candidate) { return candidate.kind == visual.kind; });
         if (base_binding == kPersistentBindings.end())
         {
-            Diagnose(result, 0);
+            Diagnose(result);
             continue;
         }
         PersistentBinding binding = *base_binding;
@@ -1253,7 +1252,7 @@ void BuildVfxTypedFrameInputs(
             // malformed or missing cooked membership must not fall back to the
             // legacy effect, which would render the same area with the wrong
             // authored recipe.
-            Diagnose(result, binding.effect_id);
+            Diagnose(result);
             continue;
         }
         const bool bow_draw_stamp =
@@ -1272,14 +1271,14 @@ void BuildVfxTypedFrameInputs(
         if (!lookup || !effect || effect->input_mode != (pickup_motion ? 0u : 1u) ||
             effect->payload_kind != binding.payload_kind || !age)
         {
-            Diagnose(result, binding.effect_id);
+            Diagnose(result);
             continue;
         }
         if (visual.kind == PersistentVfxKind::UpgradeSlowArea &&
             visual.skill == kArrowRainSkill && visual.source_upgrade != 7 &&
             !UpgradeBindingContains(cooked, Hash64("skill.arrow_rain"), 6, effect->handle))
         {
-            Diagnose(result, binding.effect_id);
+            Diagnose(result);
             continue;
         }
         if ((visual.kind == PersistentVfxKind::BurnTransferLink ||
@@ -1293,7 +1292,7 @@ void BuildVfxTypedFrameInputs(
                 !UpgradeBindingContains(cooked, skill_id, visual.source_upgrade + 1u,
                                         effect->handle))
             {
-                Diagnose(result, binding.effect_id);
+                Diagnose(result);
                 continue;
             }
         }
@@ -1326,7 +1325,7 @@ void BuildVfxTypedFrameInputs(
               !UpgradeBindingContains(cooked, Hash64("skill.charged_shot"), 1,
                                       effect->handle))))
         {
-            Diagnose(result, binding.effect_id);
+            Diagnose(result);
             continue;
         }
         if ((visual.kind == PersistentVfxKind::MultishotRetarget ||
@@ -1336,21 +1335,21 @@ void BuildVfxTypedFrameInputs(
              visual.expires <= visual.active_tick || display_tick >= visual.expires ||
              visual.projectile_spawned_tick > visual.active_tick))
         {
-            Diagnose(result, binding.effect_id);
+            Diagnose(result);
             continue;
         }
 
         float source_duration_seconds = 0.0f;
         if (visual.kind == PersistentVfxKind::FireArea)
         {
-            if (visual.expires <= visual.active_tick) { Diagnose(result, binding.effect_id); continue; }
+            if (visual.expires <= visual.active_tick) { Diagnose(result); continue; }
             source_duration_seconds = static_cast<float>(visual.expires - visual.active_tick) / 60.0f;
         }
         else if (bow_draw_stamp)
         {
             if (visual.source_horizon_tick <= visual.active_tick)
             {
-                Diagnose(result, binding.effect_id);
+                Diagnose(result);
                 continue;
             }
             source_duration_seconds = static_cast<float>(
@@ -1358,7 +1357,7 @@ void BuildVfxTypedFrameInputs(
             if (!std::isfinite(source_duration_seconds) ||
                 source_duration_seconds <= 0.0f)
             {
-                Diagnose(result, binding.effect_id);
+                Diagnose(result);
                 continue;
             }
         }
@@ -1366,7 +1365,7 @@ void BuildVfxTypedFrameInputs(
         {
             if (visual.expires <= visual.active_tick)
             {
-                Diagnose(result, binding.effect_id);
+                Diagnose(result);
                 continue;
             }
             source_duration_seconds = static_cast<float>(
@@ -1374,7 +1373,7 @@ void BuildVfxTypedFrameInputs(
             if (!std::isfinite(source_duration_seconds) ||
                 source_duration_seconds <= 0.0f)
             {
-                Diagnose(result, binding.effect_id);
+                Diagnose(result);
                 continue;
             }
         }
@@ -1382,7 +1381,7 @@ void BuildVfxTypedFrameInputs(
         {
             if (visual.expires <= visual.active_tick)
             {
-                Diagnose(result, binding.effect_id);
+                Diagnose(result);
                 continue;
             }
             source_duration_seconds = static_cast<float>(
@@ -1390,7 +1389,7 @@ void BuildVfxTypedFrameInputs(
             if (!std::isfinite(source_duration_seconds) ||
                 source_duration_seconds <= 0.0f)
             {
-                Diagnose(result, binding.effect_id);
+                Diagnose(result);
                 continue;
             }
         }
@@ -1427,7 +1426,7 @@ void BuildVfxTypedFrameInputs(
                 !std::isfinite(effect->seconds) || effect->seconds <= 0.0f ||
                 input.elapsed_seconds >= effect->seconds)
             {
-                Diagnose(result, binding.effect_id);
+                Diagnose(result);
                 continue;
             }
             input.normalized_age = std::clamp(
@@ -1531,7 +1530,7 @@ void BuildVfxTypedFrameInputs(
         }
         if (!geometry_ok)
         {
-            Diagnose(result, binding.effect_id);
+            Diagnose(result);
             continue;
         }
         result.persistent.push_back(std::move(input));
@@ -1547,7 +1546,7 @@ void BuildVfxTypedFrameInputs(
                 !UpgradeBindingContains(cooked, skill_id, ordinal, recipe->handle) ||
                 visual.cast_id == 0)
             {
-                Diagnose(result, effect_id);
+                Diagnose(result);
                 return;
             }
             // Distinct recipes reuse the area's actual geometry and clock,
@@ -1602,7 +1601,7 @@ void BuildVfxTypedFrameInputs(
             // The generic damage trail remains valid on its own. A qualified
             // supplement is emitted only when both authored line recipes are
             // exact members of the selected upgrade binding.
-            Diagnose(result, supplement->effect_id);
+            Diagnose(result);
             continue;
         }
 
@@ -1639,26 +1638,6 @@ std::size_t VfxUpgradeMovementState::RetainedCapacityBytes() const noexcept
         vfx_retained_size::Vector(staged_owners_));
 }
 
-std::uint64_t VfxUpgradeMovementState::Rebind(const VfxProgramView &previous,
-                                           const VfxProgramView &next) noexcept
-{
-    const auto rebind = [&](std::vector<Owner> &owners) {
-        const auto count = owners.size();
-        std::erase_if(owners, [&](Owner &owner) {
-            if (RebindVfxGenerationHandle(previous, next, owner.input.effect_handle, 1u) !=
-                VfxGenerationRebindOutcome::Retained) return true;
-            const auto &effect = next.effects[owner.input.effect_handle - 1u];
-            if (effect.timing_kind != 0 || !std::isfinite(effect.seconds) || effect.seconds <= 0 ||
-                !UpgradeBindingContains(next, Hash64("skill.retreat_shot"), 8, effect.handle)) return true;
-            owner.seconds = effect.seconds;
-            owner.input.source_duration_seconds = effect.seconds;
-            return false;
-        });
-        return count - owners.size();
-    };
-    return rebind(owners_) + rebind(staged_owners_);
-}
-
 void BuildVfxTypedFrameInputsFromRaw(
     const VfxImage &image, std::span<const PresentationEvent> events,
     std::span<const PersistentVfxVisual> current,
@@ -1684,99 +1663,89 @@ void VfxUpgradeMovementState::Append(
             display_tick - owner.started >= duration_ticks);
     });
     staged_owners_.clear();
-    const auto old_output_size = output.size();
-    try
+    for (const auto &event : dispatched_events)
     {
-      for (const auto &event : dispatched_events)
-      {
-        const bool dash = event.asset.value == Hash64("particle.upgrade.retreat.second_dash");
-        const bool afterimage = event.asset.value == Hash64("particle.upgrade.retreat.afterimage");
-        if ((!dash && !afterimage) || event.kind != PresentationKind::Vfx ||
-            event.upgrade_skill != kRetreatShotSkill || event.upgrade_index != 7 ||
-            event.upgrade_stage != 1 || event.sequence == 0 ||
-            event.upgrade_cast_id == 0 || event.upgrade_owner_id == 0 ||
-            event.tick > current_tick || !Finite(event.position) ||
-            !Finite(event.geometry) || event.geometry.kind != PresentationGeometryKind::Line ||
-            event.geometry.source_id != event.upgrade_owner_id || event.geometry.width <= 0 ||
-            event.geometry.start_tick != event.tick || event.geometry.end_tick != event.tick)
-            continue;
-        const auto *lookup = FindLookup(image, event.asset.value);
-        const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
-        if (!effect || effect->input_mode != 1 || effect->timing_kind != 0 ||
-            effect->payload_kind != (dash ? kLinePayload : kContextPayload) ||
-            !std::isfinite(effect->seconds) || effect->seconds <= 0 ||
-            !UpgradeBindingContains(cooked, Hash64("skill.retreat_shot"), 8, effect->handle) ||
-            (display_tick >= event.tick && display_tick - event.tick >=
-                static_cast<double>(effect->seconds * 60.0f)))
-            continue;
-        const auto end = event.geometry.end_position;
-        const Float3 delta{end.x - event.position.x, end.y - event.position.y,
-                           end.z - event.position.z};
-        const float length = std::hypot(delta.x, std::hypot(delta.y, delta.z));
-        if (!std::isfinite(length) || length <= 0.0001f) continue;
-        const Float3 direction{delta.x / length, delta.y / length, delta.z / length};
-        const auto stable_id = SupplementalStableId(
-            event.upgrade_cast_id ^ event.sequence ^ event.upgrade_owner_id,
-            event.asset.value);
-        if (std::any_of(owners_.begin(), owners_.end(), [stable_id](const Owner &owner) {
-                return owner.input.stable_id == stable_id;
-            }) || std::any_of(staged_owners_.begin(), staged_owners_.end(),
-                [stable_id](const Owner &owner) { return owner.input.stable_id == stable_id; }))
-            continue;
-        Owner owner{};
-        owner.started = event.tick;
-        owner.seconds = effect->seconds;
-        owner.input.stable_id = stable_id;
-        owner.input.effect_handle = effect->handle;
-        owner.input.source_visual_kind = 0xFF;
-        owner.input.current_transform = Transform(event.position,
-                                                  std::atan2(direction.x, direction.z));
-        owner.input.previous_transform = owner.input.current_transform;
-        owner.input.stable_seed = PersistentSeed(stable_id, effect->handle);
-        owner.input.source_duration_seconds = effect->seconds;
-        if (dash)
-            owner.input.payload = VfxLinePayload{event.position, end, direction,
-                                                 event.geometry.width, 0.0f, 0};
+      const bool dash = event.asset.value == Hash64("particle.upgrade.retreat.second_dash");
+      const bool afterimage = event.asset.value == Hash64("particle.upgrade.retreat.afterimage");
+      if ((!dash && !afterimage) || event.kind != PresentationKind::Vfx ||
+          event.upgrade_skill != kRetreatShotSkill || event.upgrade_index != 7 ||
+          event.upgrade_stage != 1 || event.sequence == 0 ||
+          event.upgrade_cast_id == 0 || event.upgrade_owner_id == 0 ||
+          event.tick > current_tick || !Finite(event.position) ||
+          !Finite(event.geometry) || event.geometry.kind != PresentationGeometryKind::Line ||
+          event.geometry.source_id != event.upgrade_owner_id || event.geometry.width <= 0 ||
+          event.geometry.start_tick != event.tick || event.geometry.end_tick != event.tick)
+          continue;
+      const auto *lookup = FindLookup(image, event.asset.value);
+      const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
+      if (!effect || effect->input_mode != 1 || effect->timing_kind != 0 ||
+          effect->payload_kind != (dash ? kLinePayload : kContextPayload) ||
+          !std::isfinite(effect->seconds) || effect->seconds <= 0 ||
+          !UpgradeBindingContains(cooked, Hash64("skill.retreat_shot"), 8, effect->handle) ||
+          (display_tick >= event.tick && display_tick - event.tick >=
+              static_cast<double>(effect->seconds * 60.0f)))
+          continue;
+      const auto end = event.geometry.end_position;
+      const Float3 delta{end.x - event.position.x, end.y - event.position.y,
+                         end.z - event.position.z};
+      const float length = std::hypot(delta.x, std::hypot(delta.y, delta.z));
+      if (!std::isfinite(length) || length <= 0.0001f) continue;
+      const Float3 direction{delta.x / length, delta.y / length, delta.z / length};
+      const auto stable_id = SupplementalStableId(
+          event.upgrade_cast_id ^ event.sequence ^ event.upgrade_owner_id,
+          event.asset.value);
+      if (std::any_of(owners_.begin(), owners_.end(), [stable_id](const Owner &owner) {
+              return owner.input.stable_id == stable_id;
+          }) || std::any_of(staged_owners_.begin(), staged_owners_.end(),
+              [stable_id](const Owner &owner) { return owner.input.stable_id == stable_id; }))
+          continue;
+      Owner owner{};
+      owner.started = event.tick;
+      owner.seconds = effect->seconds;
+      owner.input.stable_id = stable_id;
+      owner.input.effect_handle = effect->handle;
+      owner.input.source_visual_kind = 0xFF;
+      owner.input.current_transform = Transform(event.position,
+                                                std::atan2(direction.x, direction.z));
+      owner.input.previous_transform = owner.input.current_transform;
+      owner.input.stable_seed = PersistentSeed(stable_id, effect->handle);
+      owner.input.source_duration_seconds = effect->seconds;
+      if (dash)
+          owner.input.payload = VfxLinePayload{event.position, end, direction,
+                                               event.geometry.width, 0.0f, 0};
+      else
+          owner.input.payload = VfxContextPayload{event.upgrade_owner_id, direction,
+                                                  0.0f, length, event.geometry.width};
+      staged_owners_.push_back(std::move(owner));
+    }
+
+    const auto visible_count = [display_tick](const std::vector<Owner> &owners) {
+        return static_cast<std::size_t>(std::ranges::count_if(owners,
+            [display_tick](const Owner &owner) { return display_tick >= owner.started; }));
+    };
+    vfx_retained_size::ReserveAppend(owners_, staged_owners_.size());
+    vfx_retained_size::ReserveAppend(output,
+        visible_count(owners_) + visible_count(staged_owners_));
+
+    const auto append_visible = [&](const Owner &owner) {
+        if (display_tick < owner.started) return;
+        auto input = owner.input;
+        input.quality = quality;
+        input.elapsed_ticks = display_tick - owner.started;
+        input.elapsed_seconds = static_cast<float>(input.elapsed_ticks / 60.0);
+        input.normalized_age = std::clamp(input.elapsed_seconds / owner.seconds, 0.0f, 1.0f);
+        if (auto *line = std::get_if<VfxLinePayload>(&input.payload))
+            line->lifetime01 = input.normalized_age;
         else
-            owner.input.payload = VfxContextPayload{event.upgrade_owner_id, direction,
-                                                    0.0f, length, event.geometry.width};
-        staged_owners_.push_back(std::move(owner));
-      }
+            std::get<VfxContextPayload>(input.payload).ratio01 = input.normalized_age;
+        output.push_back(std::move(input));
+    };
+    for (const auto &owner : owners_) append_visible(owner);
+    for (const auto &owner : staged_owners_) append_visible(owner);
 
-      const auto visible_count = [display_tick](const std::vector<Owner> &owners) {
-          return static_cast<std::size_t>(std::ranges::count_if(owners,
-              [display_tick](const Owner &owner) { return display_tick >= owner.started; }));
-      };
-      vfx_retained_size::ReserveAppend(owners_, staged_owners_.size());
-      vfx_retained_size::ReserveAppend(output,
-          visible_count(owners_) + visible_count(staged_owners_));
-
-      const auto append_visible = [&](const Owner &owner) {
-          if (display_tick < owner.started) return;
-          auto input = owner.input;
-          input.quality = quality;
-          input.elapsed_ticks = display_tick - owner.started;
-          input.elapsed_seconds = static_cast<float>(input.elapsed_ticks / 60.0);
-          input.normalized_age = std::clamp(input.elapsed_seconds / owner.seconds, 0.0f, 1.0f);
-          if (auto *line = std::get_if<VfxLinePayload>(&input.payload))
-              line->lifetime01 = input.normalized_age;
-          else
-              std::get<VfxContextPayload>(input.payload).ratio01 = input.normalized_age;
-          output.push_back(std::move(input));
-      };
-      for (const auto &owner : owners_) append_visible(owner);
-      for (const auto &owner : staged_owners_) append_visible(owner);
-
-      static_assert(std::is_nothrow_move_constructible_v<Owner>);
-      for (auto &owner : staged_owners_) owners_.push_back(std::move(owner));
-      staged_owners_.clear();
-    }
-    catch (...)
-    {
-        output.resize(old_output_size);
-        staged_owners_.clear();
-        throw;
-    }
+    static_assert(std::is_nothrow_move_constructible_v<Owner>);
+    for (auto &owner : staged_owners_) owners_.push_back(std::move(owner));
+    staged_owners_.clear();
 }
 
 bool RefreshVfxGroundEventOwner(VfxEventInput &event,
@@ -1920,36 +1889,6 @@ void RefreshVfxGroundEventOwnersFromRaw(
     RefreshVfxGroundEventOwners(events, owners, current_tick, facts,
                                 previous, interpolation);
 }
-void RebindVfxGroundEventOwners(const VfxImage &image,
-                                std::vector<VfxEventInput> &events)
-{
-    const auto &cooked = image.program;
-    std::vector<VfxEventInput> rebound;
-    rebound.reserve(events.size());
-    for (auto &event : events)
-    {
-        if (event.geometry_owner_id == 0)
-        {
-            rebound.push_back(std::move(event));
-            continue;
-        }
-        const auto binding = WarningBinding(event.geometry_effect_id);
-        if (!binding || !WarningShapeMatches(*binding, event.payload)) continue;
-        const auto *lookup = FindLookup(image, binding->effect_id);
-        const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
-        const auto expected_payload = binding->payload_kind;
-        if (!lookup || !effect || effect->input_mode != 0 ||
-            effect->payload_kind != expected_payload ||
-            (binding->effect_id == kSafeMarkerEffect && effect->timing_kind != 1))
-            continue;
-        event.effect_handle = effect->handle;
-        rebound.push_back(std::move(event));
-    }
-    events = std::move(rebound);
-}
-
-
-
 std::size_t SnapshotParticleScratch::RetainedCapacityBytes() const noexcept
 {
     return vfx_retained_size::Add(vfx_retained_size::Vector(ground_routes),

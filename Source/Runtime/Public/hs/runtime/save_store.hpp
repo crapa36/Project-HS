@@ -52,8 +52,6 @@ class SaveStore
     explicit SaveStore(
         std::optional<std::filesystem::path> root_override = std::nullopt);
 
-    [[nodiscard]] Result LoadSettings(SettingsData &settings) const;
-    [[nodiscard]] Result SaveSettings(const SettingsData &settings) const;
     [[nodiscard]] Result LoadSettingsV2(SettingsDocument &settings,
                                         bool *loaded_from_file = nullptr) const;
     [[nodiscard]] Result SaveSettingsV2(const SettingsDocument &settings) const;

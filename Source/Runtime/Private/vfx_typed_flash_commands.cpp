@@ -3,7 +3,6 @@
 #include <hs/render_data/render_snapshot_values.hpp>
 
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <limits>
 #include <numbers>
@@ -15,192 +14,134 @@ namespace hs::runtime_detail
 {
 namespace
 {
-constexpr std::uint32_t Hash32(std::string_view value) noexcept
+consteval std::uint32_t Hash32(std::string_view value) noexcept
 {
     std::uint32_t hash = 2166136261u;
     for (const unsigned char character : value) { hash ^= character; hash *= 16777619u; }
     return hash;
 }
-constexpr std::uint64_t Hash64(std::string_view s)
-{std::uint64_t h=14695981039346656037ull;for(unsigned char c:s){h^=c;h*=1099511628211ull;}return h;}
-constexpr auto kConePayload = Hash32("ConePayload");
-constexpr auto kRingGapsPayload = Hash32("RingWithGapsPayload");
-constexpr auto kSecondaryFan = Hash64("particle.upgrade.multishot.secondary_fan");
-constexpr auto kMultiShot = Hash64("particle.skill.multishot");
-constexpr auto kRearFan = Hash64("particle.upgrade.multishot.rear_fan");
-constexpr auto kRetreatTripleRelease = Hash64("particle.upgrade.retreat.triple_release");
-constexpr auto kArrowTripleRelease = Hash64("particle.upgrade.arrow.triple_release");
-constexpr auto kBossVolleyRelease = Hash64("particle.boss.volley.release");
-constexpr auto kBossShockwaveRelease = Hash64("particle.boss.shockwave.release");
-constexpr auto kMuzzlePrimary = Hash32("muzzle_primary");
-constexpr auto kBossEnergy = Hash32("boss_energy");
-constexpr std::array kPickupCollectEffects{
-    Hash64("particle.pickup.xp_collect"),
-    Hash64("particle.pickup.heal_collect"),
-    Hash64("particle.pickup.magnet_collect"),
-    Hash64("particle.pickup.relic_collect"),
-};
 bool Finite(const Float3 &v) noexcept
 { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
-template<class T> bool ValidRange(VfxRange r, std::span<const T> v)
-{ return r.first <= v.size() && r.count <= v.size() - r.first; }
 }
 
 void PrepareVfxTypedFlashOutputs(const VfxImage &image, VfxEventView inputs,
     std::span<const Sequence> excluded_sorted_sequences,
     std::vector<VfxPreparedFlashOutput> &prepared)
 {
-    const auto cooked=image.program;
     prepared.clear();
     for (std::size_t event_index = 0; event_index < inputs.size(); ++event_index)
     {
         const auto &input = inputs[event_index];
         if (!excluded_sorted_sequences.empty() &&
             std::ranges::binary_search(excluded_sorted_sequences, input.sequence)) continue;
-        if (input.effect_handle == 0 || input.effect_handle > image.flash_effect_ranges.size() ||
+        if (input.effect_handle == 0 || input.effect_handle > image.flash_effect_recipes.size() ||
             static_cast<std::uint32_t>(input.quality) > 2) continue;
-        const auto recipe_range=image.flash_effect_ranges[input.effect_handle-1];
-        if(!recipe_range.count || !ValidRange(recipe_range,image.flash_recipes))continue;
-        const auto recipes=image.flash_recipes.subspan(recipe_range.first,recipe_range.count);
-        const auto &first_recipe=recipes.front();
-        if(first_recipe.effect_handle!=input.effect_handle || !std::isfinite(first_recipe.seconds) || first_recipe.seconds<=0)continue;
-        const auto effect_id=first_recipe.effect_id;
+        const auto &effect = image.flash_effect_recipes[input.effect_handle - 1];
+        const auto recipe_range = effect.outputs;
+        if (!recipe_range.count) continue;
         Float3 position{}, direction{};
-        float scale = 1;
-        bool circle_geometry=false, cone_geometry=false, projectile_geometry=false, boss_energy_geometry=false;
-        bool pickup_collect = false;
-        if (const auto *point = std::get_if<VfxPointPayload>(&input.payload))
+        float scale = 1.0f;
+        const bool circle_geometry = effect.kind == VfxFlashEventKind::Circle;
+        const bool cone_geometry = effect.kind == VfxFlashEventKind::ConeMuzzle ||
+            effect.kind == VfxFlashEventKind::ConeBossEnergy;
+        const bool pickup_collect = effect.kind == VfxFlashEventKind::PickupCollect;
+        switch (effect.kind)
         {
-            if (first_recipe.payload_kind != Hash32("PointEventPayload")) continue;
+        case VfxFlashEventKind::Point:
+        {
+            const auto *point = std::get_if<VfxPointPayload>(&input.payload);
+            if (!point) continue;
             position = point->position; direction = point->direction; scale = point->authored_scale;
+            break;
         }
-        else if (const auto *context = std::get_if<VfxContextPayload>(&input.payload))
+        case VfxFlashEventKind::Context:
         {
-            if (first_recipe.payload_kind != Hash32("PresentationContextPayload")) continue;
+            const auto *context = std::get_if<VfxContextPayload>(&input.payload);
+            if (!context) continue;
             position = {input.world_transform[12], input.world_transform[13], input.world_transform[14]};
             direction = context->direction;
+            break;
         }
-        else if(const auto *projectile=std::get_if<VfxProjectilePayload>(&input.payload))
+        case VfxFlashEventKind::ProjectileContact:
         {
-            if(first_recipe.payload_kind!=Hash32("ProjectilePayload")||!Finite(projectile->velocity)||
-                !std::isfinite(projectile->hitbox_radius)||projectile->hitbox_radius<=0||
-                std::hypot(projectile->velocity.x,projectile->velocity.y,projectile->velocity.z)<=.0001f)continue;
-            position={input.world_transform[12],input.world_transform[13],input.world_transform[14]};
-            direction=projectile->velocity;scale=projectile->hitbox_radius;projectile_geometry=true;
+            const auto *projectile = std::get_if<VfxProjectilePayload>(&input.payload);
+            if (!projectile || !Finite(projectile->velocity) ||
+                !std::isfinite(projectile->hitbox_radius) || projectile->hitbox_radius <= 0.0f ||
+                std::hypot(projectile->velocity.x, projectile->velocity.y, projectile->velocity.z) <= 0.0001f)
+                continue;
+            position = {input.world_transform[12], input.world_transform[13], input.world_transform[14]};
+            direction = projectile->velocity; scale = projectile->hitbox_radius;
+            break;
         }
-        else if (const auto *cone = std::get_if<VfxConePayload>(&input.payload))
+        case VfxFlashEventKind::ConeMuzzle:
+        case VfxFlashEventKind::ConeBossEnergy:
         {
-            if (first_recipe.payload_kind != kConePayload || !Finite(cone->origin) ||
-                !Finite(cone->direction) || !std::isfinite(cone->range) || cone->range <= 0.0f ||
+            const auto *cone = std::get_if<VfxConePayload>(&input.payload);
+            if (!cone || !Finite(cone->origin) || !Finite(cone->direction) ||
+                !std::isfinite(cone->range) || cone->range <= 0.0f ||
                 !std::isfinite(cone->half_angle_degrees) || cone->half_angle_degrees <= 0.0f ||
                 cone->half_angle_degrees >= 90.0f)
                 continue;
-            if (effect_id != kSecondaryFan && effect_id != kMultiShot && effect_id != kRearFan &&
-                effect_id != kRetreatTripleRelease && effect_id != kArrowTripleRelease && effect_id != kBossVolleyRelease)
-                continue;
-            position = cone->origin;
-            direction = cone->direction;
-            scale = 1.0f;
-            cone_geometry = true;
-            boss_energy_geometry = effect_id == kBossVolleyRelease;
+            position = cone->origin; direction = cone->direction;
+            break;
         }
-        else if (const auto *ring = std::get_if<VfxRingGapsPayload>(&input.payload))
+        case VfxFlashEventKind::RingBossEnergy:
         {
-            if (first_recipe.payload_kind != kRingGapsPayload || !Finite(ring->center) ||
+            const auto *ring = std::get_if<VfxRingGapsPayload>(&input.payload);
+            if (!ring || !Finite(ring->center) ||
                 !std::isfinite(ring->inner_radius) || ring->inner_radius <= 0.0f ||
                 !std::isfinite(ring->outer_radius) || ring->outer_radius <= ring->inner_radius ||
                 !std::isfinite(ring->gap_half_width_degrees) || ring->gap_half_width_degrees < 0.0f ||
-                ring->gap_half_width_degrees > 180.0f ||
-                !ring->GapStorageConsistent() ||
+                ring->gap_half_width_degrees > 180.0f || !ring->GapStorageConsistent() ||
                 (ring->GapCount() != 0 && ring->gap_half_width_degrees == 0.0f) ||
                 std::any_of(ring->gap_angles_degrees.begin(), ring->gap_angles_degrees.end(),
                     [](float angle) { return !std::isfinite(angle); }))
                 continue;
-            if (effect_id != kBossShockwaveRelease) continue;
-            position = ring->center;
-            direction = {0.0f, 0.0f, 1.0f};
-            scale = 1.0f;
-            boss_energy_geometry = true;
+            position = ring->center; direction = {0.0f, 0.0f, 1.0f};
+            break;
         }
-        else if(const auto *circle=std::get_if<VfxCirclePayload>(&input.payload))
+        case VfxFlashEventKind::Circle:
         {
-            if(first_recipe.payload_kind!=Hash32("CircleAreaPayload")||circle->inner_radius!=0)continue;
-            position=circle->center;direction=circle->direction;scale=circle->radius;circle_geometry=true;
+            const auto *circle = std::get_if<VfxCirclePayload>(&input.payload);
+            if (!circle || circle->inner_radius != 0.0f) continue;
+            position = circle->center; direction = circle->direction; scale = circle->radius;
+            break;
         }
-        else if (const auto *link = std::get_if<VfxLinkPayload>(&input.payload))
+        case VfxFlashEventKind::PickupCollect:
         {
-            if (first_recipe.payload_kind != Hash32("SourceTargetPayload") ||
-                std::find(kPickupCollectEffects.begin(), kPickupCollectEffects.end(),
-                          effect_id) == kPickupCollectEffects.end() ||
-                !first_recipe.unique_effect_identity ||
-                !Finite(link->source_position) || !Finite(link->target_position) ||
-                input.sequence == 0)
+            const auto *link = std::get_if<VfxLinkPayload>(&input.payload);
+            if (!link || !Finite(link->source_position) || !Finite(link->target_position) || input.sequence == 0)
                 continue;
             position = link->source_position;
             direction = {link->target_position.x - position.x,
                          link->target_position.y - position.y,
                          link->target_position.z - position.z};
-            pickup_collect = true;
+            break;
         }
-        else continue;
-        if (!Finite(position) || !Finite(direction) || !std::isfinite(scale) || scale <= 0) continue;
+        default: continue;
+        }
+        if (!Finite(position) || !Finite(direction) || !std::isfinite(scale) || scale <= 0.0f) continue;
         const float magnitude = std::hypot(direction.x, direction.y, direction.z);
         if (!std::isfinite(magnitude) || (cone_geometry && magnitude <= 0.0001f)) continue;
         direction = magnitude > 0.0001f ? Float3{direction.x / magnitude, direction.y / magnitude, direction.z / magnitude}
                                       : Float3{0, 0, 1};
-        for (std::size_t recipe_index = recipe_range.first;
-             recipe_index < static_cast<std::size_t>(recipe_range.first) + recipe_range.count;
-             ++recipe_index)
+        const auto quality = static_cast<unsigned>(input.quality);
+        for (const auto &recipe : image.flash_recipes.subspan(recipe_range.first, recipe_range.count))
         {
-            const auto &recipe = image.flash_recipes[recipe_index];
-            if(recipe.effect_handle!=input.effect_handle || !(recipe.supported_quality_mask&(1u<<static_cast<unsigned>(input.quality))))continue;
-            const bool contact=recipe.spawn.shape==VfxImpactShape::ThreeProngBite||recipe.spawn.shape==VfxImpactShape::BossCrestContact||recipe.spawn.shape==VfxImpactShape::NeedleStar;
-            if(contact!=projectile_geometry)continue;
-            if(boss_energy_geometry&&(recipe.source_stable_id!=kBossEnergy||recipe.spawn.shape!=VfxImpactShape::RadialEnergy))continue;
-            if(cone_geometry&&!boss_energy_geometry&&(recipe.source_stable_id!=kMuzzlePrimary||recipe.spawn.shape!=VfxImpactShape::RadialSlash))continue;
-            if(contact)
-            {
-                const auto expected=recipe.spawn.shape==VfxImpactShape::ThreeProngBite?Hash64("particle.enemy.ranged.impact"):
-                    recipe.spawn.shape==VfxImpactShape::BossCrestContact?Hash64("particle.boss.volley.projectile_impact"):Hash64("particle.skill.charged_shot.impact");
-                if(effect_id!=expected)continue;
-            }
+            if (!(recipe.supported_quality_mask & (1u << quality))) continue;
             const float spawn_size = circle_geometry ? scale : recipe.spawn.size * scale;
-            if (!std::isfinite(spawn_size) || spawn_size <= 0) continue;
-            std::uint32_t importance{};
-            bool cosmetic{};
-            if (recipe.source_index < cooked.sources.size())
-            {
-                const auto &source = cooked.sources[recipe.source_index];
-                if (source.effect == input.effect_handle &&
-                    source.type == VfxSourceType::ImpactSprite && source.authoritative == 0)
-                    cosmetic = true;
-            }
+            if (!std::isfinite(spawn_size) || spawn_size <= 0.0f) continue;
             auto mask_slice = std::uint32_t{0xffffffffu};
             float mask_strength{};
-            if(recipe.mask_present_mask&(1u<<static_cast<unsigned>(input.quality)))
+            if (recipe.mask_present_mask & (1u << quality))
             {
-                const auto slices=recipe.mask_slice_ranges[static_cast<unsigned>(input.quality)];
-                if(!ValidRange(slices,cooked.slice_indices)||!slices.count)continue;
-                mask_slice=cooked.slice_indices[slices.first+(input.stable_seed%slices.count)];
-                mask_strength=recipe.mask_strengths[static_cast<unsigned>(input.quality)];
+                const auto slices = recipe.mask_slice_ranges[quality];
+                mask_slice = image.program.slice_indices[slices.first + (input.stable_seed % slices.count)];
+                mask_strength = recipe.mask_strengths[quality];
             }
-            if (input.effect_handle <= cooked.effects.size())
-            {
-                const auto &effect = cooked.effects[input.effect_handle - 1];
-                if (effect.handle == input.effect_handle) importance = effect.importance;
-            }
-            const bool ground_base_anchor = circle_geometry &&
-                (recipe.spawn.shape == VfxImpactShape::SoftDisc ||
-                 recipe.spawn.shape == VfxImpactShape::NoiseDisc ||
-                 recipe.spawn.shape == VfxImpactShape::Flame ||
-                 recipe.spawn.shape == VfxImpactShape::Smoke6Way ||
-                 recipe.spawn.shape == VfxImpactShape::RadialEnergy);
-            prepared.push_back({&recipe, &input, event_index, 1, 1, importance,
+            prepared.push_back({&recipe, &input, event_index, 1, effect.importance,
                 pickup_collect ? input.sequence : Sequence{}, position, direction, scale,
-                mask_strength, mask_slice, cosmetic, pickup_collect, circle_geometry,
-                ground_base_anchor,
-                recipe.spawn.oit && recipe.spawn.shape == VfxImpactShape::Smoke6Way &&
-                    input.quality != VfxQuality::High});
+                mask_strength, mask_slice, recipe.cosmetic, pickup_collect, circle_geometry});
         }
     }
 }
@@ -223,18 +164,12 @@ void AppendVfxPreparedFlashOutputs(std::span<const VfxPreparedFlashOutput> prepa
         for (auto i = index; i < end; ++i)
         {
             const auto &plan = prepared[i];
-            if (plan.count != 1 || plan.admitted_count > plan.count)
-                throw std::invalid_argument("invalid prepared flash admission count");
             if (plan.admitted_count == 0) continue;
-            if (row_count == std::numeric_limits<std::size_t>::max())
-                throw std::length_error("prepared flash row count overflow");
             ++row_count;
             emitted_pickup = emitted_pickup || plan.pickup_collect;
         }
         if (superseded_pickup_sequences && emitted_pickup)
         {
-            if (pickup_count == std::numeric_limits<std::size_t>::max())
-                throw std::length_error("prepared pickup sequence count overflow");
             ++pickup_count;
         }
         index = end;
@@ -259,14 +194,14 @@ void AppendVfxPreparedFlashOutputs(std::span<const VfxPreparedFlashOutput> prepa
         {
             const auto &plan = prepared[i];
             if (plan.admitted_count == 0) continue;
-            auto spawn = plan.recipe->spawn;
+            auto spawn = InstantiateVfxFlash(plan.recipe->spawn);
             spawn.size = plan.circle_geometry ? plan.scale : spawn.size * plan.scale;
-            spawn.ground_base_anchor = plan.ground_base_anchor;
             spawn.position = plan.position;
             spawn.direction = plan.direction;
             spawn.event_tick = plan.input->event_tick;
             spawn.stable_seed = plan.input->stable_seed;
-            if (plan.suppress_smoke_motion) spawn.motion_strength = 0;
+            if (plan.recipe->suppress_smoke_motion && plan.input->quality != VfxQuality::High)
+                spawn.motion_strength = 0;
             spawn.mask_slice = plan.mask_slice;
             spawn.mask_strength = plan.mask_strength;
             result.push_back(spawn);
@@ -313,35 +248,33 @@ void PrepareVfxPersistentFireSources(const VfxImage &image,
     {
         if (owner.effect_handle == 0 || owner.effect_handle > image.persistent_fire_effect_ranges.size() ||
             owner.source_visual_kind != static_cast<std::uint8_t>(PersistentVfxKind::FireArea) ||
-            owner.stable_id == 0 || owner.quality != VfxQuality::High || !std::isfinite(owner.elapsed_seconds) ||
-            owner.elapsed_seconds < 0 || !std::isfinite(owner.source_duration_seconds) ||
-            owner.source_duration_seconds <= 0 || owner.elapsed_seconds >= owner.source_duration_seconds) continue;
+            owner.stable_id == 0 || owner.quality != VfxQuality::High ||
+            !std::isfinite(owner.source_duration_seconds) || owner.source_duration_seconds <= 0) continue;
         const auto *circle = std::get_if<VfxCirclePayload>(&owner.payload);
         if (!circle || !Finite(circle->center) || !std::isfinite(circle->radius) || circle->radius <= 0 ||
             circle->inner_radius != 0) continue;
         const auto range = image.persistent_fire_effect_ranges[owner.effect_handle - 1];
-        if (!range.count || !ValidRange(range, image.persistent_fire_recipes)) continue;
-        const double elapsed_ticks = static_cast<double>(owner.elapsed_seconds) * 60;
+        if (!range.count) continue;
+        const double elapsed_ticks = owner.elapsed_ticks < 0 ? static_cast<double>(owner.elapsed_seconds) * 60 : owner.elapsed_ticks;
         const double duration_ticks = static_cast<double>(owner.source_duration_seconds) * 60;
-        if (!std::isfinite(current_tick) || elapsed_ticks > current_tick + .01 ||
+        if (!std::isfinite(current_tick) || !std::isfinite(elapsed_ticks) || elapsed_ticks < 0 ||
+            elapsed_ticks > current_tick + .01 ||
             duration_ticks > std::numeric_limits<std::uint32_t>::max() ||
             std::abs(duration_ticks - std::round(duration_ticks)) > .01) continue;
         const double elapsed = elapsed_ticks;
         const auto duration = static_cast<std::uint64_t>(std::llround(duration_ticks));
-        if (duration == 0) continue;
+        if (duration == 0 || elapsed_ticks >= static_cast<double>(duration)) continue;
         const auto started_value = std::max(0.0, current_tick - elapsed);
         if (started_value >= static_cast<double>(std::numeric_limits<long long>::max())) continue;
         const Tick started = static_cast<Tick>(std::llround(started_value));
         for (const auto &recipe : image.persistent_fire_recipes.subspan(range.first, range.count))
         {
-            if (recipe.effect_handle != owner.effect_handle || recipe.rate == 0) continue;
             const auto source_seed = mix(owner.stable_seed ^ mix(recipe.source_stable_id) ^
                 mix(static_cast<std::uint32_t>(recipe.effect_id)) ^
                 mix(static_cast<std::uint32_t>(recipe.effect_id >> 32)));
-            auto base = recipe.spawn;
+            auto base = InstantiateVfxFlash(recipe.spawn);
             base.position = circle->center;
-            if (recipe.mask_slices.count && recipe.mask_slices.first <= image.program.slice_indices.size() &&
-                recipe.mask_slices.count <= image.program.slice_indices.size() - recipe.mask_slices.first)
+            if (recipe.mask_slices.count)
             {
                 const auto slices = image.program.slice_indices.subspan(recipe.mask_slices.first, recipe.mask_slices.count);
                 base.mask_slice = slices[owner.stable_seed % slices.size()];
@@ -388,7 +321,7 @@ void AppendVfxPreparedFireFlameCommands(
     {
         if (source.authoritative) continue;
         if (source.eligible_ordinals > cap - total_eligible)
-        {
+      {
             all_fit = false;
             break;
         }
@@ -405,7 +338,7 @@ void AppendVfxPreparedFireFlameCommands(
         const auto fits = [&](std::uint64_t level) {
             std::uint64_t total{};
             for (const auto &source : prepared)
-            {
+          {
                 if (source.authoritative) continue;
                 const auto share = std::min(source.eligible_ordinals, level);
                 if (share > cap - total) return false;
@@ -415,35 +348,32 @@ void AppendVfxPreparedFireFlameCommands(
         };
         std::uint64_t low{};
         while (low < high)
-        {
+      {
             const auto middle = low + (high - low) / 2 + 1;
             if (fits(middle)) low = middle;
             else high = middle - 1;
         }
         std::uint64_t allocated{};
         for (auto &source : prepared)
-        {
+      {
             if (source.authoritative) continue;
             source.admitted_ordinals = std::min(source.eligible_ordinals, low);
             allocated += source.admitted_ordinals;
         }
         auto remainder = cap - allocated;
         for (auto &source : prepared)
-        {
+      {
             if (remainder == 0) break;
             if (!source.authoritative && source.eligible_ordinals > low)
-            {
+          {
                 ++source.admitted_ordinals;
                 --remainder;
             }
         }
     }
 
-    const auto old_result_size = result.size();
-    try
+    for (const auto &source : prepared)
     {
-      for (const auto &source : prepared)
-      {
         const auto first_ordinal = source.eligible_ordinals - source.admitted_ordinals;
         for (std::uint64_t offset = 0; offset < source.admitted_ordinals; ++offset)
         {
@@ -466,12 +396,6 @@ void AppendVfxPreparedFireFlameCommands(
                 tongue.size / tongue.lifetime, -tongue.initial_offset.z / tongue.lifetime};
             if (Finite(tongue.initial_velocity)) result.push_back(tongue);
         }
-      }
-    }
-    catch (...)
-    {
-        result.resize(old_result_size);
-        throw;
     }
 }
 
@@ -505,12 +429,12 @@ void AppendVfxPersistentStatusStampCommands(
             !std::isfinite(input.normalized_age) || input.normalized_age < 0.0f || input.normalized_age >= 1.0f)
             continue;
         const auto range = image.persistent_stamp_effect_ranges[input.effect_handle - 1];
-        if (!range.count || !ValidRange(range, image.persistent_stamp_recipes)) continue;
+        if (!range.count) continue;
         const auto *entity = std::get_if<VfxEntityPayload>(&input.payload);
         const auto *path = std::get_if<VfxProjectilePathPayload>(&input.payload);
         for (const auto &recipe : image.persistent_stamp_recipes.subspan(range.first, range.count))
         {
-            if (recipe.effect_handle != input.effect_handle || recipe.source_visual_kind != input.source_visual_kind ||
+            if (recipe.source_visual_kind != input.source_visual_kind ||
                 recipe.payload_kind != (path ? Hash32("ProjectilePathPayload") : Hash32("EntityAttachmentPayload")) ||
                 (recipe.timing_kind == 0 && recipe.fixed_seconds != input.source_duration_seconds) ||
                 input.normalized_age >= recipe.source_end) continue;
@@ -537,7 +461,7 @@ void AppendVfxPersistentStatusStampCommands(
                 footprint = entity->footprint_radius;
             }
             if (!Finite(position) || !Finite(previous_position)) continue;
-            auto flash = recipe.spawn;
+            auto flash = InstantiateVfxFlash(recipe.spawn);
             flash.position = position;
             flash.previous_position = previous_position;
             flash.interpolate_owner_position = true;
@@ -549,14 +473,11 @@ void AppendVfxPersistentStatusStampCommands(
             if (quality < 3 && (recipe.mask_present_mask & (1u << quality)))
             {
                 const auto mask = recipe.mask_slices[quality];
-                if (!mask.count || mask.first > image.program.slice_indices.size() ||
-                    mask.count > image.program.slice_indices.size() - mask.first) continue;
                 const auto slices = image.program.slice_indices.subspan(mask.first, mask.count);
                 flash.mask_slice = slices[input.stable_seed % slices.size()];
                 flash.mask_strength = recipe.mask_strengths[quality];
             }
-            if (!std::isfinite(flash.lifetime) || flash.lifetime <= 0.0f ||
-                !Finite({flash.color.x, flash.color.y, flash.color.z})) continue;
+            if (!std::isfinite(flash.lifetime) || flash.lifetime <= 0.0f) continue;
             result.push_back(flash);
         }
     }
@@ -574,18 +495,14 @@ void AppendVfxOwnedStatusTickFlashes(const VfxImage &image, VfxEventView events,
     std::vector<VfxFlashSpawnInput> &flashes,
     std::vector<Sequence> &emitted_sequences)
 {
-    const auto old_flash_size = flashes.size();
-    const auto old_sequence_size = emitted_sequences.size();
-    try
+    for (const auto &event : events)
     {
-      for (const auto &event : events)
-      {
         if (event.effect_handle == 0 || event.effect_handle > image.owned_status_tick_effect_ranges.size() ||
             event.geometry_owner_id == 0 || event.geometry_owner_id >= (1ull << 60) ||
             event.status_episode_generation == 0 || static_cast<std::uint32_t>(event.quality) > 2 ||
             !std::holds_alternative<VfxPointPayload>(event.payload)) continue;
         const auto range = image.owned_status_tick_effect_ranges[event.effect_handle - 1];
-        if (!range.count || !ValidRange(range, image.owned_status_tick_recipes)) continue;
+        if (!range.count) continue;
         const auto render_id = (2ull << 60) | event.geometry_owner_id;
         bool emitted = false;
         for (const auto &owner : persistent)
@@ -603,15 +520,12 @@ void AppendVfxOwnedStatusTickFlashes(const VfxImage &image, VfxEventView events,
             if (!Finite(position)) continue;
             for (const auto &recipe : image.owned_status_tick_recipes.subspan(range.first, range.count))
             {
-                if (recipe.tick_effect_handle != event.effect_handle ||
-                    recipe.status_effect_handle != owner.effect_handle ||
+                if (recipe.status_effect_handle != owner.effect_handle ||
                     recipe.min_quality > static_cast<std::uint32_t>(event.quality) ||
                     recipe.min_quality > static_cast<std::uint32_t>(owner.quality)) continue;
-                auto flash = recipe.spawn;
+                auto flash = InstantiateVfxFlash(recipe.spawn);
                 flash.size = entity->footprint_radius;
                 flash.position = position;
-                flash.delay = recipe.tick_seconds * recipe.delay_fraction;
-                flash.lifetime = recipe.tick_seconds * recipe.lifetime_fraction;
                 flash.event_tick = event.event_tick;
                 flash.stable_seed = event.stable_seed;
                 if (recipe.bleed)
@@ -626,13 +540,6 @@ void AppendVfxOwnedStatusTickFlashes(const VfxImage &image, VfxEventView events,
             }
             if (emitted) break;
         }
-      }
-    }
-    catch (...)
-    {
-        flashes.resize(old_flash_size);
-        emitted_sequences.resize(old_sequence_size);
-        throw;
     }
 }
 

@@ -105,18 +105,8 @@ class VfxPersistentSparkState
         std::span<const VfxPersistentInput> owners,
         Tick current_tick, float interpolation = 1.0f,
         VfxMoteRowQuota *quota = nullptr);
-    void Clear() noexcept { cursors_.clear(); changed_.clear(); pending_.clear(); change_slots_.clear(); }
+    void Clear() noexcept { cursors_.clear(); cursor_slots_.clear(); }
     [[nodiscard]] std::size_t RetainedCapacityBytes() const noexcept;
-    [[nodiscard]] std::size_t PendingCapacityRows() const noexcept { return pending_.capacity(); }
-    [[nodiscard]] std::uint64_t Rebind(const VfxProgramView &previous,
-                                     const VfxProgramView &next) noexcept;
-    void Swap(VfxPersistentSparkState &prepared) noexcept
-    {
-        cursors_.swap(prepared.cursors_);
-        changed_.swap(prepared.changed_);
-        pending_.swap(prepared.pending_);
-        change_slots_.swap(prepared.change_slots_);
-    }
 
   private:
     struct Cursor
@@ -127,10 +117,7 @@ class VfxPersistentSparkState
         std::uint32_t next_ordinal{};
         Tick expires_tick{};
     };
-    struct CursorChange { std::size_t index; Cursor cursor; bool is_new; };
     std::vector<Cursor> cursors_;
-    std::vector<CursorChange> changed_;
-    std::vector<VfxFlashSpawnInput> pending_;
-    std::vector<std::size_t> change_slots_;
+    std::vector<std::size_t> cursor_slots_;
 };
 }

@@ -178,6 +178,7 @@ void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &s
     {
         const auto &source = p.sources[i];
         auto &recipe = sources[i];
+        recipe.cosmetic = source.type == VfxSourceType::CurlMotes && source.authoritative == 0;
         if (valid(source.parameters, p.parameters.size()))
         {
             bool count_seen = false, curl_seen = false, drag_seen = false;
@@ -262,16 +263,16 @@ void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &s
         const auto &output = p.outputs[i];
         auto &recipe = outputs[i];
         recipe.min_quality = output.min_quality;
-        recipe.gradient_row = output.gradient_row;
-        recipe.hdr = output.hdr;
-        recipe.color = {output.rgba[0] * output.hdr, output.rgba[1] * output.hdr,
+        recipe.appearance.gradient_row = output.gradient_row;
+        recipe.appearance.hdr = output.hdr;
+        recipe.appearance.color = {output.rgba[0] * output.hdr, output.rgba[1] * output.hdr,
             output.rgba[2] * output.hdr, output.rgba[3]};
         recipe.output_color_valid = std::isfinite(output.hdr) && output.hdr > 0.0f &&
             std::all_of(output.rgba.begin(), output.rgba.end(),
                 [](float value) { return std::isfinite(value); }) &&
             output.rgba[3] >= 0.0f && output.rgba[3] <= 1.0f &&
-            std::isfinite(recipe.color.x) && std::isfinite(recipe.color.y) &&
-            std::isfinite(recipe.color.z);
+            std::isfinite(recipe.appearance.color.x) && std::isfinite(recipe.appearance.color.y) &&
+            std::isfinite(recipe.appearance.color.z);
         recipe.mask_quality_mask = 0;
         if (valid(output.textures, p.texture_bindings.size()))
         {
@@ -359,6 +360,11 @@ void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &s
             if (!count) lookup_ids[lookup.handle - 1] = lookup.effect_id;
             ++count;
         }
+    constexpr std::array spark_effects{
+        HashEffectName("particle.basic_attack"), HashEffectName("particle.skill.charged_shot"),
+        HashEffectName("particle.skill.explosive_arrow"), HashEffectName("particle.skill.piercing_shot"),
+        HashEffectName("particle.skill.ricochet_arrow"),
+        HashEffectName("particle.upgrade.arrow_rain.incoming_arrow")};
     for (std::size_t i = 0; i < p.sources.size(); ++i)
     {
         const auto &source = p.sources[i];
@@ -370,26 +376,91 @@ void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &s
         recipe.output_range_valid = valid(source.outputs, p.outputs.size());
         const bool effect_valid = source.effect && source.effect <= p.effects.size() &&
             p.effects[source.effect - 1].handle == source.effect;
+        bool event_effect = false, common_payload = false, residual_effect = false, spark_effect = false;
         if (effect_valid)
         {
             recipe.effect_id = lookup_ids[source.effect - 1];
-            recipe.effect_lookup_count = lookup_counts[source.effect - 1];
+            const auto &effect = p.effects[source.effect - 1];
+            event_effect = effect.input_mode == 0 && effect.timing_kind == 0 &&
+                std::isfinite(effect.seconds) && effect.seconds > 0;
+            common_payload = effect.payload_kind == hash("PointEventPayload") ||
+                effect.payload_kind == hash("PresentationContextPayload");
+            residual_effect = event_effect && effect.payload_kind == hash("EntityAttachmentPayload") &&
+                recipe.effect_id == HashEffectName("particle.skill.charged_shot.cancel");
+            spark_effect = effect.input_mode == 1 && effect.timing_kind == 0 &&
+                effect.payload_kind == hash("ProjectilePayload") && std::isfinite(effect.seconds) &&
+                effect.seconds > 0 && effect.seconds <= 60 &&
+                std::find(spark_effects.begin(), spark_effects.end(), recipe.effect_id) != spark_effects.end();
+            const auto lookup_count = lookup_counts[source.effect - 1];
+            const bool identified = lookup_count != 0 && recipe.effect_id != 0 &&
+                valid(effect.sources, p.sources.size()) && effect.sources.count != 0 &&
+                p.sources[effect.sources.first].effect == effect.handle;
+            const bool unique = identified && lookup_count == 1;
+            if (identified && event_effect && effect.payload_kind == hash("PointEventPayload"))
+                recipe.effect_routes |= kVfxMoteBurstPoint;
+            if (identified && event_effect && effect.payload_kind == hash("PresentationContextPayload"))
+                recipe.effect_routes |= kVfxMoteBurstContext;
+            if (identified && residual_effect) recipe.effect_routes |= kVfxMoteResidualEntity;
+            if (identified && spark_effect) recipe.effect_routes |= kVfxMoteProjectileSpark;
+            if (identified && effect.input_mode == 0 && effect.timing_kind == 1 &&
+                effect.payload_kind == hash("SafeGapSectorPayload"))
+                recipe.effect_routes |= kVfxMoteSafeSector;
+            if (unique && effect.input_mode == 0 && effect.timing_kind == 0)
+            {
+                if (effect.payload_kind == hash("PointEventPayload"))
+                {
+                    if (effect.seconds == .65f && recipe.effect_id == HashEffectName("particle.skill.trap"))
+                        recipe.effect_routes |= kVfxMoteTrapPoint;
+                    if (event_effect && recipe.effect_id == HashEffectName("particle.status.bleed_tick"))
+                        recipe.effect_routes |= kVfxMoteBleedTick;
+                    if (event_effect && recipe.effect_id == HashEffectName("particle.status.burn_tick"))
+                        recipe.effect_routes |= kVfxMoteBurnTick;
+                }
+                if (effect.payload_kind == hash("CircleAreaPayload") &&
+                    recipe.effect_id == HashEffectName("particle.enemy.suicide.charge"))
+                    recipe.effect_routes |= kVfxMoteSuicideCircle;
+            }
+            if (unique && effect.input_mode == 1 && effect.timing_kind == 1)
+            {
+                if (effect.payload_kind == hash("CircleAreaPayload"))
+                {
+                    if (recipe.effect_id == HashEffectName("persistent.trap.pending")) recipe.effect_routes |= kVfxMoteTrapPending;
+                    if (recipe.effect_id == HashEffectName("persistent.trap.armed")) recipe.effect_routes |= kVfxMoteTrapArmed;
+                    if (recipe.effect_id == HashEffectName("particle.upgrade.retreat.start_trap")) recipe.effect_routes |= kVfxMoteTrapRetreat;
+                }
+                if (effect.payload_kind == hash("EntityAttachmentPayload"))
+                {
+                    if (recipe.effect_id == HashEffectName("persistent.status.bleed")) recipe.effect_routes |= kVfxMoteBleedOwner;
+                    if (recipe.effect_id == HashEffectName("persistent.status.burn")) recipe.effect_routes |= kVfxMoteBurnOwner;
+                    if (recipe.effect_id == HashEffectName("persistent.status.slow") ||
+                        recipe.effect_id == HashEffectName("persistent.status.mark")) recipe.effect_routes |= kVfxMoteStatusPresence;
+                    if (recipe.effect_id == HashEffectName("particle.pickup.xp.idle") ||
+                        recipe.effect_id == HashEffectName("particle.pickup.heal.idle") ||
+                        recipe.effect_id == HashEffectName("particle.pickup.magnet.idle") ||
+                        recipe.effect_id == HashEffectName("particle.pickup.relic_chest.idle")) recipe.effect_routes |= kVfxMotePickupPresence;
+                    if (recipe.effect_id == HashEffectName("particle.upgrade.charged.overcharge_loop")) recipe.effect_routes |= kVfxMoteChargedPresence;
+                    if (recipe.effect_id == HashEffectName("particle.enemy.suicide.countdown_loop")) recipe.effect_routes |= kVfxMoteSuicidePresence;
+                }
+            }
         }
         const bool knots_valid = source.knot_count == 2 && std::isfinite(source.knots[0]) &&
             std::isfinite(source.knots[1]) && source.knots[0] >= 0.0f &&
             source.knots[1] > source.knots[0] && source.knots[1] <= 1.0f;
         const bool curl_source = effect_valid && source.type == VfxSourceType::CurlMotes &&
             valid(source.parameters, p.parameters.size()) && recipe.output_range_valid;
-        recipe.common_route_valid = curl_source && knots_valid && recipe.common_params_valid;
+        recipe.common_route_valid = curl_source && knots_valid && recipe.common_params_valid && event_effect && common_payload;
         recipe.residual_route_valid = curl_source && source.stable_id == hash("residual_motes") &&
             knots_valid && source.knots[0] == 0.0f && source.knots[1] == 1.0f && source.parameters.count == 2 &&
-            recipe.residual_valid;
-        recipe.rate_route_valid = curl_source && knots_valid && source.parameters.count == 1 && recipe.rate_valid;
+            recipe.residual_valid && residual_effect;
+        recipe.rate_route_valid = curl_source && knots_valid && source.parameters.count == 1 && recipe.rate_valid &&
+            (!(recipe.effect_routes & kVfxMoteChargedPresence) || recipe.rate == 3) &&
+            (!(recipe.effect_routes & kVfxMotePickupPresence) ||
+                (recipe.rate == 3 && source.knots[0] == 0.0f && source.knots[1] == 1.0f));
         recipe.tick_route_valid = curl_source && source.stable_id == hash("tick_motes") &&
             knots_valid && source.knots[0] == 0.0f && source.knots[1] == 1.0f && source.parameters.count == 1 &&
             recipe.common_params_valid && recipe.count == 3;
         recipe.spark_route_valid = curl_source && source.stable_id == hash("micro_sparks") &&
-            knots_valid && source.parameters.count == 3 && recipe.spark_valid;
+            knots_valid && source.parameters.count == 3 && recipe.spark_valid && spark_effect;
     }
     const auto common_pattern = [&](const VfxOutputRecord &output) -> std::uint32_t {
         if (output.profile != VfxOutputProfile::SpriteAdd) return 0xffffffffu;
@@ -423,8 +494,15 @@ void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &s
             output.shape_scale_rule == hash("component_size") && output.shape_component_kind == hash("particle") &&
             output.coverage_type == hash("analytic") && output.coverage_ref == hash("soft_disc") &&
             output.motion == VfxMotionKind::RareInwardDrift && recipe.empty_parameters_valid;
-        recipe.rate_route_valid = source.rate_route_valid && soft_disc;
-        recipe.persistent_route_valid = source.rate_route_valid && soft_disc && recipe.min_quality <= 2;
+        recipe.rate_route_valid = source.rate_route_valid && soft_disc &&
+            source.stable_id == hash("ambient_motes") && source.knots[0] == 0.0f &&
+            source.knots[1] == 1.0f && source.output_range.count == 1 && source.rate == 3 &&
+            recipe.min_quality == static_cast<std::uint32_t>(VfxQuality::Medium) &&
+            recipe.output_color_valid;
+        recipe.persistent_route_valid = source.rate_route_valid && soft_disc && recipe.output_color_valid &&
+            ((source.effect_routes & (kVfxMoteChargedPresence | kVfxMotePickupPresence))
+                ? recipe.min_quality == static_cast<std::uint32_t>(VfxQuality::Medium)
+                : recipe.min_quality <= 2);
         recipe.tick_route_valid = source.tick_route_valid && recipe.empty_parameters_valid &&
             output.profile == VfxOutputProfile::SpriteAdd && output.shape == hash("small_motes") &&
             output.motion == VfxMotionKind::VeryShortLocalDrift && output.shape_domain == hash("sprite") &&
@@ -524,7 +602,8 @@ Result PrepareVfxScreenRecipes(VfxProgramView p, std::vector<VfxScreenEffectReci
             if(!valid)break;
         }
         recipe.outputs.count=static_cast<std::uint32_t>(outputs.size()-recipe.outputs.first);
-        recipe.route_valid=valid;
+        recipe.route=valid ? (is_hit ? VfxScreenRoute::EventHit : VfxScreenRoute::PersistentLowHealth)
+            : VfxScreenRoute::Unsupported;
         if(!valid)return Result::Failure(ErrorCode::InvalidArgument,"hs_vfx_screen",
             "Unsupported ScreenOverlay contract for effect "+std::to_string(recipe.effect_id)+".");
     }
@@ -620,8 +699,9 @@ Result PrepareVfxVolumeRecipes(VfxProgramView p, std::vector<VfxVolumeEffectReci
             outputs.push_back(row);
         }
         recipe.outputs.count=static_cast<std::uint32_t>(outputs.size()-recipe.outputs.first);
-        recipe.route_valid=valid&&found;
-        if(!recipe.route_valid)return Result::Failure(ErrorCode::InvalidArgument,"hs_vfx_volume",
+        recipe.route=valid&&found ? (crown ? VfxVolumeRoute::PersistentEntity :
+            (id==spawn ? VfxVolumeRoute::EventPoint : VfxVolumeRoute::EventContext)) : VfxVolumeRoute::Unsupported;
+        if(recipe.route==VfxVolumeRoute::Unsupported)return Result::Failure(ErrorCode::InvalidArgument,"hs_vfx_volume",
             "Unsupported LocalVolume contract for effect "+std::to_string(recipe.effect_id)+".");
     }
     return Result::Success();
@@ -634,7 +714,7 @@ void PrepareVfxEntitySurfaceRecipes(VfxProgramView p,
 {
     constexpr auto phase=HashEffectName("particle.boss.phase_change"),death=HashEffectName("particle.boss.death"),
         persistent=HashEffectName("persistent.boss.phase_transition_invulnerable");
-    constexpr auto payload=ShapeId("PresentationContextPayload");
+    constexpr auto payload=ShapeId("PresentationContextPayload"),entity_payload=ShapeId("EntityAttachmentPayload");
     const auto texture_contract=[&](const VfxOutputRecord &output) {
         if(!ValidRange(output.textures,p.texture_bindings.size())||output.textures.count!=3)return false;
         std::uint32_t seen=0;
@@ -668,18 +748,21 @@ void PrepareVfxEntitySurfaceRecipes(VfxProgramView p,
     {
         const auto handle=static_cast<std::uint32_t>(ei+1);
         const auto &effect=p.effects[ei];auto &recipe=effects[ei];
+        std::uint64_t effect_id{};
         std::size_t matches=0;
         for(const auto &lookup:p.effect_lookup)if(lookup.handle==handle)
-        {if(matches++==0)recipe.effect_id=lookup.effect_id;}
-        recipe.identity_unique=matches==1&&recipe.effect_id!=0;
-        if(!recipe.identity_unique)continue;
-        const bool is_persistent=recipe.effect_id==persistent;
-        const bool is_death=recipe.effect_id==death;
-        if(recipe.effect_id!=phase&&!is_death&&!is_persistent)continue;
-        recipe.importance=effect.importance;recipe.payload_kind=effect.payload_kind;
-        recipe.input_mode=effect.input_mode;recipe.timing_kind=effect.timing_kind;recipe.seconds=effect.seconds;
+        {if(matches++==0)effect_id=lookup.effect_id;}
+        if(matches!=1||effect_id==0)continue;
+        const bool is_persistent=effect_id==persistent;
+        const bool is_death=effect_id==death;
+        if(effect_id!=phase&&!is_death&&!is_persistent)continue;
+        recipe.seconds=effect.seconds;
         recipe.outputs.first=static_cast<std::uint32_t>(outputs.size());
-        if(effect.handle!=handle||!ValidRange(effect.sources,p.sources.size()))continue;
+        if(effect.handle!=handle||!ValidRange(effect.sources,p.sources.size())||
+           (is_persistent ? effect.input_mode!=1||effect.timing_kind!=1||effect.payload_kind!=entity_payload
+            : effect.input_mode!=0||effect.timing_kind!=0||effect.payload_kind!=payload||effect.seconds!=(is_death?2.0f:1.5f)))continue;
+        recipe.route=is_persistent ? VfxEntitySurfaceRoute::PersistentTransition :
+            (is_death ? VfxEntitySurfaceRoute::EventDeath : VfxEntitySurfaceRoute::EventPhase);
         for(std::uint32_t si=effect.sources.first;si<effect.sources.first+effect.sources.count;++si)
         {
             const auto &source=p.sources[si];
@@ -1451,6 +1534,9 @@ void PrepareVfxRibbonEventRecipes(std::span<const VfxRibbonEffectRecipe> effects
             effect.timing_kind != 0 || !std::isfinite(effect.seconds) || effect.seconds <= 0.0f ||
             !valid_range(effect.sources, sources.size()))
             continue;
+        const bool projectile = effect.payload_kind == ShapeId("ProjectilePayload");
+        if (projectile && effect.effect_id != HashEffectName("particle.skill.charged_shot.impact"))
+            continue;
         effect_recipe.effect_id = effect.effect_id;
         effect_recipe.effect_handle = effect.handle;
         effect_recipe.importance = effect.importance;
@@ -1468,12 +1554,17 @@ void PrepareVfxRibbonEventRecipes(std::span<const VfxRibbonEffectRecipe> effects
                 !valid_range(source.outputs, outputs.size()))
                 continue;
             VfxRibbonEventSourceRecipe prepared_source{};
-            prepared_source.effect_handle = effect.handle;
             prepared_source.source_id = source.stable_id;
             prepared_source.knot_count = source.knot_count;
-            prepared_source.axial_source = source.stable_id == ShapeId("axial_afterline");
+            if (projectile && source.stable_id != ShapeId("axial_afterline")) continue;
             prepared_source.knots = source.knots;
             prepared_source.history_seconds = source.history_seconds;
+            prepared_source.start_seconds = effect.seconds * source.knots[0];
+            prepared_source.end_seconds = effect.seconds * source.knots[source.knot_count - 1];
+            if (!std::isfinite(prepared_source.start_seconds) ||
+                !std::isfinite(prepared_source.end_seconds) ||
+                prepared_source.end_seconds <= prepared_source.start_seconds)
+                continue;
             for (std::uint32_t quality = 0; quality < 3; ++quality)
                 for (const auto &output : outputs.subspan(source.outputs.first, source.outputs.count))
                 {
@@ -1508,6 +1599,7 @@ void PrepareVfxRibbonEventRecipes(std::span<const VfxRibbonEffectRecipe> effects
                 const auto &output = outputs[output_index];
                 const bool axial = output.motion == VfxMotionKind::ShortLineIncomingVelocity &&
                     output.shape == axial_shape;
+                if (axial != projectile) continue;
                 if (output.source != source_index ||
                     (output.profile != VfxOutputProfile::RibbonAdd &&
                      output.profile != VfxOutputProfile::RibbonOit) ||
@@ -1784,7 +1876,7 @@ void PrepareVfxLightRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                     !std::isfinite(o.hdr)||o.hdr<=0||!std::isfinite(o.rgba[3])||o.rgba[3]<0||o.rgba[3]>1)continue;
                 const auto output_id=(static_cast<std::uint64_t>(o.motion)<<32)|o.gradient_row;
                 recipes.push_back({mix(id->effect_id)^mix(source.stable_id)^mix(output_id),e.payload_kind,e.importance,o.min_quality,source.knot_count,
-                    e.seconds,metres,source.knots,{o.rgba[0],o.rgba[1],o.rgba[2]},o.hdr,o.rgba[3],keys,interpolation,hero});
+                    e.seconds,metres,source.knots,{o.rgba[0],o.rgba[1],o.rgba[2]},o.hdr*o.rgba[3],keys,interpolation,hero});
             }
         }
         range.count=static_cast<std::uint32_t>(recipes.size())-range.first;
@@ -1818,7 +1910,6 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
             recipe.motion_rate_hz=output.motion_rate_hz; recipe.motion_amplitude=output.motion_amplitude;
             recipe.motion_inset_fraction=output.motion_inset_fraction;
             recipe.source_output_count=source.outputs.count;
-            recipe.effect_lookup_count=static_cast<std::uint32_t>(identity_count);
             recipe.source_parameters_empty=source.parameters.count==0 && valid(source.parameters,p.parameters.size());
             return recipe;
         };
@@ -2184,12 +2275,51 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                 if(recipe.profile==VfxOutputProfile::GroundSdfAdd)profiles|=kVfxGroundEventDirectAdd;
                 if(recipe.profile==VfxOutputProfile::GroundSdfSoft)profiles|=kVfxGroundEventDirectSoft;
             }
-            recipes[range.first].event_admission_profiles=profiles;
+            if(effect.input_mode==0)
+            {
+                if(effect.timing_kind==0 && std::isfinite(effect.seconds) && effect.seconds>0.0f)
+                    profiles|=kVfxGroundEventFixedDuration;
+                else if(effect.timing_kind==1)
+                    profiles|=kVfxGroundEventOwnerDuration;
+            }
+            if(identity_count==1)
+            {
+                if(identity->effect_id==HashEffectName("particle.skill.charged_shot.pulse"))
+                    profiles|=kVfxGroundEventChargedPulse;
+                if((profiles&kVfxGroundEventFixedDuration) && effect.sources.count==2 &&
+                    effect.payload_kind==ShapeId("PresentationContextPayload"))
+                {
+                    if(identity->effect_id==HashEffectName("particle.session.wave_start"))
+                        profiles|=kVfxGroundEventWaveStart;
+                    else if(identity->effect_id==HashEffectName("particle.session.wave_warning"))
+                        profiles|=kVfxGroundEventWaveWarning;
+                }
+            }
+            if(effect.input_mode==1 && effect.timing_kind==1 &&
+                effect.payload_kind==ShapeId("EntityAttachmentPayload"))
+            {
+                const auto id=recipes[range.first].effect_id;
+                const bool relic=id==HashEffectName("particle.pickup.relic_chest.idle");
+                const bool pickup=relic || id==HashEffectName("particle.pickup.xp.idle") ||
+                    id==HashEffectName("particle.pickup.heal.idle") ||
+                    id==HashEffectName("particle.pickup.magnet.idle");
+                const bool charged=id==HashEffectName("particle.upgrade.charged.overcharge_loop");
+                if(pickup || charged || id==HashEffectName("persistent.status.slow") ||
+                    id==HashEffectName("persistent.status.mark") ||
+                    id==HashEffectName("particle.enemy.suicide.countdown_loop")) profiles|=kVfxGroundEntityPolar;
+                if(id==HashEffectName("particle.player.invulnerable_loop")) profiles|=kVfxGroundEntityState;
+                if(id==HashEffectName("persistent.boss.phase2_aura") ||
+                    id==HashEffectName("persistent.boss.phase_transition_invulnerable")) profiles|=kVfxGroundEntityCrown;
+                if(pickup) profiles|=kVfxGroundEntityPickup;
+                if(relic) profiles|=kVfxGroundEntityRelic;
+                if(charged) profiles|=kVfxGroundEntityCharged;
+            }
+            recipes[range.first].admission_profiles=profiles;
         }
     }
 }
 
-void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
+void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxFlashEffectRecipe> &effects,
                             std::vector<VfxFlashRecipe> &recipes)
 {
     const auto valid=[](VfxRange r,std::size_t n){return r.first<=n&&r.count<=n-r.first;};
@@ -2208,10 +2338,27 @@ void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
         {ShapeId("three_prong_bite_sdf"),VfxMotionKind::CompressSnapOutward,VfxImpactShape::ThreeProngBite,1},
         {ShapeId("boss_crest_contact_sdf"),VfxMotionKind::SingleFrameSnapShrink,VfxImpactShape::BossCrestContact,1},
         {ShapeId("needle_star_sdf"),VfxMotionKind::InstantCompressionAxialSplit,VfxImpactShape::NeedleStar,1}};
-    ranges.assign(p.effects.size(),{}); recipes.clear();
+    constexpr auto point_payload=ShapeId("PointEventPayload"), context_payload=ShapeId("PresentationContextPayload"),
+        projectile_payload=ShapeId("ProjectilePayload"), circle_payload=ShapeId("CircleAreaPayload"),
+        cone_payload=ShapeId("ConePayload"), ring_payload=ShapeId("RingWithGapsPayload"),
+        source_target_payload=ShapeId("SourceTargetPayload");
+    constexpr auto multishot_secondary=HashEffectName("particle.upgrade.multishot.secondary_fan"),
+        multishot_skill=HashEffectName("particle.skill.multishot"),
+        multishot_rear=HashEffectName("particle.upgrade.multishot.rear_fan"),
+        retreat_triple=HashEffectName("particle.upgrade.retreat.triple_release"),
+        arrow_triple=HashEffectName("particle.upgrade.arrow.triple_release"),
+        boss_volley=HashEffectName("particle.boss.volley.release"),
+        boss_shockwave=HashEffectName("particle.boss.shockwave.release"),
+        pickup_xp=HashEffectName("particle.pickup.xp_collect"),
+        pickup_heal=HashEffectName("particle.pickup.heal_collect"),
+        pickup_magnet=HashEffectName("particle.pickup.magnet_collect"),
+        pickup_relic=HashEffectName("particle.pickup.relic_collect");
+    effects.assign(p.effects.size(),{}); recipes.clear();
     for(std::size_t ei=0;ei<p.effects.size();++ei)
     {
-        const auto &effect=p.effects[ei]; auto &range=ranges[ei]; range.first=static_cast<std::uint32_t>(recipes.size());
+        const auto &effect=p.effects[ei]; auto &route=effects[ei];
+        route.outputs.first=static_cast<std::uint32_t>(recipes.size());
+        route.importance=effect.importance;
         if(effect.handle!=ei+1 || effect.input_mode!=0 || effect.timing_kind!=0 ||
             !std::isfinite(effect.seconds)||effect.seconds<=0 || !valid(effect.sources,p.sources.size())) continue;
         const auto id=std::find_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &v){return v.handle==effect.handle;});
@@ -2219,6 +2366,24 @@ void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
         const auto unique_identity=id!=p.effect_lookup.end() &&
             std::count_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &v){return v.handle==effect.handle;})==1 &&
             std::count_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &v){return v.effect_id==id->effect_id;})==1;
+        const auto effect_id=id==p.effect_lookup.end()?0:id->effect_id;
+        auto kind=VfxFlashEventKind::Unsupported;
+        if(effect.payload_kind==point_payload) kind=VfxFlashEventKind::Point;
+        else if(effect.payload_kind==context_payload) kind=VfxFlashEventKind::Context;
+        else if(effect.payload_kind==projectile_payload) kind=VfxFlashEventKind::ProjectileContact;
+        else if(effect.payload_kind==circle_payload) kind=VfxFlashEventKind::Circle;
+        else if(effect.payload_kind==cone_payload)
+        {
+            if(effect_id==multishot_secondary||effect_id==multishot_skill||effect_id==multishot_rear||
+               effect_id==retreat_triple||effect_id==arrow_triple) kind=VfxFlashEventKind::ConeMuzzle;
+            else if(effect_id==boss_volley) kind=VfxFlashEventKind::ConeBossEnergy;
+        }
+        else if(effect.payload_kind==ring_payload&&effect_id==boss_shockwave) kind=VfxFlashEventKind::RingBossEnergy;
+        else if(effect.payload_kind==source_target_payload&&unique_identity&&
+            (effect_id==pickup_xp||effect_id==pickup_heal||effect_id==pickup_magnet||effect_id==pickup_relic))
+            kind=VfxFlashEventKind::PickupCollect;
+        route.kind=kind;
+        if(kind==VfxFlashEventKind::Unsupported) continue;
         for(std::uint32_t si=effect.sources.first;si<effect.sources.first+effect.sources.count;++si)
         {
             const auto &source=p.sources[si];
@@ -2239,7 +2404,7 @@ void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                     shape->shape==VfxImpactShape::RadialEnergy?VfxOutputProfile::SpriteNoiseOit:
                     shape->shape==VfxImpactShape::SoftDisc?VfxOutputProfile::SpriteAdd:VfxOutputProfile::SpriteSdfAdd;
                 if(output.profile!=expected_profile) continue;
-                VfxFlashSpawnInput spawn; spawn.shape=shape->shape; spawn.size=shape->size;
+                VfxFlashTemplate spawn; spawn.shape=shape->shape; spawn.size=shape->size;
                 const auto find=[&](std::string_view key)->const VfxParameterRecord*{
                     const auto hash=ShapeId(key); const VfxParameterRecord *found=nullptr;
                     for(const auto &v:p.parameters.subspan(output.parameters.first,output.parameters.count))
@@ -2257,7 +2422,7 @@ void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                     shape->shape==VfxImpactShape::RadialSlash||shape->shape==VfxImpactShape::Pulse||
                     shape->shape==VfxImpactShape::ThreeProngBite||shape->shape==VfxImpactShape::BossCrestContact||shape->shape==VfxImpactShape::NeedleStar;
                 bool supported=scalar("size",spawn.size,shape->shape==VfxImpactShape::SoftDisc) &&
-                    scalar("aspect",spawn.aspect,shape->shape==VfxImpactShape::CrossSlash);
+                    scalar("aspect",spawn.appearance.aspect,shape->shape==VfxImpactShape::CrossSlash);
                 if(const auto *curve=find("scale_curve_ref")){if(curve->type!=VfxParameterType::CurveRow||curve->bits>=7)supported=false;else spawn.curve_row=curve->bits;}
                 else if(needs_curve)supported=false;
                 if(shape->shape==VfxImpactShape::CrossSlash)supported&=enumeration("sdf","cross_slash");
@@ -2272,15 +2437,15 @@ void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                         const auto *flow=shape->shape==VfxImpactShape::Flame?find("flow_speed"):nullptr;
                         supported &= output.parameters.count==(shape->shape==VfxImpactShape::Flame?(flow?3u:2u):1u) &&
                             octaves&&octaves->type==VfxParameterType::Int&&octaves->bits>=1&&octaves->bits<=8;
-                        if(supported){spawn.fbm_octaves=octaves->bits; supported &= shape->shape!=VfxImpactShape::Flame ||
-                            (nonnegative("domain_warp",spawn.domain_warp,true)&&(!flow||nonnegative("flow_speed",spawn.procedural_flow_speed,true)));}
+                        if(supported){spawn.appearance.fbm_octaves=octaves->bits; supported &= shape->shape!=VfxImpactShape::Flame ||
+                            (nonnegative("domain_warp",spawn.appearance.domain_warp,true)&&(!flow||nonnegative("flow_speed",spawn.appearance.procedural_flow_speed,true)));}
                     }
                     else
                     {
                         const auto *clip=find("clip_index"),*blend=find("motion_blend"); float strength{};
                         supported &= output.parameters.count==5 && clip&&clip->type==VfxParameterType::Int&&clip->bits<=1&&
                             blend&&blend->type==VfxParameterType::Enum&&blend->bits==ShapeId("high_only")&&
-                            scalar("frame_rate",spawn.smoke_fps,true)&&scalar("opacity_scale",spawn.opacity_scale,true)&&
+                            scalar("frame_rate",spawn.appearance.smoke_fps,true)&&scalar("opacity_scale",spawn.opacity_scale,true)&&
                             nonnegative("motion_blend_strength",strength,true)&&strength<=1&&output.coverage_type==ShapeId("flipbook_6way")&&
                             valid(output.textures,p.texture_bindings.size());
                         const VfxTextureBindingRecord *positive=nullptr,*negative=nullptr,*motion=nullptr;
@@ -2298,24 +2463,36 @@ void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                         if(supported&&(!positive||!negative||!motion||!positive->frame_count||positive->first_frame>=64||
                             positive->frame_count>64-positive->first_frame||positive->first_frame!=negative->first_frame||
                             positive->frame_count!=negative->frame_count||!std::isfinite(positive->fps)||positive->fps!=negative->fps||
-                            positive->fps!=spawn.smoke_fps||positive->first_frame!=clip->bits*32||positive->frame_count!=32)) supported=false;
-                        if(supported){spawn.smoke_first_frame=positive->first_frame;spawn.smoke_frame_count=positive->frame_count;spawn.motion_strength=strength;}
+                            positive->fps!=spawn.appearance.smoke_fps||positive->first_frame!=clip->bits*32||positive->frame_count!=32)) supported=false;
+                        if(supported){spawn.appearance.smoke_first_frame=positive->first_frame;spawn.appearance.smoke_frame_count=positive->frame_count;spawn.motion_strength=strength;}
                     }
                 }
                 const bool contact=shape->shape==VfxImpactShape::ThreeProngBite||shape->shape==VfxImpactShape::BossCrestContact||shape->shape==VfxImpactShape::NeedleStar;
                 if(contact && output.parameters.count!=1) supported=false;
+                if(kind==VfxFlashEventKind::ProjectileContact)
+                {
+                    const bool routed_contact=(shape->shape==VfxImpactShape::ThreeProngBite&&effect_id==HashEffectName("particle.enemy.ranged.impact"))||
+                        (shape->shape==VfxImpactShape::BossCrestContact&&effect_id==HashEffectName("particle.boss.volley.projectile_impact"))||
+                        (shape->shape==VfxImpactShape::NeedleStar&&effect_id==HashEffectName("particle.skill.charged_shot.impact"));
+                    if(!contact||!routed_contact) supported=false;
+                }
+                else if(contact) supported=false;
+                if(kind==VfxFlashEventKind::ConeMuzzle &&
+                    (source.stable_id!=ShapeId("muzzle_primary")||shape->shape!=VfxImpactShape::RadialSlash)) supported=false;
+                if((kind==VfxFlashEventKind::ConeBossEnergy||kind==VfxFlashEventKind::RingBossEnergy) &&
+                    (source.stable_id!=ShapeId("boss_energy")||shape->shape!=VfxImpactShape::RadialEnergy)) supported=false;
                 if(!supported)continue;
                 if(!oit) for(const auto &v:p.parameters.subspan(output.parameters.first,output.parameters.count))
                     if(v.type==VfxParameterType::Float&&!std::isfinite(std::bit_cast<float>(v.bits))) supported=false;
                 if(!supported)continue;
-                spawn.oit=oit; spawn.color={output.rgba[0]*output.hdr,output.rgba[1]*output.hdr,output.rgba[2]*output.hdr,output.rgba[3]};
-                spawn.hdr=output.hdr; spawn.gradient_row=output.gradient_row;
+                spawn.appearance.oit=oit; spawn.appearance.color={output.rgba[0]*output.hdr,output.rgba[1]*output.hdr,output.rgba[2]*output.hdr,output.rgba[3]};
+                spawn.appearance.hdr=output.hdr; spawn.appearance.gradient_row=output.gradient_row;
                 spawn.delay=effect.seconds*source.knots[0];
                 spawn.lifetime=effect.seconds*(source.knots[1]-source.knots[0]);
                 if(!std::isfinite(spawn.delay)||!std::isfinite(spawn.lifetime)||spawn.lifetime<=0 ||
-                    !std::isfinite(spawn.hdr)||spawn.hdr<=0 ||
-                    !std::isfinite(spawn.color.x)||!std::isfinite(spawn.color.y)||!std::isfinite(spawn.color.z)||
-                    !std::isfinite(spawn.color.w)||spawn.color.w<0||spawn.color.w>1) continue;
+                    !std::isfinite(spawn.appearance.hdr)||spawn.appearance.hdr<=0 ||
+                    !std::isfinite(spawn.appearance.color.x)||!std::isfinite(spawn.appearance.color.y)||!std::isfinite(spawn.appearance.color.z)||
+                    !std::isfinite(spawn.appearance.color.w)||spawn.appearance.color.w<0||spawn.appearance.color.w>1) continue;
                 const auto texture_range=output.textures;
                 if(!valid(texture_range,p.texture_bindings.size()))continue;
                 for(const auto &binding:p.texture_bindings.subspan(texture_range.first,texture_range.count))
@@ -2331,10 +2508,15 @@ void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                     if(!supported)break;
                 }
                 if(!supported)continue;
-                VfxFlashRecipe recipe; recipe.effect_id=id==p.effect_lookup.end()?0:id->effect_id; recipe.effect_handle=effect.handle;
+                VfxFlashRecipe recipe;
                 recipe.source_index=si; recipe.source_stable_id=source.stable_id; recipe.output_index=oi;
-                recipe.payload_kind=effect.payload_kind; recipe.min_quality=output.min_quality; recipe.knots={source.knots[0],source.knots[1]};
-                recipe.seconds=effect.seconds; recipe.spawn=spawn; recipe.unique_effect_identity=unique_identity;
+                recipe.spawn=spawn;
+                recipe.spawn.appearance.ground_base_anchor=kind==VfxFlashEventKind::Circle &&
+                    (shape->shape==VfxImpactShape::SoftDisc||shape->shape==VfxImpactShape::NoiseDisc||
+                     shape->shape==VfxImpactShape::Flame||shape->shape==VfxImpactShape::Smoke6Way||
+                     shape->shape==VfxImpactShape::RadialEnergy);
+                recipe.cosmetic=source.authoritative==0;
+                recipe.suppress_smoke_motion=spawn.appearance.oit&&shape->shape==VfxImpactShape::Smoke6Way;
                 std::uint32_t coverage_quality{};
                 if(shape->shape==VfxImpactShape::Smoke6Way)
                     for(const auto &binding:p.texture_bindings.subspan(texture_range.first,texture_range.count))
@@ -2344,7 +2526,6 @@ void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                             coverage_quality=std::max(coverage_quality,binding.min_quality);
                         }
                 if(!supported)continue;
-                recipe.coverage_quality=coverage_quality;
                 for(std::uint32_t q=0;q<3;++q)
                 {
                     if(q<output.min_quality || q<coverage_quality)continue;
@@ -2368,7 +2549,7 @@ void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                 recipes.push_back(recipe);
             }
         }
-        range.count=static_cast<std::uint32_t>(recipes.size())-range.first;
+        route.outputs.count=static_cast<std::uint32_t>(recipes.size())-route.outputs.first;
     }
 }
 
@@ -2508,9 +2689,9 @@ void PrepareVfxPersistentFlashRecipes(VfxProgramView p,
                 recipe.source_end = source.knots[1];
                 recipe.spawn.shape = VfxImpactShape::StatusStamp;
                 recipe.spawn.curve_row = 4;
-                recipe.spawn.gradient_row = output.gradient_row;
-                recipe.spawn.hdr = output.hdr;
-                recipe.spawn.color = {output.rgba[0] * output.hdr, output.rgba[1] * output.hdr,
+                recipe.spawn.appearance.gradient_row = output.gradient_row;
+                recipe.spawn.appearance.hdr = output.hdr;
+                recipe.spawn.appearance.color = {output.rgba[0] * output.hdr, output.rgba[1] * output.hdr,
                     output.rgba[2] * output.hdr, output.rgba[3]};
                 recipe.bleed_extend = route.bleed;
                 recipe.supported_quality_mask = 0x7;
@@ -2568,29 +2749,29 @@ void PrepareVfxPersistentFlashRecipes(VfxProgramView p,
                     output.coverage_ref != ShapeId("warped_flame_disc") ||
                     !valid(output.parameters, p.parameters.size()) || output.parameters.count != 4 ||
                     !valid(output.textures, p.texture_bindings.size())) continue;
-                VfxFlashSpawnInput spawn{};
+                VfxFlashTemplate spawn{};
                 spawn.shape = VfxImpactShape::Flame;
-                spawn.oit = true;
+                spawn.appearance.oit = true;
                 bool output_valid = true; std::uint32_t seen{};
                 for (const auto &parameter : p.parameters.subspan(output.parameters.first, output.parameters.count))
                 {
                     std::uint32_t bit{};
                     if (parameter.key == ShapeId("fbm_octaves") && parameter.type == VfxParameterType::Int)
-                    { bit = 1; spawn.fbm_octaves = parameter.bits; }
+                    { bit = 1; spawn.appearance.fbm_octaves = parameter.bits; }
                     else if (parameter.type == VfxParameterType::Float)
                     {
                         const auto value = std::bit_cast<float>(parameter.bits);
                         if (parameter.key == ShapeId("size")) { bit = 2; spawn.size = value; }
-                        else if (parameter.key == ShapeId("domain_warp")) { bit = 4; spawn.domain_warp = value; }
-                        else if (parameter.key == ShapeId("flow_speed")) { bit = 8; spawn.procedural_flow_speed = value; }
+                        else if (parameter.key == ShapeId("domain_warp")) { bit = 4; spawn.appearance.domain_warp = value; }
+                        else if (parameter.key == ShapeId("flow_speed")) { bit = 8; spawn.appearance.procedural_flow_speed = value; }
                     }
                     if (!bit || (seen & bit)) { output_valid = false; break; }
                     seen |= bit;
                 }
-                if (!output_valid || seen != 15 || spawn.fbm_octaves < 1 || spawn.fbm_octaves > 4 ||
-                    !std::isfinite(spawn.size) || spawn.size <= 0.0f || !std::isfinite(spawn.domain_warp) ||
-                    spawn.domain_warp < 0.0f || !std::isfinite(spawn.procedural_flow_speed) ||
-                    spawn.procedural_flow_speed < 0.0f || !std::isfinite(output.hdr) || output.hdr <= 0.0f ||
+                if (!output_valid || seen != 15 || spawn.appearance.fbm_octaves < 1 || spawn.appearance.fbm_octaves > 4 ||
+                    !std::isfinite(spawn.size) || spawn.size <= 0.0f || !std::isfinite(spawn.appearance.domain_warp) ||
+                    spawn.appearance.domain_warp < 0.0f || !std::isfinite(spawn.appearance.procedural_flow_speed) ||
+                    spawn.appearance.procedural_flow_speed < 0.0f || !std::isfinite(output.hdr) || output.hdr <= 0.0f ||
                     std::any_of(output.rgba.begin(), output.rgba.end(), [](float v) { return !std::isfinite(v) || v < 0; }) ||
                     output.rgba[3] > 1.0f) continue;
                 bool mask_seen = false; VfxRange mask_slices{}; float mask_strength{};
@@ -2609,11 +2790,11 @@ void PrepareVfxPersistentFlashRecipes(VfxProgramView p,
                     mask_seen = true; mask_slices = binding.slices; mask_strength = binding.strength;
                 }
                 if (!output_valid) continue;
-                spawn.gradient_row = output.gradient_row;
-                spawn.hdr = output.hdr;
-                spawn.color = {output.rgba[0] * output.hdr, output.rgba[1] * output.hdr,
+                spawn.appearance.gradient_row = output.gradient_row;
+                spawn.appearance.hdr = output.hdr;
+                spawn.appearance.color = {output.rgba[0] * output.hdr, output.rgba[1] * output.hdr,
                     output.rgba[2] * output.hdr, output.rgba[3]};
-                spawn.ground_base_anchor = true;
+                spawn.appearance.ground_base_anchor = true;
                 fire.push_back({fire_id, effect.handle, source.stable_id, rate, radius_scale,
                     spawn, mask_slices, mask_strength, source.authoritative != 0});
             }
@@ -2699,16 +2880,17 @@ void PrepareVfxPersistentFlashRecipes(VfxProgramView p,
                         else { texture_valid = false; break; }
                     }
                     if (!texture_valid || !gradient || !curve || mask != route.bleed) continue;
-                    VfxFlashSpawnInput spawn{};
+                    VfxFlashTemplate spawn{};
                     spawn.shape = VfxImpactShape::Pulse;
                     spawn.curve_row = 6;
-                    spawn.gradient_row = output.gradient_row;
-                    spawn.hdr = output.hdr;
-                    spawn.color = {output.rgba[0] * output.hdr, output.rgba[1] * output.hdr,
+                    spawn.appearance.gradient_row = output.gradient_row;
+                    spawn.appearance.hdr = output.hdr;
+                    spawn.appearance.color = {output.rgba[0] * output.hdr, output.rgba[1] * output.hdr,
                         output.rgba[2] * output.hdr, output.rgba[3]};
+                    spawn.delay = tick.seconds * source.knots[0];
+                    spawn.lifetime = tick.seconds * (source.knots[1] - source.knots[0]);
                     ticks.push_back({route.tick_id, route.status_id, tick.handle, status.handle,
-                        output.min_quality, tick.seconds, source.knots[0],
-                        source.knots[1] - source.knots[0], spawn, mask_slices, mask_strength, route.bleed});
+                        output.min_quality, spawn, mask_slices, mask_strength, route.bleed});
                     break;
                 }
             }
@@ -2722,6 +2904,7 @@ void PrepareVfxBallisticRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
 {
     const auto hash=[](std::string_view s){std::uint32_t h=2166136261u;for(unsigned char c:s){h^=c;h*=16777619u;}return h;};
     const auto hash64=[](std::string_view s){std::uint64_t h=14695981039346656037ull;for(unsigned char c:s){h^=c;h*=1099511628211ull;}return h;};
+    constexpr auto mix=[](std::uint32_t v){v^=v>>16;v*=0x7feb352du;v^=v>>15;v*=0x846ca68bu;v^=v>>16;return v;};
     const auto valid=[](VfxRange r,std::size_t n){return r.first<=n&&r.count<=n-r.first;};
     struct Shape { std::uint32_t id; VfxMotionKind motion; std::uint8_t mesh; float min_size,max_size,min_speed,max_speed,gravity,cone,min_spin,max_spin; };
     const Shape shapes[]{
@@ -2756,6 +2939,10 @@ void PrepareVfxBallisticRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                (!persistent&&(effect.input_mode!=0||effect.timing_kind!=0)))continue;
             const double delay=static_cast<double>(effect.seconds)*source.knots[0]*60.;
             if(!persistent&&(!std::isfinite(effect.seconds)||effect.seconds<=0||!std::isfinite(delay)))continue;
+            const double birth_floor=persistent?0.0:std::floor(delay),birth_ceil=persistent?0.0:std::ceil(delay);
+            const float birth_fraction=persistent?0.0f:static_cast<float>(delay-birth_floor);
+            const auto seed_salt=mix(static_cast<std::uint32_t>(lookup->effect_id))^
+                mix(static_cast<std::uint32_t>(lookup->effect_id>>32))^mix(source.stable_id);
             std::uint32_t count{};float gravity{},bounce{},drag=.8f,speed=-1,cone{};std::uint32_t seen{};bool params_ok=true;
             for(const auto &v:p.parameters.subspan(source.parameters.first,source.parameters.count))
             {
@@ -2811,12 +2998,21 @@ void PrepareVfxBallisticRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                     }
                     if(!ok||!g||!c||count!=5)continue;
                 }
-                recipes.push_back({lookup->effect_id,effect.handle,si,source.stable_id,effect.payload_kind,effect.importance,effect.timing_kind,
-                    output.shape,output.min_quality,output.gradient_row,shape->mesh,count,source.knot_count,source.type,output.motion,
-                    source.knots,effect.seconds,shape->min_size,shape->max_size,shape->min_speed,shape->max_speed,
-                    (seen&2)?gravity:shape->gravity,(seen&4)?bounce:0,(seen&8)?drag:.8f,(seen&16)?speed:-1,
-                    (seen&32)?cone:shape->cone,shape->min_spin,shape->max_spin,
-                    {output.rgba[0],output.rgba[1],output.rgba[2],output.rgba[3]},output.hdr,persistent});
+                VfxBallisticRecipe row{};
+                row.effect_id=lookup->effect_id;row.source_seed_salt=seed_salt;row.payload_kind=effect.payload_kind;
+                row.importance=effect.importance;row.min_quality=output.min_quality;row.gradient_row=output.gradient_row;
+                row.mesh_index=shape->mesh;row.count=count;
+                row.direction=forward?VfxBallisticDirection::ProjectileVelocity:
+                    output.motion==VfxMotionKind::ShortBallisticFan?VfxBallisticDirection::EventNormal:VfxBallisticDirection::Up;
+                row.persistent_status=persistent;row.cosmetic=source.authoritative==0;
+                row.birth_floor_ticks=birth_floor;row.birth_ceil_ticks=birth_ceil;row.birth_fraction=birth_fraction;
+                row.event_lifetime=static_cast<float>(effect.seconds*(source.knots[1]-source.knots[0]));
+                row.end_knot=source.knots[1];row.seconds=effect.seconds;
+                row.min_size=shape->min_size;row.max_size=shape->max_size;row.min_speed=shape->min_speed;row.max_speed=shape->max_speed;
+                row.gravity=(seen&2)?gravity:shape->gravity;row.bounce=(seen&4)?bounce:0;row.drag=(seen&8)?drag:.8f;
+                row.speed=(seen&16)?speed:-1;row.cone=(seen&32)?cone:shape->cone;row.min_spin=shape->min_spin;row.max_spin=shape->max_spin;
+                row.color={output.rgba[0],output.rgba[1],output.rgba[2],output.rgba[3]};row.hdr=output.hdr;
+                recipes.push_back(row);
             }
         }
         range.count=static_cast<std::uint32_t>(recipes.size())-range.first;
@@ -3119,7 +3315,7 @@ Result DecodeVfxImage(std::span<const std::byte> legacy, std::span<const std::by
     loaded.program = std::move(program);
     const auto &cooked_program = loaded.program;
     loaded.authored_mesh_indices.resize(loaded.emitters.size());
-    loaded.decorative_definitions.reserve(loaded.definitions.size());
+    loaded.legacy_effect_policies.reserve(loaded.definitions.size());
     loaded.has_typed_wavefront = std::ranges::any_of(cooked_program.effect_lookup, [](const auto &effect) {
         return effect.effect_id == MakeAssetId("particle.boss.shockwave.wavefront").value;
     });
@@ -3129,10 +3325,11 @@ Result DecodeVfxImage(std::span<const std::byte> legacy, std::span<const std::by
             [&](const auto &entry) { return entry.effect_id == definition.effect_id; });
         const auto *policy = lookup != cooked_program.effect_lookup.end()
             ? &cooked_program.effects[lookup->handle - 1] : nullptr;
-        loaded.decorative_definitions.push_back(policy && !policy->must_match_logic && std::ranges::none_of(
-            std::span(cooked_program.sources).subspan(policy->sources.first, policy->sources.count), [](const auto &source) {
-                return source.authoritative || source.type == VfxSourceType::ProjectileFollow;
-            }));
+        loaded.legacy_effect_policies.push_back({policy ? policy->importance : 0u,
+            policy && !policy->must_match_logic && std::ranges::none_of(
+                std::span(cooked_program.sources).subspan(policy->sources.first, policy->sources.count), [](const auto &source) {
+                    return source.authoritative || source.type == VfxSourceType::ProjectileFollow;
+                })});
         for (std::uint32_t ei = definition.first_emitter; ei < definition.first_emitter + definition.emitter_count; ++ei)
         {
             const auto &emitter = loaded.emitters[ei];
@@ -3188,7 +3385,7 @@ Result DecodeVfxImage(std::span<const std::byte> legacy, std::span<const std::by
     PrepareVfxDistortionRecipes(loaded.program.View(), loaded.distortion_effect_ranges, loaded.distortion_recipes);
     PrepareVfxDecalRecipes(loaded.program.View(), loaded.decal_effect_ranges, loaded.decal_recipes);
     PrepareVfxGroundRecipes(loaded.program.View(), loaded.ground_effect_ranges, loaded.ground_recipes);
-    PrepareVfxFlashRecipes(loaded.program.View(), loaded.flash_effect_ranges, loaded.flash_recipes);
+    PrepareVfxFlashRecipes(loaded.program.View(), loaded.flash_effect_recipes, loaded.flash_recipes);
     PrepareVfxPersistentFlashRecipes(loaded.program.View(),
         loaded.persistent_stamp_effect_ranges, loaded.persistent_stamp_recipes,
         loaded.persistent_fire_effect_ranges, loaded.persistent_fire_recipes,

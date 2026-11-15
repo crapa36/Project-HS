@@ -6,6 +6,7 @@
 #include <vector>
 namespace hs::runtime_detail
 {
+// Image recipe ranges and effect-wide fields must be immutable and admitted.
 [[nodiscard]] std::vector<VfxDistortionInput> BuildVfxTypedDistortionCommands(
     const VfxImage &image, VfxEventView events,
     std::span<const VfxPersistentInput> persistent, double current_tick);

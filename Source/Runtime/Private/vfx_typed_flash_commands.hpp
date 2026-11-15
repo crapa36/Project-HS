@@ -13,6 +13,9 @@
 namespace hs::runtime_detail
 {
 
+// These builders require an immutable image produced by the VFX image loading
+// and recipe preparation path. Its backing owner must outlive retained commands.
+// Raw event and persistent-owner inputs remain mutable runtime data.
 // Borrowed recipe/event references are valid only through the immediate
 // prepare-to-append window; the image and event backing storage must outlive it.
 struct VfxPreparedFlashOutput
@@ -20,14 +23,14 @@ struct VfxPreparedFlashOutput
     const VfxFlashRecipe *recipe{};
     const VfxEventInput *input{};
     std::size_t event_index{};
-    std::size_t count{1}, admitted_count{1};
+    static constexpr std::size_t count = 1;
+    std::size_t admitted_count{1};
     std::uint32_t importance{};
     Sequence pickup_sequence{};
     Float3 position{}, direction{};
     float scale{1.0f}, mask_strength{};
     std::uint32_t mask_slice{0xffffffffu};
-    bool cosmetic{}, pickup_collect{}, circle_geometry{}, ground_base_anchor{};
-    bool suppress_smoke_motion{};
+    bool cosmetic{}, pickup_collect{}, circle_geometry{};
 };
 
 void PrepareVfxTypedFlashOutputs(const VfxImage &image, VfxEventView inputs,
@@ -62,7 +65,7 @@ void AppendVfxPersistentStatusStampCommands(const VfxImage &image,
 
 // Real area presence owns the source interval. Rate births use the 60 Hz
 // schedule; each tongue ends at that interval's end, with no invented TTL.
-// Prepared rows own copied recipe/owner facts and borrow no image or input data.
+// Prepared rows retain dynamic owner facts and borrow the pinned image appearance.
 struct VfxPreparedFireSource
 {
     VfxFlashSpawnInput base;

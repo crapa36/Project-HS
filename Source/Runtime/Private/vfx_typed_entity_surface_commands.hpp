@@ -30,7 +30,8 @@ struct VfxEntitySurfacePersistentCapture
 };
 
 // Converts only the two fixed boss transitions and the live phase-transition
-// emissive edge. Caller owns event retention and snapshot/capture provenance.
+// emissive edge. The image must be prepared and immutable.
+// Caller owns event retention and snapshot/capture provenance.
 [[nodiscard]] std::vector<VfxEntitySurfaceCommand> BuildVfxTypedEntitySurfaceCommands(
     const VfxImage &image,
     std::span<const VfxEntitySurfaceEventCapture> events,

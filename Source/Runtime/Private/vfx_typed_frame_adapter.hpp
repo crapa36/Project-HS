@@ -26,7 +26,7 @@ struct VfxTypedFrameInputs
 {
     std::vector<VfxEventInput> events;
     std::vector<VfxPersistentInput> persistent;
-    std::vector<std::uint64_t> unsupported_effect_ids;
+    std::size_t unsupported_input_count{};
 };
 
 // Indexes ordered row identities of the retained publication pair, never its addresses.
@@ -131,7 +131,7 @@ void AppendPersistentSnapshotParticleBirths(
 
 // Retain only the captured endpoints of a successful second retreat. The
 // movement is instantaneous in gameplay; fixed authored seconds own the fade.
-// Clear on session reset; catalog adoption rebinds the captured owner payloads.
+// Clear on session reset.
 class VfxUpgradeMovementState
 {
   public:
@@ -142,13 +142,6 @@ class VfxUpgradeMovementState
         float interpolation = 1.0f, VfxQuality quality = VfxQuality::High);
     void Clear() noexcept { owners_.clear(); staged_owners_.clear(); }
     [[nodiscard]] std::size_t RetainedCapacityBytes() const noexcept;
-    [[nodiscard]] std::uint64_t Rebind(const VfxProgramView &previous,
-                                     const VfxProgramView &next) noexcept;
-    void Swap(VfxUpgradeMovementState &prepared) noexcept
-    {
-        owners_.swap(prepared.owners_);
-        staged_owners_.swap(prepared.staged_owners_);
-    }
 
   private:
     struct Owner
@@ -187,10 +180,5 @@ void RefreshVfxGroundEventOwnersFromRaw(
     std::span<const PersistentVfxVisual> owners, Tick current_tick,
     std::span<const PersistentVfxVisual> previous = {},
     float interpolation = 1.0f);
-
-// Validate prepared owner-backed events against exact warning/sector recipes.
-// Events without owner metadata retain their already remapped handles.
-void RebindVfxGroundEventOwners(const VfxImage &image,
-                                std::vector<VfxEventInput> &events);
 
 } // namespace hs::runtime_detail

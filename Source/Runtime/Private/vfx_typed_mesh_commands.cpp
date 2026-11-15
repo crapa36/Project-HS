@@ -33,9 +33,6 @@ void AppendVfxTypedMeshCommands(const VfxImage &image,
 {
     if (!recipes.IsAdmitted() || !recipes.Matches(image.mesh_recipes)) return;
     const auto recipe_rows = recipes.Rows();
-    const auto original_size = result.size();
-    try
-    {
     for (const auto &input : inputs)
     {
         const auto *owner = std::get_if<VfxProjectilePayload>(&input.payload);
@@ -60,12 +57,6 @@ void AppendVfxTypedMeshCommands(const VfxImage &image,
             result.push_back({input.stable_id, position, previous, owner->velocity,
                 owner->hitbox_radius, recipe_index});
         }
-    }
-    }
-    catch (...)
-    {
-        result.resize(original_size);
-        throw;
     }
 }
 }

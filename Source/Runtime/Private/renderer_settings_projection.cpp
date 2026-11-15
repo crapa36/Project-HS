@@ -13,6 +13,7 @@
 
 namespace hs
 {
+#ifdef HS_DEVELOPMENT_TOOLS
 void UpdateGraphicsTelemetry(GraphicsSettingsUiModel &model,
                              const RendererDiagnosticsSnapshot &diagnostics, bool validation)
 {
@@ -41,10 +42,11 @@ void UpdateGraphicsTelemetry(GraphicsSettingsUiModel &model,
     model.telemetry_status[2] = std::format("VRAM 사용량 / 한도 {} · 설정 전환 최대 사용량 {}",
                                           current, peak);
 }
+#endif
 
 std::shared_ptr<const GraphicsSettingsUiModel> RendererGraphicsReceipt(
     const D3D12Renderer &renderer, const GraphicsSettings &graphics, std::uint64_t generation,
-    HWND window_handle, bool validation)
+    HWND window_handle, [[maybe_unused]] bool validation)
 {
     auto model = std::make_shared<GraphicsSettingsUiModel>();
     model->requested = graphics;
@@ -215,7 +217,9 @@ std::shared_ptr<const GraphicsSettingsUiModel> RendererGraphicsReceipt(
             status(descriptor.id, canonical.actual_applied_available
                 ? GraphicsSettingToken(canonical.actual_applied, descriptor.id) : std::string{},
                 canonical.actual_applied_available ? "요청한 설정으로 적용했습니다" : "렌더러의 적용 결과를 기다리는 중입니다");
+#ifdef HS_DEVELOPMENT_TOOLS
     UpdateGraphicsTelemetry(*model, renderer.GetDiagnostics(), validation);
+#endif
     return model;
 }
 

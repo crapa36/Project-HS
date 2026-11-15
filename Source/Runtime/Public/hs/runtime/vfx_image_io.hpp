@@ -13,7 +13,7 @@ struct VfxImageData
     std::vector<CookedParticleEmitter> emitters;
     std::vector<CookedParticleSprite> sprites;
     std::vector<std::uint8_t> authored_mesh_indices;
-    std::vector<std::uint8_t> decorative_definitions;
+    std::vector<VfxLegacyEffectPolicy> legacy_effect_policies;
     VfxProgramData program;
     bool has_typed_wavefront{};
     std::uint32_t sprite_count{};
@@ -31,7 +31,7 @@ struct VfxImageData
     std::vector<VfxDecalRecipe> decal_recipes;
     std::vector<VfxRange> ground_effect_ranges;
     std::vector<VfxGroundRecipe> ground_recipes;
-    std::vector<VfxRange> flash_effect_ranges;
+    std::vector<VfxFlashEffectRecipe> flash_effect_recipes;
     std::vector<VfxFlashRecipe> flash_recipes;
     std::vector<VfxRange> persistent_stamp_effect_ranges;
     std::vector<VfxPersistentStampRecipe> persistent_stamp_recipes;
@@ -75,12 +75,12 @@ struct VfxImageData
     VfxImage View() const && = delete;
     [[nodiscard]] VfxImage View() const & noexcept
     {
-        return {definitions, emitters, sprites, authored_mesh_indices, decorative_definitions,
+        return {definitions, emitters, sprites, authored_mesh_indices, legacy_effect_policies,
                 program.View(), has_typed_wavefront, sprite_count, payload_hash,
                 sprite_bindings, has_required_sprite_bindings, light_effect_ranges, light_recipes,
                 ballistic_effect_ranges, ballistic_recipes, effect_output_profiles,
                 distortion_effect_ranges, distortion_recipes, decal_effect_ranges, decal_recipes,
-                ground_effect_ranges, ground_recipes, flash_effect_ranges, flash_recipes,
+                ground_effect_ranges, ground_recipes, flash_effect_recipes, flash_recipes,
                 persistent_stamp_effect_ranges, persistent_stamp_recipes,
                 persistent_fire_effect_ranges, persistent_fire_recipes,
                 owned_status_tick_effect_ranges, owned_status_tick_recipes,
@@ -109,7 +109,7 @@ void PrepareVfxDecalRecipes(VfxProgramView program, std::vector<VfxRange> &range
                             std::vector<VfxDecalRecipe> &recipes);
 void PrepareVfxGroundRecipes(VfxProgramView program, std::vector<VfxRange> &ranges,
                              std::vector<VfxGroundRecipe> &recipes);
-void PrepareVfxFlashRecipes(VfxProgramView program, std::vector<VfxRange> &ranges,
+void PrepareVfxFlashRecipes(VfxProgramView program, std::vector<VfxFlashEffectRecipe> &effects,
                             std::vector<VfxFlashRecipe> &recipes);
 void PrepareVfxPersistentFlashRecipes(VfxProgramView program,
     std::vector<VfxRange> &stamp_ranges, std::vector<VfxPersistentStampRecipe> &stamps,

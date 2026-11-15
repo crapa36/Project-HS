@@ -49,7 +49,6 @@ public:
     void AppendOutput(const VfxRibbonOutputInput &output);
     void CommitAppendRow() noexcept { ++active_count_; }
     void RejectAppendRow() noexcept;
-    void Rollback(std::size_t active_count) noexcept;
 
 private:
     std::vector<VfxRibbonSourceInput> rows_;

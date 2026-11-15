@@ -117,16 +117,9 @@ static void AppendVfxTypedDistortionCommandsInternal(const VfxImage&image,VfxEve
  std::span<const VfxPersistentInput>persistent,double current_tick,std::vector<VfxDistortionInput>&result,
  std::vector<float>*frame_gaps)
 {
- const auto original_size=result.size();
- const auto original_gap_size=frame_gaps?frame_gaps->size():0;
- try
- {
- const auto run=[&](std::uint32_t handle,Anchor&a,float age,std::uint64_t owner,std::uint32_t seed,VfxQuality quality,std::uint32_t importance,bool persistent_owner){
-  if(!handle||handle>image.distortion_effect_ranges.size())return;const auto range=image.distortion_effect_ranges[handle-1];
-  if(range.first>image.distortion_recipes.size()||range.count>image.distortion_recipes.size()-range.first)return;
-  for(const auto&r:image.distortion_recipes.subspan(range.first,range.count))
-   if(r.input_mode==(persistent_owner?1u:0u)&&r.timing_kind==(persistent_owner?1u:0u)&&
-      persistent_owner==(r.kind==VfxDistortionShape::HeadEnvelope)&&
+ const auto run=[&](std::span<const VfxDistortionRecipe> recipes,Anchor&a,float age,std::uint64_t owner,std::uint32_t seed,VfxQuality quality,std::uint32_t importance,bool persistent_owner){
+  for(const auto&r:recipes)
+   if(persistent_owner==(r.kind==VfxDistortionShape::HeadEnvelope)&&
       a.projectile==(r.kind==VfxDistortionShape::HeadEnvelope||r.kind==VfxDistortionShape::TightDisc))
    Append(r,a,age,owner,seed,quality,importance,result,frame_gaps);
  };
@@ -134,22 +127,25 @@ static void AppendVfxTypedDistortionCommandsInternal(const VfxImage&image,VfxEve
  {
   if(current_tick<in.event_tick)continue;
   if(in.effect_handle==0||in.effect_handle>image.distortion_effect_ranges.size())continue;
-  const auto range=image.distortion_effect_ranges[in.effect_handle-1];if(range.first>=image.distortion_recipes.size()||!range.count)continue;
-  const auto first=image.distortion_recipes[range.first];auto anchor=EventAnchor(in,first.payload_kind);if(!anchor)continue;
+  const auto range=image.distortion_effect_ranges[in.effect_handle-1];if(!range.count)continue;
+  const auto recipes=image.distortion_recipes.subspan(range.first,range.count);const auto&first=recipes.front();
+  if(first.input_mode!=0)continue;auto anchor=EventAnchor(in,first.payload_kind);if(!anchor)continue;
   const auto start=in.geometry_owner_id?in.geometry_start_tick:in.event_tick;
   if(current_tick<start||(in.geometry_owner_id&&in.geometry_end_tick<=start))continue;
   const double duration=in.geometry_owner_id?static_cast<double>(in.geometry_end_tick-start):static_cast<double>(first.seconds)*60;
   const float age=static_cast<float>(static_cast<double>(current_tick-start)/duration);
-  run(in.effect_handle,*anchor,age,in.sequence,in.stable_seed,in.quality,in.importance_override?in.importance_override:first.importance,false);
+  run(recipes,*anchor,age,in.sequence,in.stable_seed,in.quality,in.importance_override?in.importance_override:first.importance,false);
  }
  for(const auto&in:persistent)
  {
   if(in.effect_handle==0||in.effect_handle>image.distortion_effect_ranges.size()||in.stable_id==0)continue;
-  const auto range=image.distortion_effect_ranges[in.effect_handle-1];if(range.first>=image.distortion_recipes.size()||!range.count)continue;const auto&r=image.distortion_recipes[range.first];
+  const auto range=image.distortion_effect_ranges[in.effect_handle-1];if(!range.count)continue;
+  const auto recipes=image.distortion_recipes.subspan(range.first,range.count);const auto&r=recipes.front();
+  if(r.input_mode!=1)continue;
   const auto*projectile=std::get_if<VfxProjectilePayload>(&in.payload);
-  if(!projectile||r.input_mode!=1||r.timing_kind!=1||r.payload_kind!=kProjectilePayload||
+  if(!projectile||
      !Finite(projectile->velocity)||!std::isfinite(projectile->hitbox_radius)||projectile->hitbox_radius<=0||
-     !std::isfinite(r.seconds)||r.seconds<0||!std::isfinite(in.elapsed_seconds)||in.elapsed_seconds<0||!std::isfinite(in.normalized_age)||in.normalized_age<0||in.normalized_age>=1)continue;
+     !std::isfinite(in.elapsed_seconds)||in.elapsed_seconds<0||!std::isfinite(in.normalized_age)||in.normalized_age<0||in.normalized_age>=1)continue;
   Anchor a;a.position={in.current_transform[12],in.current_transform[13],in.current_transform[14]};a.projectile=true;
   const float speed=std::hypot(projectile->velocity.x,projectile->velocity.y,projectile->velocity.z);
   if(!Finite(a.position)||!std::isfinite(speed)||speed<=.0001f)continue;
@@ -159,9 +155,7 @@ static void AppendVfxTypedDistortionCommandsInternal(const VfxImage&image,VfxEve
   // Presence controls start/stop; no expiry or fade is forecast. Authored seconds,
   // when available, gate source birth before holding its cosmetic midpoint.
   const float phase=in.normalized_age>0?in.normalized_age:(r.seconds>0?std::min(in.elapsed_seconds/r.seconds,.5f):.5f);
-  run(in.effect_handle,a,phase,in.stable_id,in.stable_seed,in.quality,r.importance,true);
+  run(recipes,a,phase,in.stable_id,in.stable_seed,in.quality,r.importance,true);
  }
- }
- catch(...){result.resize(original_size);if(frame_gaps)frame_gaps->resize(original_gap_size);throw;}
 }
 }

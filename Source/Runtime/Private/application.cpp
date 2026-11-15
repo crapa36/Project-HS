@@ -7,8 +7,6 @@
 #ifdef HS_DEVELOPMENT_TOOLS
 #include <hs/game_rules/simulation_rules_io.hpp>
 #include <hs/asset_manifest/selected_generation.hpp>
-#include "vfx_generation_rebind.hpp"
-#include "generation_reload_watch.hpp"
 #endif
 #include <hs/presentation/projector.hpp>
 #include <hs/presentation/meadow_surface.hpp>
@@ -22,7 +20,6 @@
 #include "native_input_frame.hpp"
 #include "ui_command_admission.hpp"
 #include "runtime_diagnostics.hpp"
-#include "scene_generation_binding.hpp"
 #include "translucency_diagnostics_log.hpp"
 #include "audio_session.hpp"
 #include "vfx_catalog.hpp"
@@ -89,41 +86,12 @@
 #include <utility>
 #include <vector>
 
-#if defined(HS_DEVELOPMENT_TOOLS)
-#include <future>
-#endif
 
 namespace hs
 {
 namespace
 {
 
-#if defined(HS_DEVELOPMENT_TOOLS)
-using runtime_detail::SceneGenerationBinding;
-
-#endif
-
-#ifdef HS_DEVELOPMENT_TOOLS
-Result PrepareVfxSpriteBindings(const VfxCatalog &catalog, RendererVfxSpriteBindings &bindings)
-{
-    for (const auto &[id, target] : {
-             std::pair<std::string_view, ParticleSpriteBinding *>("particle_sprite.blood", &bindings.bleed_status_sprite),
-             {"particle_sprite.fire", &bindings.burn_status_sprite},
-             {"particle_sprite.slow_rune", &bindings.slow_status_sprite},
-             {"particle_sprite.mark_target", &bindings.mark_status_sprite},
-             {"particle_sprite.trap_rune", &bindings.trap_sprite},
-             {"particle_sprite.fire_ground", &bindings.fire_area_sprite}})
-    {
-        const auto *sprite = catalog.FindSprite(MakeAssetId(id));
-        if (!sprite)
-            return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                                   "VFX catalog omits required sprite: " + std::string(id));
-        *target = {sprite->index, sprite->frame_columns, sprite->frame_rows};
-    }
-    return Result::Success();
-}
-
-#endif
 enum class GraphicsUiPhase : std::uint8_t
 {
     Applied,
@@ -181,6 +149,7 @@ Result ResolveGraphicsDisplayOutput(HWND window, const GraphicsDisplayId &reques
     return Result::Success();
 }
 
+#ifdef HS_DEVELOPMENT_TOOLS
 std::uint64_t CompletedPresentingFrame(const RendererDiagnosticsSnapshot &diagnostics)
 {
     const auto view = std::ranges::find_if(diagnostics.views, [](const auto &entry) { return entry.presenting; });
@@ -191,6 +160,7 @@ std::uint64_t CompletedPresentingFrame(const RendererDiagnosticsSnapshot &diagno
             latest = std::max(latest, frame.rendered_frame_id);
     return latest;
 }
+#endif
 
 UiModel SettingsStatusText(std::string_view label, Float2 anchor,
                            std::uint32_t color = 0xFFFFFFFFu)
@@ -271,7 +241,7 @@ Result WriteRendererStartup(const std::filesystem::path &path, double initialize
     text += "\"semantics\":\"wall ns; steps are sequential synchronous call intervals; nested operations and PSO intervals overlap steps and each other; do not sum with steps\","
         "\"read_coverage\":\"ReadBinary checked whole-file read plus local-probe and atlas reads; includes bounds/open/host allocation\","
         "\"hash_coverage\":\"explicit local-probe SHA256 only; package-internal validation/hash remains in decode; Runtime Generation verification precedes this Initialize\","
-        "\"leaf_coverage\":\"character/environment decoders and geometry preparation; monster palette adoption and named animation decode; Impl allocation plus probe/LTC allocation; canonical/asset descriptors; host packing; utility submit and completion admission\","
+        "\"leaf_coverage\":\"character/environment decoders and geometry preparation; monster palette adoption and named animation decode; Impl allocation plus probe allocation; canonical/asset descriptors; host packing; utility submit and completion admission\","
         "\"leaf_limits\":\"other native service allocations/decoders remain inside their named step; async-worker internal work is not propagated into thread-local leaf samples; GPU/driver busy time unavailable\","
         "\"gpu_wait_semantics\":\"completion_admission includes fence setup/queue drain; gpu_fence_wait is only actual WaitForSingleObject calls; neither is GPU elapsed\","
         "\"native_device_internal_ns\":null,\"process_cold\":null,\"disk_cache_state\":\"unobserved\","
@@ -314,9 +284,9 @@ bool ReadRenderThreadCpuTicks(std::uint64_t &ticks) noexcept
 
 constexpr std::array<std::string_view, 8> kMainTaskNames{
     "loop", "input_pump", "ui_click", "ui_hover", "ui_settings", "audio_drain", "audio_state", "audio_capture"};
-constexpr std::array<std::string_view, 13> kSimulationTaskNames{
+constexpr std::array<std::string_view, 12> kSimulationTaskNames{
     "iteration", "input_harness", "tick_fixed", "enemy_harness", "borrow_observe", "enemy_animation",
-    "signal_fanout", "record_io", "snapshot_wait", "project", "publication", "replay_validate", "heartbeat_io"};
+    "signal_fanout", "record_io", "snapshot_wait", "project", "publication", "replay_validate"};
 std::string TaskColumns(std::span<const std::string_view> names)
 {
     std::string result;
@@ -333,7 +303,7 @@ void AppendTaskValues(std::string &row, std::span<const runtime_detail::Diagnost
 
 #ifndef HS_DEVELOPMENT_TOOLS
 constexpr std::array<std::string_view, 8> kMainTaskNames{};
-constexpr std::array<std::string_view, 13> kSimulationTaskNames{};
+constexpr std::array<std::string_view, 12> kSimulationTaskNames{};
 std::string TaskColumns(std::span<const std::string_view>) { return {}; }
 void AppendTaskValues(std::string &, std::span<const runtime_detail::DiagnosticSample>, double) {}
 #endif
@@ -387,7 +357,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         config.boss_phase2_capture || config.slime_family_preview_count || config.environment_preview ||
         config.character_preview || config.vfx_showcase || config.skill_vfx_capture != 0xFFFFFFFFu ||
         config.preview_camera_override ||
-        !config.timeline_actions.empty() || !config.heartbeat_path.empty())
+        !config.timeline_actions.empty())
         return {Result::Failure(ErrorCode::InvalidState, "hs_runtime",
             "Smoke, preview, replay, recording, and capture modes require a development executable.")};
 #endif
@@ -440,30 +410,35 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     auto content_owner = std::make_shared<shipping::PreparedContent>();
     auto &prepared_content = *content_owner;
 #ifdef HS_DEVELOPMENT_TOOLS
-    const auto generation_pointer = config.generation_pointer.empty()
-        ? executable_directory / "GenerationState/runtime-full.json"
-        : config.generation_pointer;
-    SelectedGeneration selected_generation;
-    if (auto loaded = LoadSelectedGeneration(generation_pointer, selected_generation);
-        !loaded)
-        return {loaded};
-    if (auto loaded = shipping::LoadPreparedContent(std::move(selected_generation), prepared_content); !loaded)
-        return {loaded};
-    const auto &selected = *prepared_content.generation;
-    const std::string deployment_id = selected.id;
-#else
-    if (auto loaded = shipping::LoadPreparedContent(executable_directory, shipping::ImageInfo(), prepared_content); !loaded)
-        return {loaded};
+    if (!config.generation_pointer.empty())
+    {
+        SelectedGeneration selected_generation;
+        if (auto loaded = LoadSelectedGeneration(config.generation_pointer, selected_generation); !loaded)
+            return {loaded};
+        if (auto loaded = shipping::LoadPreparedContent(std::move(selected_generation), prepared_content); !loaded)
+            return {loaded};
+    }
+    else
+#endif
+    {
+        if (auto loaded = shipping::LoadPreparedContent(executable_directory, shipping::ImageInfo(), prepared_content); !loaded)
+            return {loaded};
+    }
     const auto &shipped_content = prepared_content.owner;
     std::string deployment_id;
-    deployment_id.reserve(64);
-    constexpr char hex[] = "0123456789abcdef";
-    for (std::size_t i = 16; i != 48; ++i)
-    {
-        const auto byte = std::to_integer<unsigned>(shipping::ImageInfo().header[i]);
-        deployment_id += hex[byte >> 4]; deployment_id += hex[byte & 15];
-    }
+#ifdef HS_DEVELOPMENT_TOOLS
+    if (prepared_content.generation) deployment_id = prepared_content.generation->id;
+    else
 #endif
+    {
+        deployment_id.reserve(64);
+        constexpr char hex[] = "0123456789abcdef";
+        for (std::size_t i = 16; i != 48; ++i)
+        {
+            const auto byte = std::to_integer<unsigned>(shipping::ImageInfo().header[i]);
+            deployment_id += hex[byte >> 4]; deployment_id += hex[byte & 15];
+        }
+    }
     const auto &presentation_catalog = prepared_content.presentation;
     auto runtime_camera = presentation_catalog.camera;
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -611,7 +586,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     ui_click_model.transaction_state = "렌더러를 준비하는 중입니다";
     channels.presentation_graphics_ui.store(std::make_shared<const GraphicsSettingsUiModel>(ui_click_model), std::memory_order_release);
     bool ui_command_queue_full{};
-    bool ui_click_allocation_failed{};
+    bool ui_callback_out_of_memory{};
     std::uint64_t consumed_selection_packet_generation{};
     std::atomic graphics_ui_phase{GraphicsUiPhase::Applied};
     std::atomic settings_save_failed{false};
@@ -740,10 +715,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         }
         catch (const std::bad_alloc &)
         {
-            ui_click_allocation_failed = true;
-#ifdef HS_DEVELOPMENT_TOOLS
-            OutputDebugStringA("Settings click preview allocation failed; queued command and committed settings retained.\n");
-#endif
+            ui_callback_out_of_memory = true;
+            // A Win32 callback cannot unwind into the owning Main boundary.
+            window.StopInput();
+            channels.stop_requested.store(true, std::memory_order_release);
+            channels.NotifyMain();
         }
     });
     std::uint32_t hover_target = 0;
@@ -881,27 +857,25 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #endif
     };
     const auto save_committed_settings = [&] {
-        try
+        auto confirmation = settings_commit.Committed();
+        if (auto saved = save_store.SaveSettingsV2(confirmation); !saved)
         {
-            auto confirmation = settings_commit.Committed();
-            if (auto saved = save_store.SaveSettingsV2(confirmation); !saved)
-            {
-                log_settings_save_failure(saved);
-            }
-            else
-            {
-                settings_commit.ConfirmPersisted(std::move(confirmation));
-                settings_save_failed.store(false, std::memory_order_release);
-            }
+            log_settings_save_failure(saved);
         }
-        catch (const std::bad_alloc &)
+        else
         {
-            settings_save_failed.store(true, std::memory_order_release);
-#ifdef HS_DEVELOPMENT_TOOLS
-            OutputDebugStringA("Settings save allocation failed; last persisted profile retained.\n");
-#endif
+            settings_commit.ConfirmPersisted(std::move(confirmation));
+            settings_save_failed.store(false, std::memory_order_release);
         }
     };
+
+    std::ofstream main_tasks_file;
+    std::optional<runtime_detail::DiagnosticLog> main_tasks;
+    std::string main_task_row;
+    runtime_detail::DiagnosticSample previous_main_log{};
+    std::uint64_t main_iteration{}, previous_wait_begin{}, previous_wait_end{};
+    DWORD previous_wait_result{WAIT_TIMEOUT}, previous_wait_timeout{INFINITE};
+    bool previous_wait_input_gated{};
 
     auto render_ports = channels.ForRender();
     const SettingsData initial_renderer_settings = settings;
@@ -909,12 +883,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     std::jthread render_thread([&, render_ports, initial_renderer_settings, startup_graphics](std::stop_token) mutable {
         auto &channels = render_ports;
         SetThreadName(L"HS Render");
-#ifdef HS_DEVELOPMENT_TOOLS
-        std::shared_ptr<const SelectedGeneration> render_generation(content_owner, prepared_content.generation.get());
-        auto active_vfx_content = content_owner;
-#else
-        std::shared_ptr<const void> render_generation = shipped_content;
-#endif
+        try
+        {
+        const std::shared_ptr<const void> render_content_owner = content_owner;
         D3D12Renderer renderer;
         RendererConfig renderer_config = ProjectRendererConfig(initial_renderer_settings, startup_graphics);
         const auto user_data_root = SaveStore::DefaultRoot();
@@ -923,15 +894,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::vector<std::byte> startup_font;
         const auto font_result = [&]() -> Result {
 #if defined(HS_DEVELOPMENT_TOOLS)
-            ShippedContentOwner font_file;
-            if (auto opened = ShippedContentOwner::Open(executable_directory / L"Fonts" / L"NotoSansKR.ttf", font_file); !opened) return opened;
-            if (!font_file.Size() || font_file.Size() > UINT32_MAX)
-                return Result::Failure(ErrorCode::InvalidArgument, "hs_runtime", "Developer font extent is invalid.");
-            startup_font.resize(static_cast<std::size_t>(font_file.Size()));
-            return font_file.ReadExact(0, startup_font);
-#else
-            return shipping::ReadFont(*shipped_content, shipping::ImageInfo(), startup_font);
+            if (!shipped_content)
+            {
+                ShippedContentOwner font_file;
+                if (auto opened = ShippedContentOwner::Open(executable_directory / L"Fonts" / L"NotoSansKR.ttf", font_file); !opened) return opened;
+                if (!font_file.Size() || font_file.Size() > UINT32_MAX)
+                    return Result::Failure(ErrorCode::InvalidArgument, "hs_runtime", "Developer font extent is invalid.");
+                startup_font.resize(static_cast<std::size_t>(font_file.Size()));
+                return font_file.ReadExact(0, startup_font);
+            }
 #endif
+            return shipping::ReadFont(*shipped_content, shipping::ImageInfo(), startup_font);
         }();
         if (!font_result)
         {
@@ -970,19 +943,15 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         renderer_config.interpolate = realtime;
         // Scripted runs must not accept developer-UI input or vary their captures with its state.
         renderer_config.devtools_visible = !config.smoke && config.skill_vfx_capture >= kCombatSkillCount;
-#ifdef HS_DEVELOPMENT_TOOLS
-        RendererVfxSpriteBindings initial_sprite_bindings;
-        auto initialized = PrepareVfxSpriteBindings(vfx_catalog, initial_sprite_bindings);
-#else
         const auto &initial_sprite_bindings = vfx_catalog.Image().sprite_bindings;
-        auto initialized = Result::Success();
-#endif
         renderer_config.bleed_status_sprite = initial_sprite_bindings.bleed_status_sprite;
         renderer_config.burn_status_sprite = initial_sprite_bindings.burn_status_sprite;
         renderer_config.slow_status_sprite = initial_sprite_bindings.slow_status_sprite;
         renderer_config.mark_status_sprite = initial_sprite_bindings.mark_status_sprite;
         renderer_config.trap_sprite = initial_sprite_bindings.trap_sprite;
         renderer_config.fire_area_sprite = initial_sprite_bindings.fire_area_sprite;
+        renderer_config.vfx_mesh_recipes = vfx_catalog.MeshRecipeView();
+        renderer_config.vfx_fresnel_recipes = vfx_catalog.FresnelRecipeView();
 #ifdef HS_DEVELOPMENT_TOOLS
         renderer_config.barrier_mode = config.barrier_mode;
 #else
@@ -992,20 +961,20 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         renderer_config.artifact_directory = config.artifact_directory;
 #endif
 #ifdef HS_DEVELOPMENT_TOOLS
-        renderer_config.content_generation_id = render_generation->id;
-        renderer_config.content_generation_lease = render_generation;
-        renderer_config.product_paths = render_generation->product_paths;
-        renderer_config.product_digests = render_generation->product_digests;
-#else
+        if (prepared_content.generation)
+        {
+            renderer_config.product_paths = prepared_content.generation->product_paths;
+            renderer_config.product_digests = prepared_content.generation->product_digests;
+        }
+#endif
         renderer_config.content_generation_id = deployment_id;
         renderer_config.content_generation_lease = content_owner;
         renderer_config.packed_content = shipped_content;
-        renderer_config.UseRendererCatalog(prepared_content.renderer);
-#endif
+        if (shipped_content) renderer_config.UseRendererCatalog(prepared_content.renderer);
 
         runtime_detail::DiagnosticSample renderer_startup{};
         runtime_detail::DiagnosticScope renderer_startup_scope(renderer_startup, capture_clock);
-        if (initialized) initialized = renderer.Initialize(renderer_config);
+        auto initialized = renderer.Initialize(renderer_config);
         renderer_startup_scope.Stop();
 #ifdef HS_DEVELOPMENT_TOOLS
         if (capture_clock)
@@ -1031,30 +1000,22 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         GraphicsDisplayId active_native_output = initial_native_output;
         std::uint64_t active_settings_generation{};
         const auto restore_renderer_settings = [&] {
-            try
-            {
-                GraphicsDisplayId restored_output;
-                if (auto resolved = ResolveGraphicsDisplayOutput(window.Handle(),
-                                                                 active_native_output,
-                                                                 restored_output); !resolved)
-                    return resolved;
-                auto restored = renderer.Resize(active_renderer_settings.width, active_renderer_settings.height);
-                if (restored) restored = renderer.RequestGraphicsSettings(
-                    GraphicsSettingsRequest{active_settings_generation,
-                        GraphicsSettingsRequestCause::Recovery, active_graphics, restored_output});
-                if (restored) active_native_output = std::move(restored_output);
-                return restored;
-            }
-            catch (const std::bad_alloc &)
-            {
-                return Result::Failure(ErrorCode::TaskFailed, "hs_runtime", "Graphics recovery allocation failed.");
-            }
+            GraphicsDisplayId restored_output;
+            if (auto resolved = ResolveGraphicsDisplayOutput(window.Handle(),
+                                                             active_native_output,
+                                                             restored_output); !resolved)
+                return resolved;
+            auto restored = renderer.Resize(active_renderer_settings.width, active_renderer_settings.height);
+            if (restored) restored = renderer.RequestGraphicsSettings(
+                GraphicsSettingsRequest{active_settings_generation,
+                    GraphicsSettingsRequestCause::Recovery, active_graphics, restored_output});
+            if (restored) active_native_output = std::move(restored_output);
+            return restored;
         };
         std::ofstream graphics_settings_file;
         std::optional<runtime_detail::DiagnosticLog> graphics_settings_lines;
         std::uint64_t graphics_config_revision{};
         std::string graphics_config_signature;
-        bool graphics_capture_complete{true};
 #ifdef HS_DEVELOPMENT_TOOLS
         if (config.capture_diagnostics)
         {
@@ -1069,93 +1030,80 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         bool execution_receipt_pending{true};
         const auto record_renderer_features = [&](std::uint64_t settings_generation) {
             execution_receipt_pending = true;
-            try
+            const auto receipt = RendererGraphicsReceipt(renderer, active_graphics, active_settings_generation,
+                static_cast<HWND>(window.Handle()), validation_enabled);
+            channels.renderer_graphics_ui.store(receipt, std::memory_order_release);
+            channels.NotifyMain();
+            if (graphics_settings_lines)
             {
-                const auto receipt = RendererGraphicsReceipt(renderer, active_graphics, active_settings_generation,
-                    static_cast<HWND>(window.Handle()), validation_enabled);
-                channels.renderer_graphics_ui.store(receipt, std::memory_order_release);
-                channels.NotifyMain();
-                if (graphics_settings_lines)
+                const auto canonical = renderer.GetGraphicsSettingsStatus();
+                std::vector<std::string> rows;
+                std::string signature = std::format("{},{}\n", active_settings_generation, renderer.PipelineRevision());
+                for (const auto &descriptor : GraphicsSettingDescriptors())
                 {
-                    const auto canonical = renderer.GetGraphicsSettingsStatus();
-                    std::vector<std::string> rows;
-                    std::string signature = std::format("{},{}\n", active_settings_generation, renderer.PipelineRevision());
-                    for (const auto &descriptor : GraphicsSettingDescriptors())
-                    {
-                        const auto requested = GraphicsSettingToken(active_graphics, descriptor.id);
-                        const auto effective = canonical.actual_applied_available
-                            ? GraphicsSettingToken(canonical.actual_applied, descriptor.id) : std::string{};
-                        const auto choice = std::ranges::find_if(receipt->choices, [&](const auto &entry) {
-                            return entry.setting == descriptor.id && entry.token == requested;
-                        });
-                        // UI display/extent choices are suggestions, not native capability admissions.
-                        constexpr std::array capability_settings{SettingId::ReconstructionProvider,
-                            SettingId::ReconstructionQuality, SettingId::FrameGenerationProvider,
-                            SettingId::FrameGenerationMode, SettingId::FrameGenerationMultiplier,
-                            SettingId::HdrMode, SettingId::LowLatency,
-                            SettingId::AoMode, SettingId::GiMode, SettingId::ReflectionMode, SettingId::ShadowMode,
-                            SettingId::AdaptiveShading};
-                        const bool capability_reported = std::ranges::find(capability_settings, descriptor.id) != capability_settings.end();
-                        const auto native = std::ranges::find(receipt->resolved, descriptor.id, &GraphicsUiStatus::setting);
-                        rows.push_back(std::format("{},{},{},{},{},{},{}\n",
-                            static_cast<unsigned>(descriptor.id), runtime_detail::CsvField(descriptor.key),
-                            runtime_detail::CsvField(requested), runtime_detail::CsvField(effective),
-                            !capability_reported || choice == receipt->choices.end() ? -1 : choice->available ? 1 : 0,
-                            runtime_detail::CsvField(native == receipt->resolved.end() ? std::string_view{} : native->effective),
-                            runtime_detail::CsvField(native == receipt->resolved.end() ? std::string_view{} : native->reason)));
-                        signature += rows.back();
-                    }
-                    if (signature != graphics_config_signature)
-                    {
-                        ++graphics_config_revision;
-                        graphics_config_signature = std::move(signature);
-                        for (const auto &row : rows)
-                            graphics_settings_lines->Append(std::format("{},{},{},{}", graphics_config_revision,
-                                active_settings_generation, renderer.PipelineRevision(), row));
-                    }
+                    const auto requested = GraphicsSettingToken(active_graphics, descriptor.id);
+                    const auto effective = canonical.actual_applied_available
+                        ? GraphicsSettingToken(canonical.actual_applied, descriptor.id) : std::string{};
+                    const auto choice = std::ranges::find_if(receipt->choices, [&](const auto &entry) {
+                        return entry.setting == descriptor.id && entry.token == requested;
+                    });
+                    // UI display/extent choices are suggestions, not native capability admissions.
+                    constexpr std::array capability_settings{SettingId::ReconstructionProvider,
+                        SettingId::ReconstructionQuality, SettingId::FrameGenerationProvider,
+                        SettingId::FrameGenerationMode, SettingId::FrameGenerationMultiplier,
+                        SettingId::HdrMode, SettingId::LowLatency,
+                        SettingId::AoMode, SettingId::GiMode, SettingId::ReflectionMode, SettingId::ShadowMode,
+                        SettingId::AdaptiveShading};
+                    const bool capability_reported = std::ranges::find(capability_settings, descriptor.id) != capability_settings.end();
+                    const auto native = std::ranges::find(receipt->resolved, descriptor.id, &GraphicsUiStatus::setting);
+                    rows.push_back(std::format("{},{},{},{},{},{},{}\n",
+                        static_cast<unsigned>(descriptor.id), runtime_detail::CsvField(descriptor.key),
+                        runtime_detail::CsvField(requested), runtime_detail::CsvField(effective),
+                        !capability_reported || choice == receipt->choices.end() ? -1 : choice->available ? 1 : 0,
+                        runtime_detail::CsvField(native == receipt->resolved.end() ? std::string_view{} : native->effective),
+                        runtime_detail::CsvField(native == receipt->resolved.end() ? std::string_view{} : native->reason)));
+                    signature += rows.back();
                 }
-                if (!capture_diagnostics) return;
-                const auto lighting = renderer.GetLightingStatus();
-                const auto reconstruction = renderer.GetReconstructionStatus();
-                const auto cache = renderer.GetPipelineCacheStats();
-                std::ofstream log(config.artifact_directory / "renderer_features.jsonl", std::ios::app);
-                log << std::format(
-                    "{{\"settings_generation\":{},\"pipeline_revision\":{},"
-                    "\"requested\":{{\"ao\":\"{}\",\"gi\":\"{}\",\"reflection\":\"{}\",\"shadow\":\"{}\"}},"
-                    "\"active\":{{\"ao\":\"{}\",\"gi\":\"{}\",\"reflection\":\"{}\",\"shadow\":\"{}\"}},"
-                    "\"fallback\":{{\"ao\":\"{}\",\"reflection\":\"{}\",\"shadow\":\"{}\"}},"
-                    "\"reconstruction\":{{\"requested\":\"{}\",\"active\":\"{}\",\"availability\":\"{}\"}},"
-                    "\"pso_cache\":{{\"library\":{},\"mesh_library\":{},\"hits\":{},\"misses\":{},\"native_creates\":{},"
-                    "\"store_failures\":{},\"load_failures\":{},\"io_failures\":{},\"discarded_files\":{}}}}}\n",
-                    settings_generation, renderer.PipelineRevision(),
-                    GraphicsEnumToken(lighting.requested.ao_mode), GraphicsEnumToken(lighting.requested.gi_mode),
-                    GraphicsEnumToken(lighting.requested.reflection_mode), GraphicsEnumToken(lighting.requested.shadow_mode),
-                    GraphicsEnumToken(lighting.active.ao_mode), GraphicsEnumToken(lighting.active.gi_mode),
-                    GraphicsEnumToken(lighting.active.reflection_mode), GraphicsEnumToken(lighting.active.shadow_mode),
-                    lighting.ao_fallback_reason, lighting.reflection_fallback_reason,
-                    lighting.shadow_fallback_reason, reconstruction.requested_provider.value,
-                    reconstruction.effective_provider.value, reconstruction.requested_availability,
-                    cache.library_supported, cache.mesh_library_supported, cache.hits, cache.misses, cache.native_creates,
-                    cache.store_failures, cache.load_failures, cache.io_failures, cache.discarded_files);
-            }
-            catch (const std::bad_alloc &)
-            {
-#ifdef HS_DEVELOPMENT_TOOLS
-                OutputDebugStringA("Graphics status receipt allocation failed; previous immutable receipt retained.\n");
-#endif
-                if (graphics_settings_lines)
+                if (signature != graphics_config_signature)
                 {
-                    graphics_capture_complete = false;
-                    record_thread_failure(Result::Failure(ErrorCode::TaskFailed, "hs_runtime",
-                        "Graphics settings capture allocation failed."));
+                    ++graphics_config_revision;
+                    graphics_config_signature = std::move(signature);
+                    for (const auto &row : rows)
+                        graphics_settings_lines->Append(std::format("{},{},{},{}", graphics_config_revision,
+                            active_settings_generation, renderer.PipelineRevision(), row));
                 }
             }
+            if (!capture_diagnostics) return;
+            const auto lighting = renderer.GetLightingStatus();
+            const auto reconstruction = renderer.GetReconstructionStatus();
+            const auto cache = renderer.GetPipelineCacheStats();
+            std::ofstream log(config.artifact_directory / "renderer_features.jsonl", std::ios::app);
+            log << std::format(
+                "{{\"settings_generation\":{},\"pipeline_revision\":{},"
+                "\"requested\":{{\"ao\":\"{}\",\"gi\":\"{}\",\"reflection\":\"{}\",\"shadow\":\"{}\"}},"
+                "\"active\":{{\"ao\":\"{}\",\"gi\":\"{}\",\"reflection\":\"{}\",\"shadow\":\"{}\"}},"
+                "\"fallback\":{{\"ao\":\"{}\",\"reflection\":\"{}\",\"shadow\":\"{}\"}},"
+                "\"reconstruction\":{{\"requested\":\"{}\",\"active\":\"{}\",\"availability\":\"{}\"}},"
+                "\"pso_cache\":{{\"library\":{},\"mesh_library\":{},\"hits\":{},\"misses\":{},\"native_creates\":{},"
+                "\"store_failures\":{},\"load_failures\":{},\"io_failures\":{},\"discarded_files\":{}}}}}\n",
+                settings_generation, renderer.PipelineRevision(),
+                GraphicsEnumToken(lighting.requested.ao_mode), GraphicsEnumToken(lighting.requested.gi_mode),
+                GraphicsEnumToken(lighting.requested.reflection_mode), GraphicsEnumToken(lighting.requested.shadow_mode),
+                GraphicsEnumToken(lighting.active.ao_mode), GraphicsEnumToken(lighting.active.gi_mode),
+                GraphicsEnumToken(lighting.active.reflection_mode), GraphicsEnumToken(lighting.active.shadow_mode),
+                lighting.ao_fallback_reason, lighting.reflection_fallback_reason,
+                lighting.shadow_fallback_reason, reconstruction.requested_provider.value,
+                reconstruction.effective_provider.value, reconstruction.requested_availability,
+                cache.library_supported, cache.mesh_library_supported, cache.hits, cache.misses, cache.native_creates,
+                cache.store_failures, cache.load_failures, cache.io_failures, cache.discarded_files);
         };
         record_renderer_features(0);
         auto previous_ui_presentation = renderer.GetPresentationStatus();
         auto previous_receipt_phase = channels.session_phase.load(std::memory_order_acquire);
+        bool settings_was_open{};
+#ifdef HS_DEVELOPMENT_TOOLS
         std::uint64_t telemetry_completed_frame{};
-        bool telemetry_settings_open{};
+#endif
         channels.render_ready.store(true, std::memory_order_release);
         channels.render_ready.notify_all();
         channels.NotifyMain();
@@ -1168,14 +1116,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             : active_graphics.particle_quality == GraphicsQuality::Medium
                 ? VfxQuality::Medium : VfxQuality::High;
         bool renderer_settings_suspended{};
-#if defined(HS_DEVELOPMENT_TOOLS)
-        runtime_detail::GenerationReloadWatch generation_reload_watch(render_generation->PointerSnapshot());
-        // The future joins on teardown; the worker owns only file inputs and its read lease.
-        std::future<runtime_detail::PreparedContentGeneration> generation_preparation;
-        std::shared_ptr<const SelectedGeneration> generation_awaiting_frame;
-        SceneGenerationBinding scene_generation{selected.id, selected.id, {}};
-        auto next_generation_check = std::chrono::steady_clock::now();
-#endif
 
 #if defined(HS_DEVELOPMENT_TOOLS)
         PreviewEditValues preview_edit;
@@ -1286,14 +1226,21 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         using VfxEventStore = runtime_detail::ActiveEffectStore;
         using VfxEventProfile = VfxEventStore::Profile;
         std::vector<VfxEventStore::AppendRequest> profile_additions;
-        std::vector<runtime_detail::VfxEventProfileAdmission> profile_admission_plans;
-        std::uint64_t profile_admission_generation{};
+        const auto &profile_image = vfx_catalog.Image();
+        std::vector<runtime_detail::VfxEventProfileAdmission> profile_admission_plans(
+            profile_image.program.effects.size());
+        for (std::size_t i = 0; i < profile_admission_plans.size(); ++i)
+            profile_admission_plans[i] = profile_image.program.effects[i].handle == i + 1
+                ? runtime_detail::PrepareVfxEventProfileAdmission(
+                    profile_image, profile_image.program.effects[i].handle)
+                : runtime_detail::VfxEventProfileAdmission{};
         VfxEventStore::PreparedAppendBatch prepared_profiles;
         const auto profile_bit = [](VfxEventProfile profile) -> std::uint16_t {
             return static_cast<std::uint16_t>(1u << static_cast<unsigned>(profile));
         };
         runtime_detail::VfxPersistentSparkState persistent_sparks;
         runtime_detail::VfxUpgradeMovementState vfx_upgrade_movements;
+#ifdef HS_DEVELOPMENT_TOOLS
         std::size_t typed_vfx_payload_capacity_bytes{};
         const auto vfx_workspace_breakdown = [&]() noexcept {
             using namespace runtime_detail::vfx_retained_size;
@@ -1317,7 +1264,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 sample.frame_scratch_bytes = Add(sample.frame_scratch_bytes, owned);
             };
             const auto vectors = [&](const auto &...items) { (charge(Vector(items)), ...); };
-            vectors(typed_vfx.events, typed_vfx.persistent, typed_vfx.unsupported_effect_ids,
+            vectors(typed_vfx.events, typed_vfx.persistent,
                 frame_events, dispatched_event_scratch, typed_screen, typed_volumes,
                 typed_lights, typed_distortions, distortion_gap_angles, typed_decals, typed_surfaces, typed_mesh_spawns,
                 typed_fresnels, typed_ground_spawns, ground_gap_angles, visible_flashes,
@@ -1332,7 +1279,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             charge(ribbon_inputs.LogicalCapacityBytes());
             return sample;
         };
-#ifdef HS_DEVELOPMENT_TOOLS
         runtime_detail::VfxWorkspacePeak vfx_workspace_sampled_peak;
         runtime_detail::VfxWorkspacePeak vfx_workspace_frame_peak;
         std::size_t vfx_activation_raw_rows{}, vfx_activation_typed_rows{}, vfx_activation_birth_rows{};
@@ -1345,14 +1291,19 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         auto &pending_particle_spawns = vfx_session.decoded.particle_spawns;
         auto &pending_effect_lines = vfx_session.decoded.effect_lines;
         auto &active_vfx_flashes = vfx_session.decoded.flashes;
-        const auto vfx_admission_held_bytes = [&]() noexcept {
+        const auto vfx_visible_held_bytes = [&]() noexcept {
             using namespace runtime_detail::vfx_retained_size;
-            // A later partial-prefix freeze may need a separate native copy.
-            auto held = vfx_workspace_breakdown().TotalBytes();
-            held = Add(held, NativeCopyGrowthBytes(pending_particle_spawns,
-                vfx_session.native_batch.particle_spawns, prepared_births.particle_spawns));
-            held = Add(held, NativeCopyGrowthBytes(pending_effect_lines,
-                vfx_session.native_batch.effect_lines, prepared_births.effect_lines));
+            auto held = vfx_session.LogicalBytes();
+            const auto charge = [&](const auto &rows) {
+                using Row = typename std::remove_cvref_t<decltype(rows)>::value_type;
+                held = Add(held, Multiply(rows.size(), sizeof(Row)));
+            };
+            charge(typed_screen); charge(typed_volumes); charge(typed_lights);
+            charge(typed_distortions); charge(distortion_gap_angles); charge(typed_decals);
+            charge(typed_surfaces); charge(typed_mesh_spawns); charge(typed_fresnels);
+            charge(typed_ground_spawns); charge(ground_gap_angles);
+            charge(ribbon_inputs.Sources()); charge(ribbon_inputs.Outputs());
+            charge(vfx_session.decoded.entity_surface_captures); charge(surface_capture_inputs);
             return held;
         };
 #ifdef HS_DEVELOPMENT_TOOLS
@@ -1415,7 +1366,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         bool gpu_drain_succeeded{true};
 #endif
 #ifdef HS_DEVELOPMENT_TOOLS
-        std::string gpu_live_row;
+        std::string gpu_live_row, gpu_live_prefix, gpu_live_suffix;
 #if defined(HS_DEVELOPMENT_TOOLS)
         bool hero_drain_succeeded{true};
         std::unique_ptr<runtime_detail::TranslucencyDiagnosticsLog> hero_lines;
@@ -1432,19 +1383,44 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             if (!gpu_live_lines || !config.capture_gpu_timings) return;
             if (!performance_state.AcceptGpuFrame(gpu.completed_frame_id, !gpu.passes.empty(), gpu.fence_completed)) return;
             if (!gpu.valid) ++invalid_gpu_frames;
+            gpu_live_prefix.clear();
+            runtime_detail::AppendCsvValues(gpu_live_prefix,
+                observed_frame,
+                gpu.completed_frame_id,
+                gpu.view_id,
+                gpu.critical_path_ms,
+                static_cast<unsigned>(gpu.critical_path_valid),
+                gpu.cpu_recording_ms,
+                static_cast<unsigned>(gpu.cpu_recording_valid),
+                static_cast<unsigned>(gpu.gpu_limited),
+                static_cast<unsigned>(gpu.fence_completed));
+            gpu_live_suffix.clear();
+            runtime_detail::AppendCsvText(gpu_live_suffix,
+                gpu.metric_kind == GpuFrameTimingKind::ReferenceGraphSpan ? "reference_graph_span" :
+                    gpu.metric_kind == GpuFrameTimingKind::OutputDependencyInterval ? "output_dependency_interval" :
+                    gpu.metric_kind == GpuFrameTimingKind::SourceOutputReady ? "source_output_ready" : "unavailable");
+            runtime_detail::AppendCsvValues(gpu_live_suffix,
+                gpu.metric_generation, gpu.resize_epoch, gpu.render_active.width, gpu.render_active.height,
+                static_cast<unsigned>(gpu.main_view), static_cast<unsigned>(gpu.frame_generation_enabled),
+                static_cast<unsigned>(gpu.output_ready_valid), gpu.output_ready_ticks, gpu.output_ready_frequency,
+                gpu.output_ready_qpc, gpu.output_ready_qpc_frequency, static_cast<unsigned>(gpu.output_ready_clock_calibrated),
+                gpu.source_frame_id, gpu.source_frame_sequence, gpu.quality_generation,
+                gpu.provider_generation, static_cast<unsigned>(gpu.generated_frame),
+                gpu.clock_gpu_before, gpu.clock_cpu_before, gpu.clock_gpu_after, gpu.clock_cpu_after,
+                gpu.clock_gpu_frequency, gpu.clock_cpu_frequency, static_cast<unsigned>(gpu.clock_anchors_valid),
+                gpu.source_ready_cadence_ms, gpu.output_dependency_span_ms,
+                static_cast<unsigned>(gpu.calibration_valid), static_cast<unsigned>(gpu.calibration_drift),
+                static_cast<unsigned>(gpu.cadence_valid), static_cast<unsigned>(gpu.span_valid),
+                static_cast<unsigned>(gpu.gpu_backlog_proven), static_cast<unsigned>(gpu.cadence_gap),
+                static_cast<unsigned>(gpu.closure_span_gap),
+                static_cast<unsigned>(gpu.cadence_exclusions_valid),
+                static_cast<unsigned>(gpu.cpu_supply_gap), static_cast<unsigned>(gpu.pacing_gap),
+                static_cast<unsigned>(gpu.closure_clock_valid), static_cast<unsigned>(gpu.closure_gap_checked));
+            gpu_live_suffix += '\n';
             for (const auto &pass : gpu.passes)
             {
-                gpu_live_row.clear();
+                gpu_live_row = gpu_live_prefix;
                 runtime_detail::AppendCsvValues(gpu_live_row,
-                    observed_frame,
-                    gpu.completed_frame_id,
-                    gpu.view_id,
-                    gpu.critical_path_ms,
-                    static_cast<unsigned>(gpu.critical_path_valid),
-                    gpu.cpu_recording_ms,
-                    static_cast<unsigned>(gpu.cpu_recording_valid),
-                    static_cast<unsigned>(gpu.gpu_limited),
-                    static_cast<unsigned>(gpu.fence_completed),
                     pass.pass_id,
                     static_cast<unsigned>(pass.queue),
                     pass.nanoseconds,
@@ -1468,28 +1444,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     pass.cpu_provider_submit_end_qpc,
                     static_cast<unsigned>(pass.cpu_provider_submit_valid),
                     pass.cpu_callback_begin_qpc, pass.cpu_callback_end_qpc, static_cast<unsigned>(pass.cpu_callback_valid));
-                runtime_detail::AppendCsvText(gpu_live_row,
-                    gpu.metric_kind == GpuFrameTimingKind::ReferenceGraphSpan ? "reference_graph_span" :
-                        gpu.metric_kind == GpuFrameTimingKind::OutputDependencyInterval ? "output_dependency_interval" :
-                        gpu.metric_kind == GpuFrameTimingKind::SourceOutputReady ? "source_output_ready" : "unavailable");
-                runtime_detail::AppendCsvValues(gpu_live_row,
-                    gpu.metric_generation, gpu.resize_epoch, gpu.render_active.width, gpu.render_active.height,
-                    static_cast<unsigned>(gpu.main_view), static_cast<unsigned>(gpu.frame_generation_enabled),
-                    static_cast<unsigned>(gpu.output_ready_valid), gpu.output_ready_ticks, gpu.output_ready_frequency,
-                    gpu.output_ready_qpc, gpu.output_ready_qpc_frequency, static_cast<unsigned>(gpu.output_ready_clock_calibrated),
-                    gpu.source_frame_id, gpu.source_frame_sequence, gpu.quality_generation,
-                    gpu.provider_generation, static_cast<unsigned>(gpu.generated_frame),
-                    gpu.clock_gpu_before, gpu.clock_cpu_before, gpu.clock_gpu_after, gpu.clock_cpu_after,
-                    gpu.clock_gpu_frequency, gpu.clock_cpu_frequency, static_cast<unsigned>(gpu.clock_anchors_valid),
-                    gpu.source_ready_cadence_ms, gpu.output_dependency_span_ms,
-                    static_cast<unsigned>(gpu.calibration_valid), static_cast<unsigned>(gpu.calibration_drift),
-                    static_cast<unsigned>(gpu.cadence_valid), static_cast<unsigned>(gpu.span_valid),
-                    static_cast<unsigned>(gpu.gpu_backlog_proven), static_cast<unsigned>(gpu.cadence_gap),
-                    static_cast<unsigned>(gpu.closure_span_gap),
-                    static_cast<unsigned>(gpu.cadence_exclusions_valid),
-                    static_cast<unsigned>(gpu.cpu_supply_gap), static_cast<unsigned>(gpu.pacing_gap),
-                    static_cast<unsigned>(gpu.closure_clock_valid), static_cast<unsigned>(gpu.closure_gap_checked));
-                gpu_live_row += '\n';
+                gpu_live_row += ',';
+                gpu_live_row += gpu_live_suffix;
                 gpu_live_lines->Append(gpu_live_row);
             }
         };
@@ -1549,8 +1505,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         pending_effect_lines.reserve(64);
 
         Tick last_tick{};
-        std::uint64_t typed_vfx_events_received{};
-        std::uint32_t typed_vfx_persistent_peak{};
+#ifdef HS_DEVELOPMENT_TOOLS
         std::uint32_t typed_vfx_ground_peak{};
         std::uint64_t typed_vfx_ground_submitted_total{};
         std::uint32_t typed_vfx_flash_peak{};
@@ -1562,9 +1517,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::uint32_t typed_vfx_distortion_peak{};
         std::uint32_t typed_vfx_decal_peak{};
         std::uint32_t typed_vfx_volume_peak{};
-        std::uint64_t static_scene_upload_count{};
-        std::uint64_t vfx_catalog_generation{1};
         std::uint64_t typed_vfx_flash_submitted_total{};
+#endif
+        std::uint64_t static_scene_upload_count{};
+        constexpr std::uint64_t vfx_catalog_generation{1};
+#ifdef HS_DEVELOPMENT_TOOLS
         std::uint64_t vfx_fire_budget_limited_frames{};
         std::uint64_t vfx_mote_budget_limited_frames{};
         std::size_t vfx_mote_requested_rows{}, vfx_mote_allowed_rows{};
@@ -1578,6 +1535,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         std::size_t vfx_profile_ground_reserved_peak_gaps{}, vfx_profile_ribbon_reserved_peak_rows{}, vfx_profile_ribbon_reserved_peak_outputs{};
         std::size_t vfx_fire_admission_peak_bytes{};
         std::uint64_t typed_vfx_unsupported_inputs{};
+#endif
 #ifdef HS_DEVELOPMENT_TOOLS
         bool captured{};
 #endif
@@ -1597,6 +1555,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         auto next_frame = std::chrono::steady_clock::now();
         runtime_detail::DiagnosticSample previous_capture_log{};
         std::string performance_row;
+        RendererFrameResult frame;
         for (;;)
         {
             std::array<runtime_detail::DiagnosticSample,
@@ -1606,248 +1565,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             vfx_activation_raw_rows = vfx_activation_typed_rows = vfx_activation_birth_rows = 0;
 #endif
             const auto loop_start_qpc = performance_lines ? read_performance_qpc() : 0;
-#if defined(HS_DEVELOPMENT_TOOLS)
-            const auto generation_now = std::chrono::steady_clock::now();
-            const auto generation_ready = generation_preparation.valid() &&
-                generation_preparation.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
-            std::string pointer_text;
-            bool pointer_read{};
-            if (generation_now >= next_generation_check || generation_ready)
-            {
-                next_generation_check = generation_now + std::chrono::milliseconds(250);
-                pointer_read = static_cast<bool>(ReadGenerationPointer(generation_pointer, pointer_text));
-                if (pointer_read) generation_reload_watch.Observe(pointer_text, generation_now);
-            }
-            if (generation_ready)
-            {
-                runtime_detail::PreparedContentGeneration prepared;
-                try
-                {
-                    prepared = generation_preparation.get();
-                }
-                catch (const std::exception &error)
-                {
-                    prepared.result = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                        "Content Generation worker failed: " + std::string(error.what()));
-                }
-                auto &candidate = prepared.candidate;
-                auto reloaded = std::move(prepared.result);
-                bool current = pointer_read && !prepared.superseded &&
-                    generation_reload_watch.IsCurrent(pointer_text);
-                {
-                    std::string candidate_id = "unresolved";
-                    const char *stage = prepared.stage;
-                    const auto pipeline_revision = renderer.PipelineRevision();
-                    const auto parameter_revision = renderer.MaterialParameterRevision();
-                    bool applied{}, catalog_changed{};
-                    runtime_detail::VfxGenerationRebindCounts rebound;
-                    std::uint64_t retired_legacy{}, retired_movements{}, retired_sparks{};
-                    try
-                    {
-                        if (!candidate.id.empty()) candidate_id = candidate.id;
-                        if (current && reloaded && candidate.scope != render_generation->scope)
-                            reloaded = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                                                       "Content Generation changes the selected scope.");
-                        if (current && reloaded && candidate.id != render_generation->id)
-                        {
-                            auto next_content = std::make_shared<shipping::PreparedContent>();
-                            next_content->generation = std::make_shared<const SelectedGeneration>(candidate);
-                            VfxCatalog replacement;
-                            RendererVfxSpriteBindings sprite_bindings;
-                            runtime_detail::DecodedVfxState prepared_decoded;
-                            runtime_detail::ActiveEffectStore prepared_active_effects = active_effects;
-                            runtime_detail::VfxUpgradeMovementState prepared_movements;
-                            runtime_detail::VfxPersistentSparkState prepared_sparks;
-                            if (reloaded)
-                            {
-                                for (const std::string id : {"vfx/particle_effects.hsbin", "vfx/vfx_program.hsbin"})
-                                {
-                                    const auto previous = render_generation->product_digests.find(id);
-                                    const auto next = candidate.product_digests.find(id);
-                                    if (previous == render_generation->product_digests.end() ||
-                                        next == candidate.product_digests.end())
-                                    {
-                                        reloaded = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                                                                   "Generation omits required VFX digest: " + id);
-                                        break;
-                                    }
-                                    catalog_changed |= previous->second != next->second;
-                                }
-                            }
-                            if (reloaded && catalog_changed)
-                            {
-                                stage = "vfx_catalog";
-                                reloaded = shipping::LoadPreparedVfx(candidate, next_content->vfx);
-                                if (reloaded) reloaded = replacement.Bind(next_content->vfx.View());
-                                if (reloaded) reloaded = PrepareVfxSpriteBindings(replacement, sprite_bindings);
-                                if (reloaded && vfx_catalog_generation == UINT64_MAX)
-                                    reloaded = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                                                               "VFX catalog generation exhausted.");
-                            }
-                            if (reloaded)
-                            {
-                                stage = "vfx_retention";
-                                const auto &previous = vfx_catalog.Program();
-                                const auto &next = catalog_changed ? replacement.Program() : previous;
-                                prepared_decoded.entity_surface_captures = vfx_session.decoded.entity_surface_captures;
-                                std::erase_if(prepared_decoded.entity_surface_captures, [&](auto &capture) {
-                                    const auto captured_generation = std::static_pointer_cast<const SelectedGeneration>(
-                                        capture.generation_lease);
-                                    if (!captured_generation || !runtime_detail::SameCapturedAssetClosure(
-                                            *captured_generation, candidate, capture.instance.asset_id))
-                                    {
-                                        rebound.Record(runtime_detail::VfxGenerationRebindOutcome::Incompatible);
-                                        return true;
-                                    }
-                                    return false;
-                                });
-                                if (catalog_changed)
-                                {
-                                    prepared_active_effects.RebindRows([&](VfxEventInput &input) {
-                                        std::vector<VfxEventInput> one{input};
-                                        runtime_detail::RebindVfxGenerationEvents(previous, next, one, rebound);
-                                        if (one.empty()) return false;
-                                        input = std::move(one.front());
-                                        return true;
-                                    }, prepared_decoded.entity_surface_captures);
-                                    std::vector<VfxEventInput> rebound_ground_events;
-                                    prepared_active_effects.CopyProfileForRebind(
-                                        runtime_detail::ActiveEffectStore::Profile::Ground,
-                                        rebound_ground_events);
-                                    const auto ground_count = rebound_ground_events.size();
-                                    const auto &next_image = catalog_changed ? replacement.Image() : vfx_catalog.Image();
-                                    runtime_detail::RebindVfxGroundEventOwners(next_image, rebound_ground_events);
-                                    const auto retired_ground = ground_count - rebound_ground_events.size();
-                                    rebound.retained -= retired_ground;
-                                    rebound.incompatible += retired_ground;
-                                    prepared_active_effects.RebindProfile(
-                                        runtime_detail::ActiveEffectStore::Profile::Ground,
-                                        rebound_ground_events);
-                                    prepared_movements = vfx_upgrade_movements;
-                                    retired_movements = prepared_movements.Rebind(previous, next);
-                                    prepared_sparks = persistent_sparks;
-                                    retired_sparks = prepared_sparks.Rebind(previous, next);
-                                    // Expanded legacy commands have no stable effect identity.
-                                    // Empty prepared queues retire them at the same commit.
-                                    retired_legacy = vfx_session.decoded.particle_spawns.size() +
-                                        vfx_session.decoded.effect_lines.size() + vfx_session.decoded.flashes.size() +
-                                        vfx_session.native_batch.particle_spawns.size() + vfx_session.native_batch.effect_lines.size();
-                                }
-                            }
-                            if (reloaded)
-                            {
-                                stage = "renderer_prepare";
-                                std::shared_ptr<const SelectedGeneration> next_generation(next_content, next_content->generation.get());
-                                // The closure includes shader/parameter leaves: the renderer alone
-                                // classifies narrow reloads, which keep the existing scene association.
-                                bool scene_compatible = true;
-                                for (const std::string_view id : std::array<std::string_view, 4>{"game-data/simulation-rules",
-                                         "game-data/presentation-catalog", "game-data/arena-layout",
-                                         std::string_view(renderer_config.scene_hlod_product_id)})
-                                    scene_compatible &= runtime_detail::SameCapturedAssetClosure(
-                                        *render_generation, candidate, MakeAssetId(id));
-                                SceneGenerationBinding next_scene_generation{selected.id, candidate.id, {}};
-                                const auto scene_snapshots = snapshot_consumer.AcquireLatest();
-                                if (scene_snapshots.has_previous)
-                                    (void)next_scene_generation.Resolve(scene_snapshots.previous.static_scene);
-                                if (scene_snapshots.has_current)
-                                    (void)next_scene_generation.Resolve(scene_snapshots.current.static_scene);
-                                bool resident_replaced{};
-                                pointer_read = static_cast<bool>(ReadGenerationPointer(generation_pointer, pointer_text));
-                                if (pointer_read)
-                                    generation_reload_watch.Observe(pointer_text, std::chrono::steady_clock::now());
-                                current = pointer_read && generation_reload_watch.IsCurrent(pointer_text);
-                                if (current)
-                                {
-                                    if (!scene_compatible) stage = "scene_closure";
-                                    reloaded = drain_gpu_capture();
-                                    if (!reloaded) record_thread_failure(reloaded);
-                                    if (reloaded)
-                                        reloaded = renderer.ReloadContentGeneration(candidate.id, candidate.product_paths,
-                                            candidate.product_digests, next_generation, catalog_changed ? &sprite_bindings : nullptr,
-                                            &resident_replaced, scene_compatible);
-                                }
-                                if (current && reloaded)
-                                {
-                                    // All allocation, decoding and rebinding preceded the
-                                    // renderer commit. Publish only prepared owned state.
-                                    if (catalog_changed)
-                                    {
-                                        vfx_catalog.Swap(replacement);
-                                        active_vfx_content = next_content;
-                                        active_effects.Swap(prepared_active_effects);
-                                        vfx_session.SwapDecoded(prepared_decoded);
-                                        vfx_session.DiscardNativeBatch();
-                                        vfx_session.particle_reset_pending = true;
-                                        vfx_upgrade_movements.Swap(prepared_movements);
-                                        persistent_sparks.Swap(prepared_sparks);
-                                        ++vfx_catalog_generation;
-                                    }
-                                    else
-                                        vfx_session.decoded.entity_surface_captures.swap(
-                                            prepared_decoded.entity_surface_captures);
-                                    render_generation.swap(next_generation);
-                                    if (resident_replaced) scene_generation.Swap(next_scene_generation);
-                                    active_decorative_particle_fraction = renderer.DecorativeParticleFraction();
-                                    generation_awaiting_frame = render_generation;
-                                    applied = true;
-                                }
-                            }
-                        }
-                    }
-                    catch (const std::exception &error)
-                    {
-                        reloaded = Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                                                   "Content Generation preparation failed: " + std::string(error.what()));
-                    }
-                    generation_reload_watch.Complete(static_cast<bool>(reloaded), current,
-                        std::chrono::steady_clock::now());
-                    if (applied)
-                    {
-                        if (asset_test_room)
-                        {
-                            asset_test_room.emplace(renderer.GetCharacterAnimationClips(),
-                                renderer.GetLegacyCharacterAnimationClips(), vfx_catalog.Image());
-                            room_time = 0;
-                            room_previous_display_tick = 0;
-                            room_previous_simulation_time = {};
-                            ++room_session;
-                            if (auto catalog_result = prepare_room_catalog(); !catalog_result)
-                            { record_thread_failure(catalog_result); break; }
-                        }
-                        record_renderer_features(0);
-                        std::ofstream(config.artifact_directory / "shader_hot_reload.log", std::ios::app)
-                            << "applied candidate=" << candidate_id << " active=" << render_generation->id
-                            << " pipelines=" << pipeline_revision << "->" << renderer.PipelineRevision()
-                            << " parameters=" << parameter_revision << "->" << renderer.MaterialParameterRevision()
-                            << " vfx_changed=" << catalog_changed << " typed_retained=" << rebound.retained
-                            << " typed_deleted=" << rebound.deleted << " typed_incompatible=" << rebound.incompatible
-                            << " movements_retired=" << retired_movements << " sparks_retired=" << retired_sparks
-                            << " expanded_legacy_retired=" << retired_legacy
-                            << "; temporal/HZB history invalidated\n";
-                    }
-                    if (current && !reloaded)
-                        std::ofstream(config.artifact_directory / "shader_hot_reload.log", std::ios::app)
-                            << "rejected candidate=" << candidate_id << " active=" << render_generation->id
-                            << " stage=" << stage << ' ' << reloaded.Message() << "; previous content retained\n";
-                }
-            }
-            if (pointer_read && generation_reload_watch.TryBegin(std::chrono::steady_clock::now()))
-            {
-                try
-                {
-                    generation_preparation = std::async(std::launch::async, runtime_detail::PrepareContentGeneration,
-                        generation_pointer, pointer_text, render_generation->id, render_generation->scope);
-                }
-                catch (const std::exception &error)
-                {
-                    generation_reload_watch.Complete(false, true, std::chrono::steady_clock::now());
-                    std::ofstream(config.artifact_directory / "shader_hot_reload.log", std::ios::app)
-                        << "rejected candidate=unresolved active=" << render_generation->id
-                        << " stage=worker " << error.what() << "; previous content retained\n";
-                }
-            }
-#endif
             GraphicsSettingsCommitRequest renderer_settings;
             bool apply_renderer_settings{};
             while (channels.renderer_settings.TryPop(renderer_settings))
@@ -1916,64 +1633,48 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 auto settings_error = resize_error;
                 if (settings_error == ErrorCode::None)
                 {
-                    try
+                    auto next_graphics = renderer_settings.graphics ? *renderer_settings.graphics : active_graphics;
+                    GraphicsDisplayId next_native_output;
+                    display_target_changed = next_graphics.display_output.value != "auto" &&
+                        next_graphics.display_output != active_native_output;
+                    auto applied = ResolveGraphicsDisplayOutput(window.Handle(),
+                                                                next_graphics.display_output,
+                                                                next_native_output);
+                    if (applied)
                     {
-                        auto next_graphics = renderer_settings.graphics ? *renderer_settings.graphics : active_graphics;
-                        GraphicsDisplayId next_native_output;
-                        display_target_changed = next_graphics.display_output.value != "auto" &&
-                            next_graphics.display_output != active_native_output;
-                        auto applied = ResolveGraphicsDisplayOutput(window.Handle(),
-                                                                    next_graphics.display_output,
-                                                                    next_native_output);
-                        if (applied)
-                        {
-                            display_target_changed = next_native_output != active_native_output;
-                            applied = renderer.RequestGraphicsSettings(
-                                GraphicsSettingsRequest{renderer_settings.generation,
-                                    renderer_settings.cause, next_graphics, next_native_output});
-                        }
-                        settings_error = applied.Code();
-                        if (applied)
-                        {
-                            active_graphics = std::move(next_graphics);
-                            active_native_output = std::move(next_native_output);
-                            active_settings_generation = renderer_settings.generation;
-                            active_renderer_settings = effective;
-                            if (renderer_settings.cause == GraphicsSettingsRequestCause::Recovery)
-                                renderer_settings_suspended = false;
-                            active_frame_cap = effective.frame_cap;
-                            active_decorative_particle_fraction = renderer.DecorativeParticleFraction();
-                            const auto next_vfx_quality = active_graphics.particle_quality == GraphicsQuality::Low
-                                ? VfxQuality::Low
-                                : active_graphics.particle_quality == GraphicsQuality::Medium
-                                    ? VfxQuality::Medium : VfxQuality::High;
-                            if (next_vfx_quality != active_vfx_quality)
-                            {
-                                active_vfx_quality = next_vfx_quality;
-                                active_effects.SetQuality(active_vfx_quality);
-                            }
-                            record_renderer_features(renderer_settings.generation);
-                        }
-                        else
-                        {
-                            // Resize and options are separate native transactions.
-                            // A cross-monitor failure is acknowledged while the
-                            // window thread rolls placement back. Recovery is
-                            // submitted only after that placement completes.
-                            if (display_target_changed)
-                                renderer_settings_suspended = true;
-                            else
-                            {
-                                auto restored = restore_renderer_settings();
-                                if (!restored) { record_thread_failure(restored); break; }
-                                active_borderless = active_renderer_settings.borderless;
-                                record_renderer_features(renderer_settings.generation);
-                            }
-                        }
+                        display_target_changed = next_native_output != active_native_output;
+                        applied = renderer.RequestGraphicsSettings(
+                            GraphicsSettingsRequest{renderer_settings.generation,
+                                renderer_settings.cause, next_graphics, next_native_output});
                     }
-                    catch (const std::bad_alloc &)
+                    settings_error = applied.Code();
+                    if (applied)
                     {
-                        settings_error = ErrorCode::TaskFailed;
+                        active_graphics = std::move(next_graphics);
+                        active_native_output = std::move(next_native_output);
+                        active_settings_generation = renderer_settings.generation;
+                        active_renderer_settings = effective;
+                        if (renderer_settings.cause == GraphicsSettingsRequestCause::Recovery)
+                            renderer_settings_suspended = false;
+                        active_frame_cap = effective.frame_cap;
+                        active_decorative_particle_fraction = renderer.DecorativeParticleFraction();
+                        const auto next_vfx_quality = active_graphics.particle_quality == GraphicsQuality::Low
+                            ? VfxQuality::Low
+                            : active_graphics.particle_quality == GraphicsQuality::Medium
+                                ? VfxQuality::Medium : VfxQuality::High;
+                        if (next_vfx_quality != active_vfx_quality)
+                        {
+                            active_vfx_quality = next_vfx_quality;
+                            active_effects.SetQuality(active_vfx_quality);
+                        }
+                        record_renderer_features(renderer_settings.generation);
+                    }
+                    else
+                    {
+                        // Resize and options are separate native transactions.
+                        // A cross-monitor failure is acknowledged while the
+                        // window thread rolls placement back. Recovery is
+                        // submitted only after that placement completes.
                         if (display_target_changed)
                             renderer_settings_suspended = true;
                         else
@@ -2070,12 +1771,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 event.position.z));
             });
             event_drain_scope.Stop();
-#if defined(HS_DEVELOPMENT_TOOLS)
-            if (snapshots.has_previous)
-                snapshots.previous.static_scene = scene_generation.Resolve(snapshots.previous.static_scene);
-            if (snapshots.has_current)
-                snapshots.current.static_scene = scene_generation.Resolve(snapshots.current.static_scene);
-#endif
             if (renderer_settings_suspended)
             {
                 if (channels.stop_requested.load(std::memory_order_acquire) &&
@@ -2135,6 +1830,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     vfx_showcase_injected = false;
                 }
                 prepared_births.Clear();
+                typed_screen.clear(); typed_volumes.clear(); typed_lights.clear();
+                typed_distortions.clear(); distortion_gap_angles.clear(); typed_decals.clear();
+                typed_surfaces.clear(); typed_mesh_spawns.clear(); typed_fresnels.clear();
+                typed_ground_spawns.clear(); ground_gap_angles.clear(); ribbon_inputs.Reset();
                 visible_flashes.clear();
                 vfx_session.decoded.AppendVisibleFlashes(display_tick, visible_flashes);
                 const auto retained_flash_count = active_vfx_flashes.size();
@@ -2192,7 +1891,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     }
                     resized = true;
                 }
-                RendererFrameResult frame;
                 DevToolsFrameData devtools{
                     static_cast<std::uint32_t>(task_system.WorkerCount()),
                     static_cast<std::uint32_t>(channels.action_edges.Size()),
@@ -2344,10 +2042,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             ready_event, active_decorative_particle_fraction, prepared,
                             prepared_legacy_emitters, false, false, ground_suppression); !expanded)
                     {
-#if defined(HS_DEVELOPMENT_TOOLS)
                         record_thread_failure(expanded);
                         break;
-#endif
                     }
                     else if (prepared.definition) prepared_legacy_events.push_back(prepared);
                 }
@@ -2415,7 +2111,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 std::size_t fire_requested{}, fire_admitted{}, fire_admission_bytes{};
                 std::size_t required_fire{}, decorative_fire{};
                 bool fire_budget_limited{};
+#ifdef HS_DEVELOPMENT_TOOLS
                 bool birth_budget_limited{};
+#endif
                 runtime_detail::VfxMoteBurstSelection mote_birth_selection;
                 {
                     runtime_detail::DiagnosticScope mote_birth_scope(vfx_work[13], capture_clock);
@@ -2461,6 +2159,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     vfx_session.ReservePersistentBursts(status_burst_keys.size());
 
                     // Required rows, including compatibility fallback, are outside the soft cap.
+                    std::size_t profile_output_bytes{};
                     std::array required_rows{Add(prepared_births.particle_spawns.size(), status_shard_commands.size()),
                         prepared_births.effect_lines.size(), prepared_births.flashes.size()};
                     birth_requests.clear();
@@ -2491,15 +2190,18 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     const auto select_birth_rows = [&](std::array<std::size_t, 3> &rows,
                         std::span<BirthRequest> requests) {
                         vfx_session.SelectBirthRows(rows, requests, birth_order,
-                            [&]() noexcept { return vfx_workspace_breakdown().TotalBytes(); },
+                            [&]() noexcept { return Add(vfx_session.LogicalBytes(),
+                                Add(Multiply(visible_flashes.size(), sizeof(VfxFlashSpawnInput)), profile_output_bytes)); },
                             prepared_births, visible_flashes, required_suffix,
                             runtime_detail::kVfxWorkspaceSoftBudgetBytes);
-                        for (const auto &request : requests)
+#ifdef HS_DEVELOPMENT_TOOLS
+                        if (capture_diagnostics) for (const auto &request : requests)
                         {
                             vfx_birth_requested_rows = Add(vfx_birth_requested_rows, request.count);
                             vfx_birth_allowed_rows = Add(vfx_birth_allowed_rows, *request.admitted);
                             birth_budget_limited |= *request.admitted < request.count;
                         }
+#endif
                     };
                     select_birth_rows(required_rows, {});
                     mote_birth_scope.Stop();
@@ -2508,22 +2210,17 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             vfx_work[runtime_detail::kVfxProfilePrepareTaskIndex], capture_clock);
                         profile_additions.clear();
                         const auto &image = vfx_catalog.Image();
-                        if (profile_admission_generation != vfx_catalog_generation)
-                        {
-                            profile_admission_plans.resize(image.program.effects.size());
-                            for (std::size_t i = 0; i < profile_admission_plans.size(); ++i)
-                                profile_admission_plans[i] = image.program.effects[i].handle == i + 1
-                                    ? runtime_detail::PrepareVfxEventProfileAdmission(
-                                        image, image.program.effects[i].handle) : runtime_detail::VfxEventProfileAdmission{};
-                            profile_admission_generation = vfx_catalog_generation;
-                        }
                         // These arrays stay unchanged through all later admission queries.
+#ifdef HS_DEVELOPMENT_TOOLS
                         typed_vfx_payload_capacity_bytes = 0;
+#endif
                         for (const auto &input : typed_vfx.events)
                         {
+#ifdef HS_DEVELOPMENT_TOOLS
                             typed_vfx_payload_capacity_bytes = runtime_detail::vfx_retained_size::Add(
                                 typed_vfx_payload_capacity_bytes,
                                 runtime_detail::vfx_retained_size::RingGapPayload(input.payload));
+#endif
                             std::uint16_t mask{};
                             const auto ground_admission = runtime_detail::ClassifyVfxTypedEventGroundAdmission(image, input);
                             if (ground_admission.accepted) mask |= profile_bit(VfxEventProfile::Ground);
@@ -2609,8 +2306,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                     profile_admission_plans[input->effect_handle - 1].frame_rows[surface_profile]);
                         for (const auto &input : typed_vfx.persistent)
                         {
+#ifdef HS_DEVELOPMENT_TOOLS
                             typed_vfx_payload_capacity_bytes = Add(typed_vfx_payload_capacity_bytes,
                                 runtime_detail::vfx_retained_size::RingGapPayload(input.payload));
+#endif
                             if (input.effect_handle != 0 && input.effect_handle <= profile_admission_plans.size())
                             {
                                 const auto &persistent_rows = profile_admission_plans[input.effect_handle - 1].persistent_frame_rows;
@@ -2670,42 +2369,41 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         typed_decals.reserve(frame_rows[decal_profile]);
                         typed_volumes.reserve(frame_rows[volume_profile]);
                         typed_screen.reserve(frame_rows[screen_profile]);
+                        auto required_birth_bytes = Multiply(required_rows[0], sizeof(ParticleSpawnCommand));
+                        required_birth_bytes = Add(required_birth_bytes,
+                            Multiply(required_rows[1], sizeof(VfxLineSpawnCommand)));
+                        required_birth_bytes = Add(required_birth_bytes,
+                            Multiply(required_rows[2], sizeof(VfxFlashSpawnInput)));
+                        const auto base_held = Add(vfx_session.LogicalBytes(),
+                            Add(Multiply(Add(visible_flashes.size(), required_suffix), sizeof(VfxFlashSpawnInput)),
+                                required_birth_bytes));
                         VfxEventStore::ProfileAdmission admission{
-                            Add(vfx_workspace_breakdown().TotalBytes(),
-                                Add(NativeCopyGrowthBytes(Add(pending_particle_spawns.size(), required_rows[0]),
-                                        vfx_session.native_batch.particle_spawns.capacity(),
-                                        pending_particle_spawns.empty() ? 0 : prepared_births.particle_spawns.capacity(),
-                                        sizeof(ParticleSpawnCommand)),
-                                    NativeCopyGrowthBytes(Add(pending_effect_lines.size(), required_rows[1]),
-                                        vfx_session.native_batch.effect_lines.capacity(),
-                                        pending_effect_lines.empty() ? 0 : prepared_births.effect_lines.capacity(),
-                                        sizeof(VfxLineSpawnCommand)))),
-                            runtime_detail::kVfxWorkspaceSoftBudgetBytes, birth_order};
+                            base_held, runtime_detail::kVfxWorkspaceSoftBudgetBytes, birth_order};
                         admission.frame_storage[ground_profile] = {
-                            sizeof(VfxGroundSpawnInput), typed_ground_spawns.capacity(), frame_rows[ground_profile]};
-                        admission.ground_gap_storage = {sizeof(float), ground_gap_angles.capacity(), frame_ground_gaps};
+                            sizeof(VfxGroundSpawnInput), frame_rows[ground_profile]};
+                        admission.ground_gap_storage = {sizeof(float), frame_ground_gaps};
                         admission.frame_storage[ribbon_profile] = {
-                            sizeof(VfxRibbonSourceInput), ribbon_inputs.StorageCapacity(), frame_rows[ribbon_profile]};
+                            sizeof(VfxRibbonSourceInput), frame_rows[ribbon_profile]};
                         admission.ribbon_output_storage = {
-                            sizeof(VfxRibbonOutputInput), ribbon_inputs.OutputCapacity(), frame_ribbon_outputs};
+                            sizeof(VfxRibbonOutputInput), frame_ribbon_outputs};
                         admission.frame_storage[light_profile] = {
-                            sizeof(VfxLightInput), typed_lights.capacity(), frame_rows[light_profile]};
+                            sizeof(VfxLightInput), frame_rows[light_profile]};
                         admission.frame_storage[distortion_profile] = {
-                            sizeof(VfxDistortionInput), typed_distortions.capacity(), frame_rows[distortion_profile]};
+                            sizeof(VfxDistortionInput), frame_rows[distortion_profile]};
                         admission.distortion_gap_storage = {
-                            sizeof(float), distortion_gap_angles.capacity(), frame_distortion_gaps};
+                            sizeof(float), frame_distortion_gaps};
                         admission.frame_storage[decal_profile] = {
-                            sizeof(VfxDecalInput), typed_decals.capacity(), frame_rows[decal_profile]};
+                            sizeof(VfxDecalInput), frame_rows[decal_profile]};
                         admission.frame_storage[volume_profile] = {
-                            sizeof(VfxVolumeInput), typed_volumes.capacity(), frame_rows[volume_profile]};
+                            sizeof(VfxVolumeInput), frame_rows[volume_profile]};
                         admission.frame_storage[screen_profile] = {
-                            sizeof(VfxScreenInput), typed_screen.capacity(), frame_rows[screen_profile]};
+                            sizeof(VfxScreenInput), frame_rows[screen_profile]};
                         admission.frame_storage[surface_profile] = {
-                            sizeof(VfxEntitySurfaceCommand), typed_surfaces.capacity(), frame_rows[surface_profile]};
+                            sizeof(VfxEntitySurfaceCommand), frame_rows[surface_profile]};
                         admission.surface_capture_storage = {sizeof(runtime_detail::RetainedVfxEntitySurfaceCapture),
-                            vfx_session.decoded.entity_surface_captures.capacity(), frame_surface_captures};
+                            frame_surface_captures};
                         admission.surface_capture_input_storage = {sizeof(runtime_detail::VfxEntitySurfaceEventCapture),
-                            surface_capture_inputs.capacity(), frame_surface_captures};
+                            frame_surface_captures};
                         if (!profile_additions.empty() &&
                             !active_effects.PrepareAppendBatch(profile_additions, prepared_profiles, &admission))
                         {
@@ -2713,6 +2411,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                 "VFX event profiles could not be prepared."));
                             break;
                         }
+                        profile_output_bytes = Add(admission.FrameBaseBytes(), admission.admitted_bytes);
                         if (!profile_additions.empty())
                         {
                             typed_ground_spawns.reserve(admission.reserved_frame_rows[ground_profile]);
@@ -2728,32 +2427,37 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             vfx_session.decoded.entity_surface_captures.reserve(admission.reserved_surface_captures);
                             surface_capture_inputs.reserve(admission.reserved_surface_captures);
                         }
-                        vfx_profile_ground_reserved_peak_rows = std::max(vfx_profile_ground_reserved_peak_rows,
-                            profile_additions.empty() ? frame_rows[ground_profile] : admission.reserved_frame_rows[ground_profile]);
-                        vfx_profile_ground_reserved_peak_gaps = std::max(vfx_profile_ground_reserved_peak_gaps,
-                            profile_additions.empty() ? frame_ground_gaps : admission.reserved_ground_gaps);
-                        vfx_profile_ribbon_reserved_peak_rows = std::max(vfx_profile_ribbon_reserved_peak_rows,
-                            profile_additions.empty() ? frame_rows[ribbon_profile] : admission.reserved_frame_rows[ribbon_profile]);
-                        vfx_profile_ribbon_reserved_peak_outputs = std::max(vfx_profile_ribbon_reserved_peak_outputs,
-                            profile_additions.empty() ? frame_ribbon_outputs : admission.reserved_ribbon_outputs);
-                        vfx_profile_light_reserved_peak_rows = std::max(vfx_profile_light_reserved_peak_rows,
-                            profile_additions.empty() ? frame_rows[light_profile] : admission.reserved_frame_rows[light_profile]);
-                        vfx_profile_distortion_reserved_peak_rows = std::max(vfx_profile_distortion_reserved_peak_rows,
-                            profile_additions.empty() ? frame_rows[distortion_profile] : admission.reserved_frame_rows[distortion_profile]);
-                        vfx_profile_distortion_reserved_peak_gaps = std::max(vfx_profile_distortion_reserved_peak_gaps,
-                            profile_additions.empty() ? frame_distortion_gaps : admission.reserved_distortion_gaps);
-                        vfx_profile_decal_reserved_peak_rows = std::max(vfx_profile_decal_reserved_peak_rows,
-                            profile_additions.empty() ? frame_rows[decal_profile] : admission.reserved_frame_rows[decal_profile]);
-                        vfx_profile_volume_reserved_peak_rows = std::max(vfx_profile_volume_reserved_peak_rows,
-                            profile_additions.empty() ? frame_rows[volume_profile] : admission.reserved_frame_rows[volume_profile]);
-                        vfx_profile_screen_reserved_peak_rows = std::max(vfx_profile_screen_reserved_peak_rows,
-                            profile_additions.empty() ? frame_rows[screen_profile] : admission.reserved_frame_rows[screen_profile]);
-                        vfx_profile_requested_memberships = Add(vfx_profile_requested_memberships,
-                            admission.requested_cosmetic_memberships);
-                        vfx_profile_admitted_memberships = Add(vfx_profile_admitted_memberships,
-                            admission.admitted_cosmetic_memberships);
-                        vfx_profile_budget_limited_frames += admission.admitted_cosmetic_memberships <
-                            admission.requested_cosmetic_memberships;
+#ifdef HS_DEVELOPMENT_TOOLS
+                        if (capture_diagnostics)
+                        {
+                            vfx_profile_ground_reserved_peak_rows = std::max(vfx_profile_ground_reserved_peak_rows,
+                                profile_additions.empty() ? frame_rows[ground_profile] : admission.reserved_frame_rows[ground_profile]);
+                            vfx_profile_ground_reserved_peak_gaps = std::max(vfx_profile_ground_reserved_peak_gaps,
+                                profile_additions.empty() ? frame_ground_gaps : admission.reserved_ground_gaps);
+                            vfx_profile_ribbon_reserved_peak_rows = std::max(vfx_profile_ribbon_reserved_peak_rows,
+                                profile_additions.empty() ? frame_rows[ribbon_profile] : admission.reserved_frame_rows[ribbon_profile]);
+                            vfx_profile_ribbon_reserved_peak_outputs = std::max(vfx_profile_ribbon_reserved_peak_outputs,
+                                profile_additions.empty() ? frame_ribbon_outputs : admission.reserved_ribbon_outputs);
+                            vfx_profile_light_reserved_peak_rows = std::max(vfx_profile_light_reserved_peak_rows,
+                                profile_additions.empty() ? frame_rows[light_profile] : admission.reserved_frame_rows[light_profile]);
+                            vfx_profile_distortion_reserved_peak_rows = std::max(vfx_profile_distortion_reserved_peak_rows,
+                                profile_additions.empty() ? frame_rows[distortion_profile] : admission.reserved_frame_rows[distortion_profile]);
+                            vfx_profile_distortion_reserved_peak_gaps = std::max(vfx_profile_distortion_reserved_peak_gaps,
+                                profile_additions.empty() ? frame_distortion_gaps : admission.reserved_distortion_gaps);
+                            vfx_profile_decal_reserved_peak_rows = std::max(vfx_profile_decal_reserved_peak_rows,
+                                profile_additions.empty() ? frame_rows[decal_profile] : admission.reserved_frame_rows[decal_profile]);
+                            vfx_profile_volume_reserved_peak_rows = std::max(vfx_profile_volume_reserved_peak_rows,
+                                profile_additions.empty() ? frame_rows[volume_profile] : admission.reserved_frame_rows[volume_profile]);
+                            vfx_profile_screen_reserved_peak_rows = std::max(vfx_profile_screen_reserved_peak_rows,
+                                profile_additions.empty() ? frame_rows[screen_profile] : admission.reserved_frame_rows[screen_profile]);
+                            vfx_profile_requested_memberships = Add(vfx_profile_requested_memberships,
+                                admission.requested_cosmetic_memberships);
+                            vfx_profile_admitted_memberships = Add(vfx_profile_admitted_memberships,
+                                admission.admitted_cosmetic_memberships);
+                            vfx_profile_budget_limited_frames += admission.admitted_cosmetic_memberships <
+                                admission.requested_cosmetic_memberships;
+                        }
+#endif
                         vfx_session.ReserveSurfaceCaptures(profile_additions.empty() ? 0 :
                             prepared_profiles.AdditionalProfileRows(VfxEventProfile::EntitySurface));
                     }
@@ -2821,11 +2525,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     select_birth_rows(required_rows, birth_requests);
                     for (const auto &plan : prepared_legacy_events)
                     {
-                        const auto prefix = prepared_births.MarkBirths();
                         if (auto expanded = vfx_catalog.AppendPreparedEvent(plan, prepared_legacy_emitters,
                                 prepared_births.particle_spawns, prepared_births.effect_lines); !expanded)
                         {
-                            prepared_births.RollbackBirths(prefix);
                             record_thread_failure(expanded);
                             break;
                         }
@@ -2866,7 +2568,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     break;
                 }
                 if (append_vfx_showcase) vfx_showcase_injected = true;
-                vfx_birth_budget_limited_frames += birth_budget_limited;
+#ifdef HS_DEVELOPMENT_TOOLS
+                if (capture_diagnostics) vfx_birth_budget_limited_frames += birth_budget_limited;
+#endif
                 birth_commit_scope.Stop();
 
                 runtime_detail::DiagnosticScope surface_scope(vfx_work[5], capture_clock);
@@ -2910,7 +2614,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     capture.row = active_effects.Find(input);
                     if (capture.row == std::numeric_limits<runtime_detail::ActiveEffectStore::Row>::max())
                         return false;
-                    capture.generation_lease = render_generation;
+                    capture.generation_lease = render_content_owner;
                     if (is_effect(input, death_effect))
                     {
                         const auto *actual = vfx_pair_facts.Capture(
@@ -2954,13 +2658,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     if (actual && visual)
                         surface_persistent.push_back({input, *actual, visual->active_tick, visual->expires});
                 }
-                typed_surfaces.clear();
                 runtime_detail::AppendVfxTypedEntitySurfaceCommands(vfx_catalog.Image(),
                     surface_capture_inputs, surface_persistent, display_tick,
                     death_current_tick, typed_surfaces);
                 surface_scope.Stop();
                 runtime_detail::DiagnosticScope ballistic_scope(vfx_work[7], capture_clock);
-                typed_vfx_unsupported_inputs += typed_vfx.unsupported_effect_ids.size();
+#ifdef HS_DEVELOPMENT_TOOLS
+                if (capture_diagnostics) typed_vfx_unsupported_inputs += typed_vfx.unsupported_input_count;
+#endif
                 // Compatibility cancellation is a post-commit mutation: the staged
                 // replacement births are already in the retained queue at this point.
                 retained_particle_count = runtime_detail::vfx_birth_retirement::RetireCompatibilityBirthRows(
@@ -2977,8 +2682,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 }
                 status_scope.Stop();
                 runtime_detail::DiagnosticScope ground_scope(vfx_work[9], capture_clock);
-                typed_ground_spawns.clear();
-                ground_gap_angles.clear();
                 runtime_detail::AppendVfxTypedGroundCommands(
                     vfx_catalog.Image(), typed_vfx.persistent,
                     snapshots.has_current ? snapshots.current.header.tick : Tick{}, typed_ground_spawns, ground_gap_angles);
@@ -3031,7 +2734,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 };
                 active_effects.RefreshProfile(VfxEventProfile::Light, refresh_owner_event, owner_event_expired);
                 runtime_detail::DiagnosticScope light_scope(vfx_work[19], capture_clock);
-                typed_lights.clear();
                 runtime_detail::AppendVfxTypedLightCommands(vfx_catalog.Image(),
                     active_effects.ProfileEvents(VfxEventProfile::Light), light_tick, typed_lights);
                 light_scope.Stop();
@@ -3043,7 +2745,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 distortion_scope.Stop();
                 active_effects.RefreshProfile(VfxEventProfile::Decal, refresh_owner_event, owner_event_expired);
                 runtime_detail::DiagnosticScope decal_scope(vfx_work[21], capture_clock);
-                typed_decals.clear();
                 runtime_detail::AppendVfxTypedDecalCommands(vfx_catalog.Image(),
                     active_effects.ProfileEvents(VfxEventProfile::Decal),
                     typed_vfx.persistent, light_tick, typed_decals);
@@ -3076,25 +2777,28 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 runtime_detail::DiagnosticScope mote_scope(vfx_work[13], capture_clock);
                 const auto required_flash_suffix = runtime_detail::vfx_retained_size::Add(
                     status_stamp_flashes.size(), required_fire);
-                const auto mote_admission = runtime_detail::PrepareVisibleMoteOutputs(
+                [[maybe_unused]] const auto mote_admission = runtime_detail::PrepareVisibleMoteOutputs(
                     vfx_catalog.Image(), vfx_session, persistent_sparks, typed_vfx.persistent,
                     display_tick, ground_tick, sample_alpha, retained_flash_count,
                     required_flash_suffix, visible_flashes, mote_birth_selection,
-                    vfx_admission_held_bytes);
-                vfx_mote_requested_rows = runtime_detail::vfx_retained_size::Add(
-                    vfx_mote_requested_rows, mote_admission.requested_rows);
-                vfx_mote_allowed_rows = runtime_detail::vfx_retained_size::Add(
-                    vfx_mote_allowed_rows, mote_admission.admitted_rows);
-                vfx_mote_budget_limited_frames += mote_admission.budget_limited;
+                    vfx_visible_held_bytes);
+#ifdef HS_DEVELOPMENT_TOOLS
+                if (capture_diagnostics)
+                {
+                    vfx_mote_requested_rows = runtime_detail::vfx_retained_size::Add(
+                        vfx_mote_requested_rows, mote_admission.requested_rows);
+                    vfx_mote_allowed_rows = runtime_detail::vfx_retained_size::Add(
+                        vfx_mote_allowed_rows, mote_admission.admitted_rows);
+                    vfx_mote_budget_limited_frames += mote_admission.budget_limited;
+                }
+#endif
                 mote_scope.Stop();
                 runtime_detail::DiagnosticScope mesh_scope(vfx_work[14], capture_clock);
-                typed_mesh_spawns.clear();
                 runtime_detail::AppendVfxTypedMeshCommands(
                     vfx_catalog.Image(), vfx_catalog.MeshRecipeView(),
                     typed_vfx.persistent, typed_mesh_spawns);
                 mesh_scope.Stop();
                 runtime_detail::DiagnosticScope fresnel_scope(vfx_work[22], capture_clock);
-                typed_fresnels.clear();
                 runtime_detail::AppendVfxTypedFresnelCommands(
                     vfx_catalog.Image(), vfx_catalog.FresnelRecipeView(),
                     typed_vfx.persistent, typed_fresnels);
@@ -3105,7 +2809,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     return display_tick >= input.event_tick &&
                         (display_tick - input.event_tick) / 60.0 >= seconds;
                 });
-                ribbon_inputs.Reset();
                 runtime_detail::AppendVfxTypedRibbonInputs(
                     vfx_catalog.Image(), typed_vfx.persistent, ribbon_inputs);
                 runtime_detail::AppendVfxEventRibbonInputs(
@@ -3168,14 +2871,18 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     const auto fire_admission = runtime_detail::AppendVisibleFireAndStamps(
                         prepared_fire_sources, decorative_fire, required_flash_suffix,
                         status_stamp_flashes, visible_flashes,
-                        runtime_detail::kVfxWorkspaceSoftBudgetBytes, vfx_admission_held_bytes);
+                        runtime_detail::kVfxWorkspaceSoftBudgetBytes, vfx_visible_held_bytes);
                     fire_admitted = fire_admission.emitted_rows;
                     fire_admission_bytes = fire_admission.admission_bytes;
                     fire_budget_limited = fire_admission.budget_limited;
-                    vfx_fire_admission_peak_bytes = std::max(
-                        vfx_fire_admission_peak_bytes, fire_admission_bytes);
+#ifdef HS_DEVELOPMENT_TOOLS
+                    if (capture_diagnostics)
+                    {
+                        vfx_fire_admission_peak_bytes = std::max(vfx_fire_admission_peak_bytes, fire_admission_bytes);
+                        vfx_fire_budget_limited_frames += fire_budget_limited;
+                    }
+#endif
                 }
-                vfx_fire_budget_limited_frames += fire_budget_limited;
                 active_effects.Compact(vfx_session.decoded.entity_surface_captures);
 #ifdef HS_DEVELOPMENT_TOOLS
                 if (performance_lines) sample_vfx_workspace();
@@ -3204,20 +2911,20 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     }
                 }
 #endif
-                const std::array views{renderer.MainViewInput(camera)};
+                const auto *displayed_ui =
+#if defined(HS_DEVELOPMENT_TOOLS)
+                    asset_test_room ? nullptr :
+#endif
+                    snapshots.ui_frame.get();
                 RenderPackage render_input{
-                    .views = views,
+                    .camera = camera,
                     .snapshots = package_snapshots,
                     .vfx = {
                         .particle_spawns = native_particles,
                         .effect_lines = native_lines,
-                        .event_count = static_cast<std::uint32_t>(typed_vfx.events.size()),
-                        .persistent_count = static_cast<std::uint32_t>(typed_vfx.persistent.size()),
                         .ground = typed_ground_spawns,
                         .flashes = visible_flashes,
                         .meshes = typed_mesh_spawns,
-                        .mesh_recipe_view = vfx_catalog.MeshRecipeView(),
-                        .fresnel_recipe_view = vfx_catalog.FresnelRecipeView(),
                         .fresnels = typed_fresnels,
                         .ribbons = typed_ribbons,
                         .lights = typed_lights,
@@ -3231,18 +2938,12 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                         .ground_gap_angles = ground_gap_angles,
                     },
                     .devtools = devtools,
-                    .ui_draw_content = snapshots.ui_frame
-                        ? snapshots.ui_frame->draw_content : EmptyUiDrawContent(),
-                    .screen_overlay_intensity = active_renderer_settings.screen_overlay_intensity,
-                    .ui_packet_generation = snapshots.ui_frame ? snapshots.ui_frame->generation : 0,
+                    .ui_draw_content = displayed_ui && displayed_ui->draw_content
+                        ? displayed_ui->draw_content : EmptyUiDrawContent(),
+                    .ui_packet_generation = displayed_ui ? displayed_ui->generation : 0,
                     .display_sample = RenderDisplaySample{sample_time, sample_alpha},
                 };
 #if defined(HS_DEVELOPMENT_TOOLS)
-                if (asset_test_room)
-                {
-                    render_input.ui_draw_content = EmptyUiDrawContent();
-                    render_input.ui_packet_generation = 0;
-                }
                 if (config.slime_family_preview_count)
                 {
                     render_input.vfx.ground = {};
@@ -3366,16 +3067,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     previous_capture_log = capture_log;
                 }
 #endif
-#if defined(HS_DEVELOPMENT_TOOLS)
-                if (generation_awaiting_frame)
-                {
-                    std::ofstream(config.artifact_directory / "shader_hot_reload.log", std::ios::app)
-                        << "rendered active=" << generation_awaiting_frame->id << " frame=" << frame.frame
-                        << " pipelines=" << renderer.PipelineRevision()
-                        << " scene_generation=" << scene_generation.resident_generation_id << '\n';
-                    generation_awaiting_frame.reset();
-                }
-#endif
                 if (config.smoke_render_lockstep)
                 {
                     rendered_tick.store(
@@ -3398,48 +3089,43 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 const auto settings_phase = static_cast<SessionPhase>(receipt_phase);
                 const bool settings_open = (settings_phase == SessionPhase::MainMenu && settings_page == UiPage::MainMenuSettings) ||
                                            (settings_phase == SessionPhase::Paused && settings_page == UiPage::PauseSettings);
-                if (settings_open && !telemetry_settings_open) record_renderer_features(0);
-                telemetry_settings_open = settings_open;
-                if (settings_open)
-                {
-                    try
-                    {
-                        const auto diagnostics = renderer.GetDiagnostics();
-                        const auto completed = CompletedPresentingFrame(diagnostics);
-                        const auto receipt = channels.renderer_graphics_ui.load(std::memory_order_acquire);
-                        if (receipt && completed > telemetry_completed_frame)
-                        {
-                            auto updated = std::make_shared<GraphicsSettingsUiModel>(*receipt);
-                            UpdateGraphicsTelemetry(*updated, diagnostics, validation_enabled);
-                            channels.renderer_graphics_ui.store(std::move(updated), std::memory_order_release);
-                            channels.NotifyMain();
-                            telemetry_completed_frame = completed;
-                        }
-                    }
-                    catch (const std::bad_alloc &)
-                    {
+                if (settings_open && !settings_was_open) record_renderer_features(0);
+                settings_was_open = settings_open;
 #ifdef HS_DEVELOPMENT_TOOLS
-                        OutputDebugStringA("Settings telemetry allocation failed; previous immutable receipt retained.\n");
-#endif
+                if (settings_open && config.capture_diagnostics)
+                {
+                    const auto diagnostics = renderer.GetDiagnostics();
+                    const auto completed = CompletedPresentingFrame(diagnostics);
+                    const auto receipt = channels.renderer_graphics_ui.load(std::memory_order_acquire);
+                    if (receipt && completed > telemetry_completed_frame)
+                    {
+                        auto updated = std::make_shared<GraphicsSettingsUiModel>(*receipt);
+                        UpdateGraphicsTelemetry(*updated, diagnostics, validation_enabled);
+                        channels.renderer_graphics_ui.store(std::move(updated), std::memory_order_release);
+                        channels.NotifyMain();
+                        telemetry_completed_frame = completed;
                     }
                 }
-                typed_vfx_events_received += frame.typed_vfx_event_count;
-                typed_vfx_persistent_peak = std::max(
-                    typed_vfx_persistent_peak, frame.typed_vfx_persistent_count);
-                typed_vfx_ground_peak = std::max(
-                    typed_vfx_ground_peak, frame.typed_vfx_ground_count);
-                typed_vfx_ground_submitted_total += frame.typed_vfx_ground_count;
-                typed_vfx_flash_peak = std::max(
-                    typed_vfx_flash_peak, frame.typed_vfx_flash_count);
-                typed_vfx_flash_submitted_total += frame.typed_vfx_flash_count;
-                typed_vfx_mesh_peak = std::max(typed_vfx_mesh_peak, frame.typed_vfx_mesh_count);
-                typed_vfx_fresnel_peak = std::max(typed_vfx_fresnel_peak, frame.typed_vfx_fresnel_count);
-                typed_vfx_ribbon_peak = std::max(typed_vfx_ribbon_peak, frame.typed_vfx_ribbon_count);
-                typed_vfx_ribbon_dropped += frame.typed_vfx_ribbon_dropped;
-                typed_vfx_light_peak = std::max(typed_vfx_light_peak,frame.typed_vfx_light_count);
-                typed_vfx_distortion_peak = std::max(typed_vfx_distortion_peak,frame.typed_vfx_distortion_count);
-                typed_vfx_decal_peak = std::max(typed_vfx_decal_peak,frame.typed_vfx_decal_count);
-                typed_vfx_volume_peak = std::max(typed_vfx_volume_peak,frame.typed_vfx_volume_count);
+#endif
+#ifdef HS_DEVELOPMENT_TOOLS
+                if (capture_diagnostics)
+                {
+                    typed_vfx_ground_peak = std::max(
+                        typed_vfx_ground_peak, frame.typed_vfx_ground_count);
+                    typed_vfx_ground_submitted_total += frame.typed_vfx_ground_count;
+                    typed_vfx_flash_peak = std::max(
+                        typed_vfx_flash_peak, frame.typed_vfx_flash_count);
+                    typed_vfx_flash_submitted_total += frame.typed_vfx_flash_count;
+                    typed_vfx_mesh_peak = std::max(typed_vfx_mesh_peak, frame.typed_vfx_mesh_count);
+                    typed_vfx_fresnel_peak = std::max(typed_vfx_fresnel_peak, frame.typed_vfx_fresnel_count);
+                    typed_vfx_ribbon_peak = std::max(typed_vfx_ribbon_peak, frame.typed_vfx_ribbon_count);
+                    typed_vfx_ribbon_dropped += frame.typed_vfx_ribbon_dropped;
+                    typed_vfx_light_peak = std::max(typed_vfx_light_peak,frame.typed_vfx_light_count);
+                    typed_vfx_distortion_peak = std::max(typed_vfx_distortion_peak,frame.typed_vfx_distortion_count);
+                    typed_vfx_decal_peak = std::max(typed_vfx_decal_peak,frame.typed_vfx_decal_count);
+                    typed_vfx_volume_peak = std::max(typed_vfx_volume_peak,frame.typed_vfx_volume_count);
+                }
+#endif
                 static_scene_upload_count = frame.static_scene_upload_count;
                 channels.rendered_frames.store(frame.frame, std::memory_order_release);
                 channels.devtools_capture_mouse.store(frame.capture_mouse,
@@ -3562,7 +3248,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     std::ofstream receipt(config.artifact_directory / "test-room-capture.json", std::ios::binary | std::ios::trunc);
                     receipt << std::format(
                         "{{\"scene\":\"asset-test-room\",\"station\":{},\"requested_time_seconds\":{},\"effective_time_seconds\":{},\"generation\":\"{}\",\"image\":\"{}\"}}\n",
-                        *config.test_room_capture, config.test_room_time, room_time, render_generation->id, capture_name);
+                        *config.test_room_capture, config.test_room_time, room_time, deployment_id, capture_name);
                     receipt.close();
                     if (!receipt)
                     { record_thread_failure(Result::Failure(ErrorCode::TaskFailed, "hs_runtime", "Cannot write test room capture receipt.")); break; }
@@ -3670,7 +3356,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             const bool gpu_frame_coverage_complete = !performance_lines ||
                 performance_state.GpuFrameCoverageComplete(expected_gpu_frames);
             const bool complete = io_ok && gpu_drain_succeeded && gpu_frame_coverage_complete &&
-                graphics_capture_complete && event_lines.Complete() &&
+                event_lines.Complete() &&
                 timeline_lines.Complete() && gpu_lines.Complete() &&
                 (!performance_lines || (performance_lines->Complete() && gpu_live_lines->Complete())) &&
                 (!graphics_settings_lines || graphics_settings_lines->Complete());
@@ -3680,8 +3366,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 "\"timeline_dropped\":{},\"gpu_records\":{},\"gpu_dropped\":{},"
                 "\"performance_records\":{},\"gpu_live_records\":{},\"graphics_settings_records\":{},"
                 "\"gpu_frames_written\":{},\"gpu_expected_frames\":{},\"gpu_last_frame\":{},\"gpu_timing_requested\":{},"
-                "\"gpu_frame_coverage_complete\":{},\"gpu_drain_succeeded\":{},\"gpu_invalid_frames\":{},"
-                "\"graphics_capture_complete\":{}}}\n",
+                "\"gpu_frame_coverage_complete\":{},\"gpu_drain_succeeded\":{},\"gpu_invalid_frames\":{}}}\n",
                 "capture", complete ? "true" : "false",
                 io_ok ? "false" : "true", event_lines.Records(), event_lines.Dropped(),
                 timeline_lines.Records(), timeline_lines.Dropped(), gpu_lines.Records(), gpu_lines.Dropped(),
@@ -3690,8 +3375,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 graphics_settings_lines ? graphics_settings_lines->Records() : 0,
                 performance_state.GpuFrames(), expected_gpu_frames, performance_state.LastGpuFrame(),
                 config.capture_diagnostics && config.capture_gpu_timings ? "true" : "false",
-                gpu_frame_coverage_complete ? "true" : "false", gpu_drain_succeeded ? "true" : "false", invalid_gpu_frames,
-                graphics_capture_complete ? "true" : "false"));
+                gpu_frame_coverage_complete ? "true" : "false", gpu_drain_succeeded ? "true" : "false", invalid_gpu_frames));
             if (!status_started || !status_written || !complete)
                 record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                     "Diagnostic output incomplete: GPU frame coverage, metadata, write, flush or close failed."));
@@ -3699,8 +3383,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                       std::format("{{\"enhanced_barriers\":{},\"validation_errors\":{},"
                                   "\"validation_message_collection_attempted\":{},"
                                   "\"validation_message_collection_hresult\":{},"
-                                  "\"last_tick\":{},\"typed_vfx_events_received\":{},"
-                                  "\"typed_vfx_persistent_peak\":{},"
+                                  "\"last_tick\":{},"
                                   "\"typed_vfx_ground_peak\":{},"
                                   "\"typed_vfx_ground_submitted_total\":{},"
                                   "\"typed_vfx_flash_peak\":{},"
@@ -3751,7 +3434,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                   enhanced ? "true" : "false", validation_errors,
                                   validation_status.message_collection_attempted ? "true" : "false",
                                   validation_status.message_collection_hresult, last_tick,
-                                  typed_vfx_events_received, typed_vfx_persistent_peak,
                                   typed_vfx_ground_peak, typed_vfx_ground_submitted_total,
                                   typed_vfx_flash_peak, typed_vfx_flash_submitted_total,
                                   runtime_detail::kVfxWorkspaceSoftBudgetBytes,
@@ -3780,6 +3462,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                   typed_vfx_unsupported_inputs));
         }
 #endif
+        }
+        catch (const std::bad_alloc &)
+        {
+            record_thread_failure(Result::Failure(ErrorCode::TaskFailed, "hs_runtime", "Out of memory"));
+        }
     });
 
     // Renderer initialization may call DXGI with this HWND from the render
@@ -3835,7 +3522,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 
     auto simulation_ports = channels.ForSimulation();
     const SettingsData initial_projection_settings = settings;
-    std::jthread simulation_thread([&, simulation_ports, initial_projection_settings](std::stop_token) mutable {
+    std::jthread simulation_thread;
+    try
+    {
+    simulation_thread = std::jthread([&, simulation_ports, initial_projection_settings](std::stop_token) mutable {
         auto &channels = simulation_ports;
         SetThreadName(L"HS Simulation");
         GameSimulation simulation;
@@ -4116,13 +3806,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
 #else
         constexpr bool smoke_finished = false;
 #endif
-#ifdef HS_DEVELOPMENT_TOOLS
-        if (!config.heartbeat_path.empty())
-        {
-            WriteText(config.heartbeat_path, "{\"tick\":0,\"state\":\"running\"}\n");
-        }
-#endif
-
         while (!channels.stop_requested.load(std::memory_order_acquire))
         {
             const auto native_token = native_input_frame.AwaitSimulation();
@@ -4640,12 +4323,9 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                             catch (const std::bad_alloc &)
                             {
                                 std::move(*slot).Abandon();
-                                if (final_smoke_frame || config.smoke_render_lockstep)
-                                {
-                                    record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                                        "Smoke UI frame could not be prepared."));
-                                    break;
-                                }
+                                record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                                    "UI frame could not be prepared."));
+                                break;
                             }
                             catch (...)
                             {
@@ -4694,16 +4374,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     if (channels.stop_requested.load(std::memory_order_acquire))
                         break;
                 }
-#ifdef HS_DEVELOPMENT_TOOLS
-                if (!config.heartbeat_path.empty() && tick.tick % 60 == 0)
-                {
-                    runtime_detail::DiagnosticScope heartbeat_scope(simulation_work[12], capture_clock);
-                    WriteText(config.heartbeat_path,
-                              std::format("{{\"tick\":{},\"state\":\"running\"}}\n",
-                                          tick.tick));
-                }
-#endif
-
                 iteration_scope.Stop();
 #ifdef HS_DEVELOPMENT_TOOLS
                 if (simulation_tasks)
@@ -4771,14 +4441,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         {
             record_thread_failure(shutdown);
         }
-#ifdef HS_DEVELOPMENT_TOOLS
-        if (!config.heartbeat_path.empty())
-        {
-            WriteText(config.heartbeat_path,
-                      std::format("{{\"tick\":{},\"state\":\"finished\"}}\n",
-                                  channels.completed_tick.load(std::memory_order_acquire)));
-        }
-#endif
         native_input_frame.Cancel();
         finish_simulation();
     });
@@ -4828,48 +4490,39 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         return Result::Success();
     };
     const auto rollback_window_placement = [&] {
-        try
+        // Requested Auto remains Auto in the document, but rollback must restore
+        // the monitor captured before the move, not the new current monitor.
+        GraphicsDisplayId restored_output;
+        if (auto resolved = ResolveGraphicsDisplayOutput(window.Handle(),
+                                                         display_previous_native_output,
+                                                         restored_output); !resolved)
         {
-            // Requested Auto remains Auto in the document, but rollback must restore
-            // the monitor captured before the move, not the new current monitor.
-            GraphicsDisplayId restored_output;
-            if (auto resolved = ResolveGraphicsDisplayOutput(window.Handle(),
-                                                             display_previous_native_output,
-                                                             restored_output); !resolved)
-            {
-                record_thread_failure(resolved);
-                return false;
-            }
-            auto restored_graphics = display_previous_graphics;
-            auto restored_tracking = restored_output;
-            if (auto restored = window.ApplyDisplayPlacement(restored_output,
-                    display_previous_borderless, display_previous_windowed_extent.width,
-                    display_previous_windowed_extent.height); !restored)
-            {
-                record_thread_failure(restored);
-                return false;
-            }
-            window_display_graphics = std::move(restored_graphics);
-            window_native_output = std::move(restored_tracking);
-            windowed_client_extent = display_previous_windowed_extent;
-            window_borderless = display_previous_borderless;
-            if (auto extent = set_desired_client_extent(); !extent)
-            {
-                record_thread_failure(extent);
-                return false;
-            }
-            return true;
-        }
-        catch (const std::bad_alloc &)
-        {
-            record_thread_failure(Result::Failure(ErrorCode::TaskFailed, "hs_runtime",
-                "Display recovery allocation failed."));
+            record_thread_failure(resolved);
             return false;
         }
+        auto restored_graphics = display_previous_graphics;
+        auto restored_tracking = restored_output;
+        if (auto restored = window.ApplyDisplayPlacement(restored_output,
+                display_previous_borderless, display_previous_windowed_extent.width,
+                display_previous_windowed_extent.height); !restored)
+        {
+            record_thread_failure(restored);
+            return false;
+        }
+        window_display_graphics = std::move(restored_graphics);
+        window_native_output = std::move(restored_tracking);
+        windowed_client_extent = display_previous_windowed_extent;
+        window_borderless = display_previous_borderless;
+        if (auto extent = set_desired_client_extent(); !extent)
+        {
+            record_thread_failure(extent);
+            return false;
+        }
+        return true;
     };
     const auto restore_display_mode = [&] {
         if (!rollback_window_placement()) return false;
-        settings_commit.RestorePersistedDisplay();
+        settings_commit.RestoreDisplay(display_previous_graphics);
         display_restoring = true;
         display_generation = 0;
         display_modal_phase.store(GraphicsUiPhase::RestoringDisplay,
@@ -4881,15 +4534,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
     std::shared_ptr<const GraphicsSettingsUiModel> last_renderer_receipt;
     auto last_published_phase = GraphicsUiPhase::Applied;
     bool last_published_pending{}, last_published_save_failure{};
-    std::optional<GraphicsSettingsAck> deferred_settings_ack;
     auto settings_request_deadline = std::chrono::steady_clock::time_point{};
-    std::ofstream main_tasks_file;
-    std::optional<runtime_detail::DiagnosticLog> main_tasks;
-    std::string main_task_row;
-    runtime_detail::DiagnosticSample previous_main_log{};
-    std::uint64_t main_iteration{}, previous_wait_begin{}, previous_wait_end{};
-    DWORD previous_wait_result{WAIT_TIMEOUT}, previous_wait_timeout{INFINITE};
-    bool previous_wait_input_gated{};
     if (capture_clock)
     {
         main_tasks_file.open(config.artifact_directory / "main_tasks.csv", std::ios::binary);
@@ -4936,26 +4581,14 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             ui_command_queue_full = false;
         }
         audio.SetBackgroundMuted(GetForegroundWindow() != window.Handle());
-        bool presentation_settings_changed = std::exchange(ui_click_allocation_failed, false);
+        bool presentation_settings_changed = false;
         GraphicsSettingsAck settings_ack;
-        while (deferred_settings_ack || channels.renderer_settings_acks.TryPop(settings_ack))
+        while (channels.renderer_settings_acks.TryPop(settings_ack))
         {
-            if (deferred_settings_ack) settings_ack = *deferred_settings_ack;
             const auto display_ack = display_generation != 0 &&
                                      settings_ack.generation == display_generation;
             const auto recovery_ack = settings_commit.IsRecovering();
-            GraphicsSettingsCommit::AckOutcome outcome;
-            try { outcome = settings_commit.Acknowledge(settings_ack); }
-            catch (const std::bad_alloc &)
-            {
-                // The renderer already finished reading this packet. Retain its
-                // receipt and ownership until a complete document can be restored.
-                deferred_settings_ack = settings_ack;
-                settings_commit.MarkTimedOut();
-                graphics_ui_phase.store(GraphicsUiPhase::ApplyFailed, std::memory_order_release);
-                break;
-            }
-            deferred_settings_ack.reset();
+            const auto outcome = settings_commit.Acknowledge(settings_ack);
             if (outcome == GraphicsSettingsCommit::AckOutcome::Ignored)
                 continue;
             presentation_settings_changed = true;
@@ -5040,10 +4673,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
         bool audio_settings_changed{};
         while (channels.ui_commands.TryPop(ui_command))
         {
-            try
+            switch (ui_command.kind)
             {
-                switch (ui_command.kind)
-                {
                 case UiCommandKind::SetBorderless:
                     if (display_modal_phase.load(std::memory_order_acquire) ==
                         GraphicsUiPhase::Applied)
@@ -5104,12 +4735,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     window.CancelSkillRebind();
                     channels.pending_rebind_slot.store(0xFF, std::memory_order_release);
                     break;
-                }
-            }
-            catch (const std::bad_alloc &)
-            {
-                graphics_ui_phase.store(GraphicsUiPhase::ApplyFailed, std::memory_order_release);
-                presentation_settings_changed = true;
             }
         }
         if (audio_settings_changed)
@@ -5167,10 +4792,8 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                                           std::memory_order_release);
             presentation_settings_changed = true;
         }
-        if (!settings_commit.HasPending() && settings_commit.HasUnsentEdits() && !settings_commit.PreparationFailed())
+        if (!settings_commit.HasPending() && settings_commit.HasUnsentEdits())
         {
-            try
-            {
                 const auto &requested = settings_commit.ApplyTargetGraphics();
                 const auto target_borderless = settings_commit.ApplyTargetEffective().borderless;
                 GraphicsDisplayId native_output;
@@ -5231,39 +4854,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                     }
                     presentation_settings_changed = true;
                 }
-            }
-            catch (const std::bad_alloc &)
-            {
-                settings_commit.SuspendUnsentAfterAllocationFailure();
-                const auto modal = display_modal_phase.load(std::memory_order_acquire);
-                if (modal == GraphicsUiPhase::Pending || modal == GraphicsUiPhase::RestoringDisplay)
-                {
-                    (void)rollback_window_placement();
-                    display_modal_phase.store(GraphicsUiPhase::Applied, std::memory_order_release);
-                }
-                graphics_ui_phase.store(GraphicsUiPhase::ApplyFailed, std::memory_order_release);
-                presentation_settings_changed = true;
-            }
         }
         if (presentation_settings_changed &&
             !channels.presentation_settings.TryPush(settings_commit.UiInput()))
             record_thread_failure(Result::Failure(
                 ErrorCode::InvalidState, "hs_runtime",
                 "Presentation settings queue capacity exceeded."));
-        std::optional<GraphicsSettingsCommitRequest> next_settings_request;
-        try { next_settings_request = settings_commit.NextRequest(); }
-        catch (const std::bad_alloc &)
-        {
-            settings_commit.SuspendUnsentAfterAllocationFailure();
-            const auto modal = display_modal_phase.load(std::memory_order_acquire);
-            if (modal == GraphicsUiPhase::Pending || modal == GraphicsUiPhase::RestoringDisplay)
-            {
-                (void)rollback_window_placement();
-                display_modal_phase.store(GraphicsUiPhase::Applied, std::memory_order_release);
-            }
-            graphics_ui_phase.store(GraphicsUiPhase::ApplyFailed, std::memory_order_release);
-            presentation_settings_changed = true;
-        }
+        const auto next_settings_request = settings_commit.NextRequest();
         if (const auto &request = next_settings_request)
         {
             if (!channels.renderer_settings.TryPush(*request))
@@ -5298,14 +4895,11 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             phase != last_published_phase || pending != last_published_pending ||
             save_failure != last_published_save_failure)
         {
-            try
-            {
                 auto model = receipt ? std::make_shared<GraphicsSettingsUiModel>(*receipt)
                                      : std::make_shared<GraphicsSettingsUiModel>();
                 model->requested = settings_commit.Requested().graphics;
                 model->pending = pending || settings_commit.HasUnsentEdits();
                 const auto state = settings_commit.TimedOut() ? "적용 시간이 초과되어 장치 작업 완료 후 복원합니다"
-                    : settings_commit.PreparationFailed() ? "메모리가 부족해 이전 설정을 유지합니다"
                     : settings_commit.IsRecovering() ? "마지막으로 저장한 설정을 복원하는 중입니다"
                     : phase == GraphicsUiPhase::Requested ? "설정 변경을 요청했습니다"
                     : phase == GraphicsUiPhase::Pending ? "설정을 적용하는 중입니다"
@@ -5316,18 +4910,10 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                 model->transaction_state = std::string(state) + (save_failure ? " · 저장 실패: 적용 상태는 유지됩니다" : "");
                 if (receipt && receipt->generation != settings_commit.CommittedGeneration())
                     model->transaction_state += " · 새 적용 결과를 기다리는 중입니다";
-                if (settings_commit.FollowupRejected()) model->transaction_state += " · 함께 사용할 수 없는 변경은 취소했습니다";
                 ui_click_document = settings_commit.Requested();
                 ui_click_settings = settings_commit.UiInput();
                 ui_click_model = *model;
                 channels.presentation_graphics_ui.store(std::move(model), std::memory_order_release);
-            }
-            catch (const std::bad_alloc &)
-            {
-#ifdef HS_DEVELOPMENT_TOOLS
-                OutputDebugStringA("Settings UI snapshot allocation failed; previous immutable model retained.\n");
-#endif
-            }
             last_renderer_receipt = receipt;
             last_published_phase = phase;
             last_published_pending = pending;
@@ -5419,7 +5005,7 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             const bool messages = runtime_detail::PeekMainMessage(pending, !input_gated, PM_NOREMOVE);
             return messages || channels.stop_requested.load(std::memory_order_acquire) ||
                 channels.sim_audio_events.Size() != 0 ||
-                (!deferred_settings_ack && channels.renderer_settings_acks.Size() != 0) ||
+                channels.renderer_settings_acks.Size() != 0 ||
                 channels.ui_commands.Size() != 0 || native_input_frame.MainWorkPending() ||
                 channels.renderer_graphics_ui.load(std::memory_order_acquire) != last_renderer_receipt;
         };
@@ -5451,6 +5037,19 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             record_thread_failure(Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                 std::format("Main wake event failed: {}.", error)));
     }
+    if (ui_callback_out_of_memory) throw std::bad_alloc{};
+    }
+    catch (const std::bad_alloc &)
+    {
+        record_thread_failure(Result::Failure(ErrorCode::TaskFailed, "hs_runtime", "Out of memory"));
+    }
+    window.StopInput();
+    request_stop();
+    if (simulation_thread.joinable()) simulation_thread.join();
+    else finish_simulation();
+    // GraphicsSettingsCommit owns any in-flight request snapshot. Join before
+    // that owner can be destroyed, including shutdown with an unconsumed ack.
+    render_thread.join();
     if (main_tasks)
     {
         const auto finished = main_tasks->Finish();
@@ -5476,12 +5075,6 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
             static_cast<unsigned>(failure.play_result), failure.session_id, failure.tick, static_cast<unsigned>(failure.phase), failure.stage,
             main_audio->HasPendingMusic(), main_audio->HasPendingAmbience(), main_audio->ActiveMusic().value, main_audio->ActiveAmbience().value));
     }
-    window.StopInput();
-    request_stop();
-    simulation_thread.join();
-    // GraphicsSettingsCommit owns any in-flight request snapshot. Join before
-    // that owner can be destroyed, including shutdown with an unconsumed ack.
-    render_thread.join();
     audio.Shutdown();
 
     if (!config.smoke)
@@ -5534,13 +5127,13 @@ ApplicationResult RunApplication(const ApplicationConfig &config)
                               "\"assertions_passed\":{},"
                               "\"tick\":{},\"checksum\":{},\"rendered_frames\":{},"
                               "\"rendered_particles\":{},"
-                              "\"content_hash\":{},"
+                              "\"content_hash\":{},\"generation_id\":\"{}\","
                               "\"worker_count\":{},"
                               "\"dropped_input_edges\":{},\"dropped_presentation_events\":{},"
                               "\"particle_effects_hash\":{},"
                               "\"user_review\":\"awaiting\"}}\n",
                               valid ? "true" : "false", valid ? "true" : "false", final_tick,
-                              checksum, rendered_frames, rendered_particles, content_hash,
+                              checksum, rendered_frames, rendered_particles, content_hash, deployment_id,
                               task_system.WorkerCount(),
                               channels.dropped_input_edges.load(),
                               channels.dropped_presentation_events.load(),

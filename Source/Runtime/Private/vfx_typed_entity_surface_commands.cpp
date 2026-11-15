@@ -3,29 +3,11 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <string_view>
 
 namespace hs::runtime_detail
 {
 namespace
 {
-constexpr std::uint32_t Hash32(std::string_view value) noexcept
-{
-    std::uint32_t result=2166136261u;
-    for(const unsigned char c:value)result=(result^c)*16777619u;
-    return result;
-}
-constexpr std::uint64_t Hash64(std::string_view value) noexcept
-{
-    std::uint64_t result=14695981039346656037ull;
-    for(const unsigned char c:value)result=(result^c)*1099511628211ull;
-    return result;
-}
-constexpr auto kPhase=Hash64("particle.boss.phase_change");
-constexpr auto kDeath=Hash64("particle.boss.death");
-constexpr auto kPersistent=Hash64("persistent.boss.phase_transition_invulnerable");
-constexpr auto kContext=Hash32("PresentationContextPayload");
-constexpr auto kEntity=Hash32("EntityAttachmentPayload");
 constexpr std::uint64_t kEnemyRenderPrefix = 2ull << 60;
 
 bool Finite(Float3 v) noexcept
@@ -52,18 +34,17 @@ bool FinitePose(const AnimationPoseRef &pose) noexcept
         std::isfinite(pose.upper_body_weight) && pose.upper_body_weight >= 0 && pose.upper_body_weight <= 1;
 }
 void Append(const VfxEntitySurfaceEffectRecipe &effect,
-            std::span<const VfxEntitySurfaceRecipe> outputs, bool persistent,
+            std::span<const VfxEntitySurfaceRecipe> outputs,
             VfxQuality quality, Tick started, Tick until, double current,
             const VfxEntitySurfaceCommand &owner, std::vector<VfxEntitySurfaceCommand> &result)
 {
-    if (effect.outputs.first > outputs.size() || effect.outputs.count > outputs.size() - effect.outputs.first ||
-        until <= started || current < started || current >= until ||
+    if (until <= started || current < started || current >= until ||
         static_cast<std::uint32_t>(quality) > 2) return;
     const auto age = static_cast<double>(current - started) / static_cast<double>(until - started);
     for (std::size_t i = effect.outputs.first; i < static_cast<std::size_t>(effect.outputs.first) + effect.outputs.count; ++i)
     {
         const auto &recipe = outputs[i];
-        if (recipe.persistent != persistent || static_cast<std::uint32_t>(quality) < recipe.min_quality ||
+        if (static_cast<std::uint32_t>(quality) < recipe.min_quality ||
             age < recipe.knot_start || age >= recipe.knot_end) continue;
         auto command=owner;
         command.owner_started_tick=started; command.owner_until_tick=until; command.current_tick=current;
@@ -94,9 +75,6 @@ void AppendVfxTypedEntitySurfaceCommands(
     std::span<const VfxEntitySurfacePersistentCapture> persistent, double current_tick,
     double death_current_tick, std::vector<VfxEntitySurfaceCommand> &result)
 {
-    const auto original_size = result.size();
-    try
-    {
     for (const auto &capture : events)
     {
         const auto &event = capture.input;
@@ -105,11 +83,11 @@ void AppendVfxTypedEntitySurfaceCommands(
             event.effect_handle == 0 || event.effect_handle > image.entity_surface_effect_recipes.size() || !BossInstance(capture.instance) ||
             capture.instance.stable_id != (kEnemyRenderPrefix | context->owner_id)) continue;
         const auto &effect=image.entity_surface_effect_recipes[event.effect_handle-1];
-        const bool death=effect.effect_id==kDeath;
-        const float seconds=death?2.0f:1.5f;
-        if(!effect.identity_unique||(effect.effect_id!=kPhase&&!death)||
-            effect.input_mode!=0||effect.timing_kind!=0||effect.payload_kind!=kContext||effect.seconds!=seconds||
-            event.event_tick > std::numeric_limits<Tick>::max() - static_cast<Tick>(seconds * 60)) continue;
+        if (effect.route != VfxEntitySurfaceRoute::EventPhase &&
+            effect.route != VfxEntitySurfaceRoute::EventDeath) continue;
+        const bool death = effect.route == VfxEntitySurfaceRoute::EventDeath;
+        const float seconds = effect.seconds;
+        if (event.event_tick > std::numeric_limits<Tick>::max() - static_cast<Tick>(seconds * 60)) continue;
         // Named clips are self-contained in the actual RenderInstance; legacy
         // boss poses require the captured snapshot pose, including blends.
         if (death && (!capture.retained_instance ||
@@ -128,7 +106,7 @@ void AppendVfxTypedEntitySurfaceCommands(
         const double event_current_tick = death
             ? std::max(current_tick, death_current_tick)
             : current_tick;
-        Append(effect,image.entity_surface_recipes,false,event.quality,event.event_tick,
+        Append(effect,image.entity_surface_recipes,event.quality,event.event_tick,
                event.event_tick+static_cast<Tick>(seconds*60),event_current_tick,owner,result);
     }
     for (const auto &capture : persistent)
@@ -140,21 +118,14 @@ void AppendVfxTypedEntitySurfaceCommands(
             input.source_visual_kind != static_cast<std::uint8_t>(PersistentVfxKind::BossPhaseTransition) ||
             input.effect_handle == 0 || input.effect_handle > image.entity_surface_effect_recipes.size()) continue;
         const auto &effect=image.entity_surface_effect_recipes[input.effect_handle-1];
-        if(!effect.identity_unique||effect.effect_id!=kPersistent)continue;
+        if (effect.route != VfxEntitySurfaceRoute::PersistentTransition) continue;
         if (capture.owner_until_tick <= capture.owner_started_tick || current_tick < capture.owner_started_tick ||
             current_tick >= capture.owner_until_tick) continue;
-        if(effect.input_mode!=1||effect.timing_kind!=1||effect.payload_kind!=kEntity)continue;
         VfxEntitySurfaceCommand owner;
         owner.render_instance_id = entity->render_instance_id; owner.owner_id = input.stable_id;
         owner.status_episode_generation = input.status_episode_generation; owner.stable_seed = input.stable_seed;
-        Append(effect,image.entity_surface_recipes,true,input.quality,capture.owner_started_tick,
+        Append(effect,image.entity_surface_recipes,input.quality,capture.owner_started_tick,
                capture.owner_until_tick,current_tick,owner,result);
-    }
-    }
-    catch (...)
-    {
-        result.resize(original_size);
-        throw;
     }
 }
 } // namespace hs::runtime_detail

@@ -35,25 +35,23 @@ namespace vfx_retained_size
 inline std::size_t RingGapPayload(const VfxPayload &payload) noexcept
 {
     const auto *gaps = std::get_if<VfxRingGapsPayload>(&payload);
-    return gaps ? Vector(gaps->gap_angles_degrees) : 0;
+    return gaps ? Multiply(gaps->gap_angles_degrees.size(), sizeof(float)) : 0;
 }
 
 inline std::size_t RingGapPayload(const VfxEventInput &input) noexcept
 { return RingGapPayload(input.payload); }
 } // namespace vfx_retained_size
 
-// Soft growth allowance for selected cosmetic CPU rows, including retained/queued capacity.
+// Soft limit for logical retained and frame output bytes, not allocator capacity or process RAM.
 // Authoritative warnings keep their existing path and can grow independently.
-// shortcut: selected cosmetic flash/mote rows use this allowance; other activation/native profiles still need fanout admission.
 inline constexpr std::size_t kVfxWorkspaceSoftBudgetBytes = 64u * 1024 * 1024;
 
 inline std::size_t AvailableVfxFlashAppendRows(std::size_t held_bytes,
     std::size_t budget_bytes, const std::vector<VfxFlashSpawnInput> &output) noexcept
 {
-    const auto reserved_rows = output.capacity() - output.size();
-    if (held_bytes >= budget_bytes) return reserved_rows;
-    return vfx_retained_size::Add(reserved_rows,
-        (budget_bytes - held_bytes) / sizeof(VfxFlashSpawnInput));
+    const auto held = vfx_retained_size::Add(held_bytes,
+        vfx_retained_size::Multiply(output.size(), sizeof(VfxFlashSpawnInput)));
+    return held < budget_bytes ? (budget_bytes - held) / sizeof(VfxFlashSpawnInput) : 0;
 }
 
 struct RetainedVfxEntitySurfaceCapture
@@ -89,10 +87,9 @@ class ActiveEffectStore
     };
     struct FrameStorage
     {
-        // row_bytes == 0 disables this frame-fanout estimate for the profile.
+        // row_bytes == 0 excludes this profile from frame-output accounting.
         std::size_t row_bytes{};
-        // Caller-owned current capacity and already-reserved base demand.
-        std::size_t capacity_rows{};
+        // Outputs required by the existing active rows.
         std::size_t base_rows{};
     };
     struct ProfileAdmission
@@ -102,6 +99,7 @@ class ActiveEffectStore
         std::vector<std::size_t> &order_scratch;
         std::size_t requested_cosmetic_memberships{};
         std::size_t admitted_cosmetic_memberships{};
+        std::size_t admitted_bytes{};
         std::array<FrameStorage, static_cast<std::size_t>(Profile::Count)> frame_storage{};
         std::array<std::size_t, static_cast<std::size_t>(Profile::Count)> reserved_frame_rows{};
         FrameStorage distortion_gap_storage{};
@@ -113,6 +111,18 @@ class ActiveEffectStore
         FrameStorage surface_capture_storage{};
         FrameStorage surface_capture_input_storage{};
         std::size_t reserved_surface_captures{};
+
+        [[nodiscard]] std::size_t FrameBaseBytes() const noexcept
+        {
+            using namespace vfx_retained_size;
+            std::size_t bytes{};
+            for (const auto &frame : frame_storage)
+                bytes = vfx_retained_size::Add(bytes, Multiply(frame.base_rows, frame.row_bytes));
+            for (const auto *frame : {&ground_gap_storage, &distortion_gap_storage,
+                    &ribbon_output_storage, &surface_capture_storage, &surface_capture_input_storage})
+                bytes = vfx_retained_size::Add(bytes, Multiply(frame->base_rows, frame->row_bytes));
+            return bytes;
+        }
     };
     struct PreparedAppendBatch;
 
@@ -131,8 +141,8 @@ class ActiveEffectStore
         static_assert(std::is_nothrow_move_constructible_v<VfxEventInput>);
         // Index insertion may allocate; all remaining publication steps cannot.
         event_rows_.try_emplace(key, row);
-        rows_payload_capacity_bytes_ = vfx_retained_size::Add(
-            rows_payload_capacity_bytes_, vfx_retained_size::RingGapPayload(staged));
+        rows_payload_bytes_ = vfx_retained_size::Add(
+            rows_payload_bytes_, vfx_retained_size::RingGapPayload(staged));
         rows_.push_back(std::move(staged));
         profile_masks_.push_back(0);
         binding_indices_.push_back(VfxEventView::kNoBinding);
@@ -240,30 +250,10 @@ class ActiveEffectStore
             {
                 const auto bound_index = bound_row_count_;
                 const bool append_bound = bound_index == bound_rows_.size();
-                const auto old_bytes = append_bound ? 0 :
-                    vfx_retained_size::RingGapPayload(bound_rows_[bound_index]);
-                bool keep{};
-                try
-                {
-                    if (append_bound) bound_rows_.push_back(rows_[row]);
-                    else bound_rows_[bound_index] = rows_[row];
-                    keep = refresh(bound_rows_[bound_index]);
-                }
-                catch (...)
-                {
-                    if (append_bound ? bound_rows_.size() > bound_index : true)
-                    {
-                        bound_payload_capacity_bytes_ -= old_bytes;
-                        bound_payload_capacity_bytes_ = vfx_retained_size::Add(
-                            bound_payload_capacity_bytes_,
-                            vfx_retained_size::RingGapPayload(bound_rows_[bound_index]));
-                    }
-                    throw;
-                }
-                bound_payload_capacity_bytes_ -= old_bytes;
-                bound_payload_capacity_bytes_ = vfx_retained_size::Add(
-                    bound_payload_capacity_bytes_,
-                    vfx_retained_size::RingGapPayload(bound_rows_[bound_index]));
+                if (append_bound) bound_rows_.push_back(rows_[row]);
+                else bound_rows_[bound_index] = rows_[row];
+                // Refresh failure stops the render thread before any binding is published.
+                const bool keep = refresh(bound_rows_[bound_index]);
                 if (keep) binding = static_cast<Row>(bound_row_count_++);
                 else binding = kDroppedBinding;
                 bound_row_ids_.push_back(row);
@@ -294,87 +284,6 @@ class ActiveEffectStore
             RemoveMembership(profile, row);
             return true;
         });
-    }
-
-    void CopyProfileForRebind(Profile profile, std::vector<VfxEventInput> &scratch) const
-    {
-        const auto &refs = profiles_[static_cast<std::size_t>(profile)];
-        scratch.clear();
-        scratch.reserve(refs.size());
-        for (const auto row : refs) scratch.push_back(rows_[row]);
-    }
-
-    void RebindRows(auto &&rebind, std::vector<RetainedVfxEntitySurfaceCapture> &captures)
-    {
-        std::vector<std::uint8_t> live(rows_.size(), 1);
-        for (std::size_t i = 0; i < rows_.size(); ++i)
-        {
-            const auto old_bytes = vfx_retained_size::RingGapPayload(rows_[i]);
-            try
-            {
-                if (!rebind(rows_[i])) live[i] = 0;
-            }
-            catch (...)
-            {
-                rows_payload_capacity_bytes_ -= old_bytes;
-                rows_payload_capacity_bytes_ = vfx_retained_size::Add(
-                    rows_payload_capacity_bytes_, vfx_retained_size::RingGapPayload(rows_[i]));
-                throw;
-            }
-            rows_payload_capacity_bytes_ -= old_bytes;
-            rows_payload_capacity_bytes_ = vfx_retained_size::Add(
-                rows_payload_capacity_bytes_, vfx_retained_size::RingGapPayload(rows_[i]));
-        }
-        for (auto &profile : profiles_)
-            std::erase_if(profile, [&](Row row) { return row >= live.size() || !live[row]; });
-        for (std::size_t i = 0; i < rows_.size(); ++i)
-            if (!live[i] && profile_masks_[i])
-            {
-                profile_masks_[i] = 0;
-                ++unreferenced_rows_;
-            }
-        std::erase_if(captures, [&](const auto &capture) {
-            return capture.row >= live.size() || !live[capture.row];
-        });
-        index_dirty_ = true;
-        BeginFrameBindings();
-        Compact(captures);
-    }
-
-    void RebindProfile(Profile profile, std::span<const VfxEventInput> rebound)
-    {
-        auto &refs = profiles_[static_cast<std::size_t>(profile)];
-        std::vector<Row> surviving;
-        surviving.reserve(rebound.size());
-        const auto bit = ProfileBit(profile);
-        for (const auto row : refs) RemoveMembership(profile, row);
-        for (const auto &input : rebound)
-            for (const auto row : refs)
-                if (SameEpisode(rows_[row], input))
-                {
-                    const auto old_bytes = vfx_retained_size::RingGapPayload(rows_[row]);
-                    try { rows_[row] = input; }
-                    catch (...)
-                    {
-                        rows_payload_capacity_bytes_ -= old_bytes;
-                        rows_payload_capacity_bytes_ = vfx_retained_size::Add(
-                            rows_payload_capacity_bytes_, vfx_retained_size::RingGapPayload(rows_[row]));
-                        throw;
-                    }
-                    rows_payload_capacity_bytes_ -= old_bytes;
-                    rows_payload_capacity_bytes_ = vfx_retained_size::Add(
-                        rows_payload_capacity_bytes_, vfx_retained_size::RingGapPayload(rows_[row]));
-                    if (!(profile_masks_[row] & bit))
-                    {
-                        surviving.push_back(row);
-                        if (!profile_masks_[row]) --unreferenced_rows_;
-                        profile_masks_[row] |= bit;
-                    }
-                    break;
-                }
-        refs.swap(surviving);
-        BeginFrameBindings();
-        RebuildIndex();
     }
 
     void Compact(std::span<RetainedVfxEntitySurfaceCapture> captures = {})
@@ -410,10 +319,10 @@ class ActiveEffectStore
                     const auto old_destination = vfx_retained_size::RingGapPayload(rows_[next]);
                     const auto old_source = vfx_retained_size::RingGapPayload(rows_[i]);
                     rows_[next] = std::move(rows_[i]);
-                    rows_payload_capacity_bytes_ -= old_destination;
-                    rows_payload_capacity_bytes_ -= old_source;
-                    rows_payload_capacity_bytes_ = vfx_retained_size::Add(
-                        rows_payload_capacity_bytes_,
+                    rows_payload_bytes_ -= old_destination;
+                    rows_payload_bytes_ -= old_source;
+                    rows_payload_bytes_ = vfx_retained_size::Add(
+                        rows_payload_bytes_,
                         vfx_retained_size::Add(vfx_retained_size::RingGapPayload(rows_[next]),
                             vfx_retained_size::RingGapPayload(rows_[i])));
                     profile_masks_[next] = profile_masks_[i];
@@ -430,7 +339,7 @@ class ActiveEffectStore
         for (std::size_t i = next; i < rows_.size(); ++i)
             removed_payload_bytes = vfx_retained_size::Add(
                 removed_payload_bytes, vfx_retained_size::RingGapPayload(rows_[i]));
-        rows_payload_capacity_bytes_ -= removed_payload_bytes;
+        rows_payload_bytes_ -= removed_payload_bytes;
         rows_.resize(next);
         profile_masks_.resize(next);
         binding_indices_.resize(next);
@@ -450,45 +359,38 @@ class ActiveEffectStore
     {
         rows_.clear(); profile_masks_.clear(); event_rows_.clear();
         binding_indices_.clear(); bound_rows_.clear(); bound_row_ids_.clear();
-        rows_payload_capacity_bytes_ = bound_payload_capacity_bytes_ = 0;
+        rows_payload_bytes_ = 0;
         bound_row_count_ = 0;
         unreferenced_rows_ = 0;
         scratch_rows_.clear(); live_rows_.clear();
         for (auto &profile : profiles_) profile.clear();
         index_dirty_ = false;
     }
-    void Swap(ActiveEffectStore &other) noexcept
-    {
-        rows_.swap(other.rows_); event_rows_.swap(other.event_rows_);
-        profiles_.swap(other.profiles_);
-        profile_masks_.swap(other.profile_masks_);
-        binding_indices_.swap(other.binding_indices_);
-        bound_rows_.swap(other.bound_rows_); bound_row_ids_.swap(other.bound_row_ids_);
-        std::swap(bound_row_count_, other.bound_row_count_);
-        std::swap(unreferenced_rows_, other.unreferenced_rows_);
-        std::swap(rows_payload_capacity_bytes_, other.rows_payload_capacity_bytes_);
-        std::swap(bound_payload_capacity_bytes_, other.bound_payload_capacity_bytes_);
-        scratch_rows_.swap(other.scratch_rows_); live_rows_.swap(other.live_rows_);
-        std::swap(index_dirty_, other.index_dirty_);
-    }
     [[nodiscard]] std::size_t Size() const noexcept { return rows_.size(); }
+    [[nodiscard]] std::size_t LogicalBytes() const noexcept
+    {
+        using namespace vfx_retained_size;
+        auto bytes = vfx_retained_size::Add(Multiply(rows_.size(),
+            sizeof(VfxEventInput) + sizeof(std::uint16_t) + sizeof(Row)), rows_payload_bytes_);
+        for (const auto &profile : profiles_) bytes = vfx_retained_size::Add(bytes, Multiply(profile.size(), sizeof(Row)));
+        return bytes;
+    }
     [[nodiscard]] std::size_t LogicalCapacityBytes() const noexcept
     {
         using namespace vfx_retained_size;
         auto bytes = vfx_retained_size::Add(Vector(rows_),
             vfx_retained_size::Add(Vector(profile_masks_), Vector(binding_indices_)));
         bytes = vfx_retained_size::Add(bytes, Vector(bound_rows_));
-        bytes = vfx_retained_size::Add(bytes, rows_payload_capacity_bytes_);
-        bytes = vfx_retained_size::Add(bytes, bound_payload_capacity_bytes_);
+        bytes = vfx_retained_size::Add(bytes, rows_payload_bytes_);
+        for (const auto &row : bound_rows_)
+            bytes = vfx_retained_size::Add(bytes, RingGapPayload(row));
         bytes = vfx_retained_size::Add(bytes,
             vfx_retained_size::Add(Vector(bound_row_ids_),
                 vfx_retained_size::Add(Vector(scratch_rows_), Vector(live_rows_))));
         for (const auto &profile : profiles_)
             bytes = vfx_retained_size::Add(bytes, Vector(profile));
-        return vfx_retained_size::Add(bytes, HashTable(event_rows_));
+        return vfx_retained_size::Add(bytes, MapValues(event_rows_));
     }
-    [[nodiscard]] std::size_t OwnedPayloadCapacityBytes() const noexcept
-    { return vfx_retained_size::Add(rows_payload_capacity_bytes_, bound_payload_capacity_bytes_); }
 
   private:
     friend struct VfxSessionState;
@@ -587,7 +489,7 @@ class ActiveEffectStore
     std::vector<Row> binding_indices_, bound_row_ids_;
     std::vector<VfxEventInput> bound_rows_;
     std::size_t bound_row_count_{}, unreferenced_rows_{};
-    std::size_t rows_payload_capacity_bytes_{}, bound_payload_capacity_bytes_{};
+    std::size_t rows_payload_bytes_{};
     bool index_dirty_{};
 };
 
@@ -640,7 +542,6 @@ struct ActiveEffectStore::PreparedAppendBatch
         new_index_.clear();
         ground_replacements_.clear();
         removed_ground_rows_.clear();
-        new_rows_payload_capacity_bytes_ = 0;
         for (auto &profile : profile_additions_) profile.clear();
         base_profile_sizes_.fill(0);
         base_rows_ = base_index_size_ = 0;
@@ -662,7 +563,6 @@ struct ActiveEffectStore::PreparedAppendBatch
     std::array<std::vector<Row>, static_cast<std::size_t>(Profile::Count)> profile_additions_;
     std::array<std::size_t, static_cast<std::size_t>(Profile::Count)> base_profile_sizes_{};
     std::size_t base_rows_{}, base_index_size_{};
-    std::size_t new_rows_payload_capacity_bytes_{};
     const ActiveEffectStore *owner_{};
     bool ready_{};
 
@@ -672,32 +572,28 @@ struct ActiveEffectStore::PreparedAppendBatch
         using namespace vfx_retained_size;
         auto bytes = vfx_retained_size::Add(Vector(new_rows_),
             vfx_retained_size::Add(Vector(new_masks_), Vector(pending_rows_)));
-        bytes = vfx_retained_size::Add(bytes, new_rows_payload_capacity_bytes_);
+        for (const auto &row : new_rows_)
+            bytes = vfx_retained_size::Add(bytes, RingGapPayload(row));
         bytes = vfx_retained_size::Add(bytes, Vector(pending_slots_));
         bytes = vfx_retained_size::Add(bytes,
             vfx_retained_size::Add(Vector(request_pending_indices_), Vector(cosmetic_memberships_)));
-        bytes = vfx_retained_size::Add(bytes, HashTable(new_index_));
+        bytes = vfx_retained_size::Add(bytes, MapValues(new_index_));
         bytes = vfx_retained_size::Add(bytes,
             vfx_retained_size::Add(Vector(ground_replacements_), Vector(removed_ground_rows_)));
         for (const auto &profile : profile_additions_)
             bytes = vfx_retained_size::Add(bytes, Vector(profile));
         return bytes;
     }
-    [[nodiscard]] std::size_t OwnedPayloadCapacityBytes() const noexcept
-    { return new_rows_payload_capacity_bytes_; }
 };
 
 inline bool ActiveEffectStore::PrepareAppendBatch(std::span<const AppendRequest> requests,
     PreparedAppendBatch &prepared, ProfileAdmission *admission)
 {
-    const auto old_owner_bytes = LogicalCapacityBytes();
-    const auto old_prepared_bytes = prepared.LogicalCapacityBytes();
-    const auto old_order_bytes = admission
-        ? vfx_retained_size::Vector(admission->order_scratch) : 0;
     if (admission)
     {
         admission->requested_cosmetic_memberships = 0;
         admission->admitted_cosmetic_memberships = 0;
+        admission->admitted_bytes = 0;
         admission->reserved_frame_rows.fill(0);
         admission->reserved_distortion_gaps = 0;
         admission->reserved_ground_gaps = 0;
@@ -986,95 +882,49 @@ inline bool ActiveEffectStore::PrepareAppendBatch(std::span<const AppendRequest>
         rows[pool] += count;
         return true;
     };
-    using CapacityProjection = std::pair<std::size_t, bool>;
-    const auto add_projection = [](CapacityProjection &total, CapacityProjection part) {
+    using LogicalCost = std::pair<std::size_t, bool>;
+    const auto add_cost = [](LogicalCost &total, LogicalCost part) {
         total.second |= part.second || part.first > std::numeric_limits<std::size_t>::max() - total.first;
         total.first = vfx_retained_size::Add(total.first, part.first);
     };
-    const auto product_projection = [](std::size_t count, std::size_t item_bytes) -> CapacityProjection {
+    const auto product_cost = [](std::size_t count, std::size_t item_bytes) -> LogicalCost {
         return {vfx_retained_size::Multiply(count, item_bytes),
             count && item_bytes > std::numeric_limits<std::size_t>::max() / count};
     };
-    const auto vector_growth = [&](std::size_t capacity, std::size_t current_size,
-        std::size_t additional, std::size_t max_size, std::size_t item_bytes) {
-        if (additional > max_size - current_size)
-            throw std::length_error("retained VFX capacity overflow");
-        const auto needed = current_size + additional;
-        if (needed <= capacity) return std::size_t{};
-        const auto growth = capacity == 0 ? std::size_t{8} :
-            capacity + std::min(max_size - capacity, capacity / 2 + 1);
-        const auto target = std::max(needed, growth);
-        return vfx_retained_size::Multiply(target - capacity, item_bytes);
-    };
-    const auto project_row_growth = [&](std::size_t new_row_count, std::size_t payload_bytes) {
-        CapacityProjection total{};
-        const auto add = [&](std::size_t bytes) { add_projection(total, {bytes, false}); };
-        add(vector_growth(prepared.new_rows_.capacity(), prepared.new_rows_.size(), new_row_count,
-            prepared.new_rows_.max_size(), sizeof(VfxEventInput)));
-        add(vector_growth(prepared.new_masks_.capacity(), prepared.new_masks_.size(), new_row_count,
-            prepared.new_masks_.max_size(), sizeof(std::uint16_t)));
-        add(vector_growth(rows_.capacity(), rows_.size(), new_row_count, rows_.max_size(), sizeof(VfxEventInput)));
-        add(vector_growth(profile_masks_.capacity(), profile_masks_.size(), new_row_count,
-            profile_masks_.max_size(), sizeof(std::uint16_t)));
-        add(vector_growth(binding_indices_.capacity(), rows_.size(), new_row_count,
-            binding_indices_.max_size(), sizeof(std::uint32_t)));
-        const auto &map = prepared.new_index_;
-        if (new_row_count > map.max_size() - map.size())
-            throw std::length_error("retained VFX index overflow");
-        add(vfx_retained_size::Multiply(new_row_count,
-            sizeof(std::pair<const EventKey, Row>) + 3 * sizeof(void *)));
-        add(payload_bytes);
+    const auto row_cost_for = [&](std::size_t new_row_count, std::size_t payload_bytes) {
+        auto total = product_cost(new_row_count,
+            sizeof(VfxEventInput) + sizeof(std::uint16_t) + sizeof(Row));
+        add_cost(total, {payload_bytes, false});
         return total;
     };
-    const auto project_profile_growth = [&](std::size_t profile, std::size_t profile_rows,
+    const auto profile_cost_for = [&](std::size_t profile, std::size_t profile_rows,
         std::size_t frame_rows) {
-        CapacityProjection total{};
-        const auto add = [&](std::size_t bytes) { add_projection(total, {bytes, false}); };
-        const auto removed = profile == static_cast<std::size_t>(Profile::Ground)
-            ? prepared.removed_ground_rows_.size() : 0;
-        const auto retained = profiles_[profile].size() - removed;
-        add(vector_growth(profiles_[profile].capacity(), retained, profile_rows,
-            profiles_[profile].max_size(), sizeof(Row)));
-        const auto &staged = prepared.profile_additions_[profile];
-        add(vector_growth(staged.capacity(), staged.size(), profile_rows,
-            staged.max_size(), sizeof(Row)));
-        if (admission && admission->frame_storage[profile].row_bytes)
+        auto total = product_cost(profile_rows, sizeof(Row));
+        if (admission)
         {
-            const auto &frame = admission->frame_storage[profile];
-            const auto demand = CheckedAdd(frame.base_rows, frame_rows);
-            const auto growth = demand > frame.capacity_rows ? demand - frame.capacity_rows : 0;
-            add_projection(total, product_projection(growth, frame.row_bytes));
+            add_cost(total, product_cost(frame_rows, admission->frame_storage[profile].row_bytes));
+            if (profile == static_cast<std::size_t>(Profile::EntitySurface))
+                for (const auto *frame : {&admission->surface_capture_storage,
+                                          &admission->surface_capture_input_storage})
+                    add_cost(total, product_cost(profile_rows, frame->row_bytes));
         }
-        if (admission && profile == static_cast<std::size_t>(Profile::EntitySurface))
-            for (const auto *frame : {&admission->surface_capture_storage,
-                                      &admission->surface_capture_input_storage})
-            {
-                if (!frame->row_bytes) continue;
-                const auto demand = CheckedAdd(frame->base_rows, profile_rows);
-                const auto growth = demand > frame->capacity_rows ? demand - frame->capacity_rows : 0;
-                add_projection(total, product_projection(growth, frame->row_bytes));
-            }
         return total;
     };
-    const auto project_supplemental_growth = [&](std::size_t pool, std::size_t rows) -> CapacityProjection {
+    const auto supplemental_cost_for = [&](std::size_t pool, std::size_t rows) -> LogicalCost {
         if (!admission) return {};
         const auto &frame = *supplemental_storage[pool];
-        if (!frame.row_bytes) return {};
-        if (frame.base_rows > max_distortion_gap_count ||
-            rows > max_distortion_gap_count - frame.base_rows)
+        if (frame.base_rows > max_distortion_gap_count || rows > max_distortion_gap_count - frame.base_rows)
             return {std::numeric_limits<std::size_t>::max(), true};
-        const auto demand = frame.base_rows + rows;
-        const auto growth = demand > frame.capacity_rows ? demand - frame.capacity_rows : 0;
-        return product_projection(growth, frame.row_bytes);
+        return product_cost(rows, frame.row_bytes);
     };
-    const auto project_optional_growth = [&](std::size_t new_row_count,
+    const auto output_cost_for = [&](std::size_t new_row_count,
         const ProfileCounts &profile_rows, const ProfileCounts &frame_rows,
         const SupplementalRows &supplemental_rows, std::size_t payload_bytes) {
-        auto total = project_row_growth(new_row_count, payload_bytes);
+        auto total = row_cost_for(new_row_count, payload_bytes);
         for (std::size_t profile = 0; profile < profiles_.size(); ++profile)
-            add_projection(total, project_profile_growth(profile, profile_rows[profile], frame_rows[profile]));
+            add_cost(total, profile_cost_for(profile, profile_rows[profile], frame_rows[profile]));
         for (std::size_t pool = 0; pool < supplemental_storage.size(); ++pool)
-            add_projection(total, project_supplemental_growth(pool, supplemental_rows[pool]));
+            add_cost(total, supplemental_cost_for(pool, supplemental_rows[pool]));
         return total;
     };
 
@@ -1084,16 +934,9 @@ inline bool ActiveEffectStore::PrepareAppendBatch(std::span<const AppendRequest>
     SupplementalRows admitted_supplemental_rows{
         required_ground_gaps, required_distortion_gaps, required_ribbon_outputs};
     auto admitted_payload_bytes = required_payload_bytes;
-    std::size_t old_components = vfx_retained_size::Add(old_owner_bytes,
-        vfx_retained_size::Add(old_prepared_bytes, old_order_bytes));
-    const auto now_components = vfx_retained_size::Add(LogicalCapacityBytes(),
-        vfx_retained_size::Add(prepared.LogicalCapacityBytes(),
-            admission ? vfx_retained_size::Vector(admission->order_scratch) : 0));
-    const auto adjusted_held = !admission || admission->held_bytes == std::numeric_limits<std::size_t>::max() ||
-        old_components == std::numeric_limits<std::size_t>::max() || admission->held_bytes < old_components
-        ? std::numeric_limits<std::size_t>::max()
-        : vfx_retained_size::Add(admission->held_bytes - old_components, now_components);
-    auto admitted_projection = project_optional_growth(admitted_new_rows,
+    const auto held_with_frame = admission
+        ? vfx_retained_size::Add(admission->held_bytes, admission->FrameBaseBytes()) : 0;
+    auto admitted_cost = output_cost_for(admitted_new_rows,
         admitted_profile_rows, admitted_frame_rows, admitted_supplemental_rows, admitted_payload_bytes);
     if (admission)
     {
@@ -1111,94 +954,83 @@ inline bool ActiveEffectStore::PrepareAppendBatch(std::span<const AppendRequest>
         auto all_frame_rows = admitted_frame_rows;
         auto all_supplemental_rows = admitted_supplemental_rows;
         auto all_payload_bytes = admitted_payload_bytes;
-        try
+        bool can_admit_all = true;
+        for (const auto candidate_index : admission->order_scratch)
         {
-            bool can_admit_all = true;
-            for (const auto candidate_index : admission->order_scratch)
+            const auto &candidate = prepared.cosmetic_memberships_[candidate_index];
+            const auto &pending = prepared.pending_rows_[candidate.pending_index];
+            const auto bit = static_cast<std::uint16_t>(1u << candidate.profile);
+            if ((pending.initial_mask | pending.required_mask) & bit) continue;
+            auto first_candidate = no_pending;
+            for (const auto index : pending.cosmetic_candidates)
+                first_candidate = std::min(first_candidate, index);
+            if (pending.is_new && pending.required_mask == 0 &&
+                candidate_index == first_candidate)
             {
-                const auto &candidate = prepared.cosmetic_memberships_[candidate_index];
-                const auto &pending = prepared.pending_rows_[candidate.pending_index];
-                const auto bit = static_cast<std::uint16_t>(1u << candidate.profile);
-                if ((pending.initial_mask | pending.required_mask) & bit) continue;
-                auto first_candidate = no_pending;
-                for (const auto index : pending.cosmetic_candidates)
-                    first_candidate = std::min(first_candidate, index);
-                if (pending.is_new && pending.required_mask == 0 &&
-                    candidate_index == first_candidate)
+                all_new_rows = CheckedAdd(all_new_rows, 1);
+                if (all_new_rows > available_row_ids)
                 {
-                    all_new_rows = CheckedAdd(all_new_rows, 1);
-                    if (all_new_rows > available_row_ids)
-                    {
-                        can_admit_all = false;
-                        break;
-                    }
-                    const auto &input = *requests[pending.first_request_index].input;
-                    if (const auto *gaps = std::get_if<VfxRingGapsPayload>(&input.payload))
-                        all_payload_bytes = CheckedAdd(all_payload_bytes,
-                            vfx_retained_size::Multiply(gaps->gap_angles_degrees.size(), sizeof(float)));
+                    can_admit_all = false;
+                    break;
                 }
-                all_profile_rows[candidate.profile] = CheckedAdd(all_profile_rows[candidate.profile], 1);
-                if (admission->frame_storage[candidate.profile].row_bytes)
-                    all_frame_rows[candidate.profile] = CheckedAdd(all_frame_rows[candidate.profile],
-                        pending.frame_rows[candidate.profile]);
-                if (candidate.profile == ground_profile &&
-                    admission->ground_gap_storage.row_bytes && pending.frame_rows[candidate.profile] != 0)
-                    can_admit_all &= try_add_supplemental(all_supplemental_rows, 0,
-                        pending.nonuniform_gap_floats);
-                if (candidate.profile == distortion_profile &&
-                    admission->distortion_gap_storage.row_bytes && pending.frame_rows[candidate.profile] != 0)
-                    can_admit_all &= try_add_supplemental(all_supplemental_rows, 1,
-                        pending.nonuniform_gap_floats);
-                if (candidate.profile == ribbon_profile && admission->ribbon_output_storage.row_bytes &&
-                    pending.frame_rows[candidate.profile] != 0)
-                    can_admit_all &= try_add_supplemental(all_supplemental_rows, 2,
-                        pending.ribbon_frame_outputs);
-                if (!can_admit_all) break;
+                const auto &input = *requests[pending.first_request_index].input;
+                if (const auto *gaps = std::get_if<VfxRingGapsPayload>(&input.payload))
+                    all_payload_bytes = CheckedAdd(all_payload_bytes,
+                        vfx_retained_size::Multiply(gaps->gap_angles_degrees.size(), sizeof(float)));
             }
-            if (can_admit_all)
-            {
-                const auto after = project_optional_growth(all_new_rows, all_profile_rows,
-                    all_frame_rows, all_supplemental_rows, all_payload_bytes);
-                const auto after_total = vfx_retained_size::Add(adjusted_held, after.first);
-                const bool no_marginal_growth = !admitted_projection.second && !after.second &&
-                    admitted_projection.first == after.first;
-                const bool total_overflow = after.first > std::numeric_limits<std::size_t>::max() - adjusted_held;
-                if ((!after.second && !total_overflow && after_total <= admission->budget_bytes) ||
-                    no_marginal_growth)
-                {
-                    for (const auto candidate_index : admission->order_scratch)
-                    {
-                        const auto &candidate = prepared.cosmetic_memberships_[candidate_index];
-                        prepared.pending_rows_[candidate.pending_index].added_mask |=
-                            static_cast<std::uint16_t>(1u << candidate.profile);
-                    }
-                    admitted_new_rows = all_new_rows;
-                    admitted_profile_rows = all_profile_rows;
-                    admitted_frame_rows = all_frame_rows;
-                    admitted_supplemental_rows = all_supplemental_rows;
-                    admitted_payload_bytes = all_payload_bytes;
-                    admitted_projection = after;
-                    admission->admitted_cosmetic_memberships = CheckedAdd(
-                        admission->admitted_cosmetic_memberships, admission->order_scratch.size());
-                    all_cosmetics_admitted = true;
-                }
-            }
+            all_profile_rows[candidate.profile] = CheckedAdd(all_profile_rows[candidate.profile], 1);
+            if (admission->frame_storage[candidate.profile].row_bytes)
+                all_frame_rows[candidate.profile] = CheckedAdd(all_frame_rows[candidate.profile],
+                    pending.frame_rows[candidate.profile]);
+            if (candidate.profile == ground_profile &&
+                admission->ground_gap_storage.row_bytes && pending.frame_rows[candidate.profile] != 0)
+                can_admit_all &= try_add_supplemental(all_supplemental_rows, 0,
+                    pending.nonuniform_gap_floats);
+            if (candidate.profile == distortion_profile &&
+                admission->distortion_gap_storage.row_bytes && pending.frame_rows[candidate.profile] != 0)
+                can_admit_all &= try_add_supplemental(all_supplemental_rows, 1,
+                    pending.nonuniform_gap_floats);
+            if (candidate.profile == ribbon_profile && admission->ribbon_output_storage.row_bytes &&
+                pending.frame_rows[candidate.profile] != 0)
+                can_admit_all &= try_add_supplemental(all_supplemental_rows, 2,
+                    pending.ribbon_frame_outputs);
+            if (!can_admit_all) break;
         }
-        catch (const std::length_error &)
+        if (can_admit_all)
         {
-            // Fall back to ordered partial admission when the aggregate cannot fit
-            // representable destination capacity.
+            const auto after = output_cost_for(all_new_rows, all_profile_rows,
+                all_frame_rows, all_supplemental_rows, all_payload_bytes);
+            const auto after_total = vfx_retained_size::Add(held_with_frame, after.first);
+            const bool total_overflow = after.first > std::numeric_limits<std::size_t>::max() - held_with_frame;
+            if (!after.second && !total_overflow && after_total <= admission->budget_bytes)
+            {
+                for (const auto candidate_index : admission->order_scratch)
+                {
+                    const auto &candidate = prepared.cosmetic_memberships_[candidate_index];
+                    prepared.pending_rows_[candidate.pending_index].added_mask |=
+                        static_cast<std::uint16_t>(1u << candidate.profile);
+                }
+                admitted_new_rows = all_new_rows;
+                admitted_profile_rows = all_profile_rows;
+                admitted_frame_rows = all_frame_rows;
+                admitted_supplemental_rows = all_supplemental_rows;
+                admitted_payload_bytes = all_payload_bytes;
+                admitted_cost = after;
+                admission->admitted_cosmetic_memberships = CheckedAdd(
+                    admission->admitted_cosmetic_memberships, admission->order_scratch.size());
+                all_cosmetics_admitted = true;
+            }
         }
         if (!all_cosmetics_admitted)
         {
-            auto row_projection = project_row_growth(admitted_new_rows, admitted_payload_bytes);
-            std::array<CapacityProjection, profile_count> profile_projections{};
+            auto row_cost = row_cost_for(admitted_new_rows, admitted_payload_bytes);
+            std::array<LogicalCost, profile_count> profile_costs{};
             for (std::size_t profile = 0; profile < profile_count; ++profile)
-                profile_projections[profile] = project_profile_growth(profile,
+                profile_costs[profile] = profile_cost_for(profile,
                     admitted_profile_rows[profile], admitted_frame_rows[profile]);
-            std::array<CapacityProjection, 3> supplemental_projections{};
-            for (std::size_t pool = 0; pool < supplemental_projections.size(); ++pool)
-                supplemental_projections[pool] = project_supplemental_growth(pool, admitted_supplemental_rows[pool]);
+            std::array<LogicalCost, 3> supplemental_costs{};
+            for (std::size_t pool = 0; pool < supplemental_costs.size(); ++pool)
+                supplemental_costs[pool] = supplemental_cost_for(pool, admitted_supplemental_rows[pool]);
             std::sort(admission->order_scratch.begin(), admission->order_scratch.end(), [&](auto left, auto right) {
                 const auto &a = prepared.cosmetic_memberships_[left];
                 const auto &b = prepared.cosmetic_memberships_[right];
@@ -1244,31 +1076,29 @@ inline bool ActiveEffectStore::PrepareAppendBatch(std::span<const AppendRequest>
                     pending.frame_rows[candidate.profile] != 0)
                     if (!try_add_supplemental(trial_supplemental_rows, 2,
                             pending.ribbon_frame_outputs)) continue;
-                const auto trial_row_projection = activates_row
-                    ? project_row_growth(trial_new_rows, trial_payload_bytes) : row_projection;
-                const auto trial_profile_projection = project_profile_growth(candidate.profile,
+                const auto trial_row_cost = activates_row
+                    ? row_cost_for(trial_new_rows, trial_payload_bytes) : row_cost;
+                const auto trial_profile_cost = profile_cost_for(candidate.profile,
                     trial_profile_rows, trial_frame_rows);
                 const auto pool = candidate.profile == ground_profile ? 0u
                     : candidate.profile == distortion_profile ? 1u : candidate.profile == ribbon_profile ? 2u : 3u;
-                const auto old_supplemental = pool < 3 ? supplemental_projections[pool] : CapacityProjection{};
+                const auto old_supplemental = pool < 3 ? supplemental_costs[pool] : LogicalCost{};
                 const auto trial_supplemental = pool < 3
-                    ? project_supplemental_growth(pool, trial_supplemental_rows[pool]) : CapacityProjection{};
+                    ? supplemental_cost_for(pool, trial_supplemental_rows[pool]) : LogicalCost{};
                 // Only this membership's row, profile and supplemental pool can change.
-                auto after = admitted_projection;
+                auto after = admitted_cost;
                 if (!after.second)
                 {
-                    after.first -= row_projection.first;
-                    after.first -= profile_projections[candidate.profile].first;
+                    after.first -= row_cost.first;
+                    after.first -= profile_costs[candidate.profile].first;
                     after.first -= old_supplemental.first;
-                    add_projection(after, trial_row_projection);
-                    add_projection(after, trial_profile_projection);
-                    add_projection(after, trial_supplemental);
+                    add_cost(after, trial_row_cost);
+                    add_cost(after, trial_profile_cost);
+                    add_cost(after, trial_supplemental);
                 }
-                const auto after_total = vfx_retained_size::Add(adjusted_held, after.first);
-                const bool no_marginal_growth = !admitted_projection.second && !after.second &&
-                    admitted_projection.first == after.first;
-                const bool total_overflow = after.first > std::numeric_limits<std::size_t>::max() - adjusted_held;
-                if ((!after.second && !total_overflow && after_total <= admission->budget_bytes) || no_marginal_growth)
+                const auto after_total = vfx_retained_size::Add(held_with_frame, after.first);
+                const bool total_overflow = after.first > std::numeric_limits<std::size_t>::max() - held_with_frame;
+                if (!after.second && !total_overflow && after_total <= admission->budget_bytes)
                 {
                     pending.added_mask |= bit;
                     admitted_new_rows = trial_new_rows;
@@ -1276,10 +1106,10 @@ inline bool ActiveEffectStore::PrepareAppendBatch(std::span<const AppendRequest>
                     admitted_frame_rows[candidate.profile] = trial_frame_rows;
                     admitted_supplemental_rows = trial_supplemental_rows;
                     admitted_payload_bytes = trial_payload_bytes;
-                    row_projection = trial_row_projection;
-                    profile_projections[candidate.profile] = trial_profile_projection;
-                    if (pool < 3) supplemental_projections[pool] = trial_supplemental;
-                    admitted_projection = after;
+                    row_cost = trial_row_cost;
+                    profile_costs[candidate.profile] = trial_profile_cost;
+                    if (pool < 3) supplemental_costs[pool] = trial_supplemental;
+                    admitted_cost = after;
                     admission->admitted_cosmetic_memberships = CheckedAdd(
                         admission->admitted_cosmetic_memberships, 1);
                 }
@@ -1292,6 +1122,7 @@ inline bool ActiveEffectStore::PrepareAppendBatch(std::span<const AppendRequest>
             if (admission->frame_storage[profile].row_bytes)
                 admission->reserved_frame_rows[profile] = CheckedAdd(
                     admission->frame_storage[profile].base_rows, admitted_frame_rows[profile]);
+        admission->admitted_bytes = admitted_cost.first;
         if (admission->distortion_gap_storage.row_bytes)
             admission->reserved_distortion_gaps = CheckedAdd(
                 admission->distortion_gap_storage.base_rows, admitted_supplemental_rows[1]);
@@ -1369,9 +1200,6 @@ inline bool ActiveEffectStore::PrepareAppendBatch(std::span<const AppendRequest>
         {
             const auto &input = *requests[pending.first_request_index].input;
             prepared.new_rows_.push_back(input);
-            prepared.new_rows_payload_capacity_bytes_ = vfx_retained_size::Add(
-                prepared.new_rows_payload_capacity_bytes_,
-                vfx_retained_size::RingGapPayload(prepared.new_rows_.back()));
             prepared.new_masks_.push_back(pending.added_mask);
             prepared.new_index_.try_emplace(KeyFor(input), pending.row);
         }
@@ -1431,8 +1259,8 @@ inline bool ActiveEffectStore::CommitPreparedAppendBatch(PreparedAppendBatch &pr
     }
     for (std::size_t i = 0; i < prepared.new_rows_.size(); ++i)
     {
-        rows_payload_capacity_bytes_ = vfx_retained_size::Add(
-            rows_payload_capacity_bytes_,
+        rows_payload_bytes_ = vfx_retained_size::Add(
+            rows_payload_bytes_,
             vfx_retained_size::RingGapPayload(prepared.new_rows_[i]));
         rows_.push_back(std::move(prepared.new_rows_[i]));
         profile_masks_.push_back(prepared.new_masks_[i]);
@@ -1457,18 +1285,10 @@ inline void ActiveEffectStore::CancelAppendBatch(PreparedAppendBatch &prepared) 
 
 struct DecodedVfxState
 {
-    struct BirthPrefix
-    {
-        std::size_t particles{}, lines{}, flashes{};
-    };
-
     std::vector<ParticleSpawnCommand> particle_spawns;
     std::vector<VfxLineSpawnCommand> effect_lines;
     std::vector<VfxFlashSpawnInput> flashes;
     std::vector<RetainedVfxEntitySurfaceCapture> entity_surface_captures;
-
-    [[nodiscard]] BirthPrefix MarkBirths() const noexcept
-    { return {particle_spawns.size(), effect_lines.size(), flashes.size()}; }
 
     // Process each row once per display frame; later births append after the retained prefix.
     void AppendVisibleFlashes(double display_tick, std::vector<VfxFlashSpawnInput> &visible,
@@ -1490,15 +1310,6 @@ struct DecodedVfxState
         flashes.erase(end, flashes.end());
     }
 
-    void RollbackBirths(BirthPrefix prefix) noexcept
-    {
-        assert(prefix.particles <= particle_spawns.size() &&
-               prefix.lines <= effect_lines.size() && prefix.flashes <= flashes.size());
-        particle_spawns.resize(prefix.particles);
-        effect_lines.resize(prefix.lines);
-        flashes.resize(prefix.flashes);
-    }
-
     void SortNewParticleSpawns(std::size_t retained_count)
     {
         assert(retained_count <= particle_spawns.size());
@@ -1510,22 +1321,20 @@ struct DecodedVfxState
             std::inplace_merge(particle_spawns.begin(), appended, particle_spawns.end(), due);
     }
 
-    // Member swaps preserve the original allocation-free publication operation,
-    // including implementations with debug iterator bookkeeping on moves.
-    void Swap(DecodedVfxState &prepared) noexcept
-    {
-        particle_spawns.swap(prepared.particle_spawns);
-        effect_lines.swap(prepared.effect_lines);
-        flashes.swap(prepared.flashes);
-        entity_surface_captures.swap(prepared.entity_surface_captures);
-    }
-
     void Clear() noexcept
     {
         particle_spawns.clear();
         effect_lines.clear();
         flashes.clear();
         entity_surface_captures.clear();
+    }
+
+    [[nodiscard]] std::size_t LogicalBytes() const noexcept
+    {
+        using namespace vfx_retained_size;
+        return Add(Multiply(particle_spawns.size(), sizeof(ParticleSpawnCommand)),
+            Add(Multiply(effect_lines.size(), sizeof(VfxLineSpawnCommand)),
+                Multiply(flashes.size(), sizeof(VfxFlashSpawnInput))));
     }
 
     [[nodiscard]] std::size_t LogicalCapacityBytes() const noexcept
@@ -1553,6 +1362,11 @@ struct VfxSessionState
         std::vector<ParticleSpawnCommand> particle_spawns;
         std::vector<VfxLineSpawnCommand> effect_lines;
         std::size_t decoded_particle_count{};
+
+        [[nodiscard]] std::size_t LogicalBytes() const noexcept
+        { return vfx_retained_size::Add(
+            vfx_retained_size::Multiply(particle_spawns.size(), sizeof(ParticleSpawnCommand)),
+            vfx_retained_size::Multiply(effect_lines.size(), sizeof(VfxLineSpawnCommand))); }
 
         [[nodiscard]] std::size_t LogicalCapacityBytes() const noexcept
         { return vfx_retained_size::Add(vfx_retained_size::Vector(particle_spawns),
@@ -1620,30 +1434,22 @@ struct VfxSessionState
                     (entry.event.session_id == session && entry.event.tick <= tick);
             };
             if (!pending_count_ || !ready(pending_[pending_head_])) return in_flight;
-            // Stage only the ready prefix; publish FIFO removal after all allocation succeeds.
+            // Stage the ready prefix; allocation failure propagates to the fatal owner boundary.
             static_assert(std::is_trivially_copyable_v<Entry>);
             std::size_t consumed{};
-            try
+            while (consumed < pending_count_)
             {
-                while (consumed < pending_count_)
+                const auto &entry = pending_[(pending_head_ + consumed) % pending_.size()];
+                if (!ready(entry)) break;
+                ++consumed;
+                if (entry.event.session_id < session) continue;
+                if (in_flight.events.size() == in_flight.events.capacity())
                 {
-                    const auto &entry = pending_[(pending_head_ + consumed) % pending_.size()];
-                    if (!ready(entry)) break;
-                    ++consumed;
-                    if (entry.event.session_id < session) continue;
-                    if (in_flight.events.size() == in_flight.events.capacity())
-                    {
-                        const auto capacity = in_flight.events.capacity();
-                        in_flight.events.reserve(std::min(kCapacity,
-                            capacity == 0 ? std::size_t{8} : capacity + capacity / 2 + 1));
-                    }
-                    in_flight.events.push_back(entry.event);
+                    const auto capacity = in_flight.events.capacity();
+                    in_flight.events.reserve(std::min(kCapacity,
+                        capacity == 0 ? std::size_t{8} : capacity + capacity / 2 + 1));
                 }
-            }
-            catch (...)
-            {
-                in_flight.events.clear();
-                throw;
+                in_flight.events.push_back(entry.event);
             }
             pending_head_ = (pending_head_ + consumed) % pending_.size();
             pending_count_ -= consumed;
@@ -1822,16 +1628,11 @@ struct VfxSessionState
         return true;
     }
 
-    // Tracked owned capacity for this state slice, not a complete activation
-    // budget: caller-owned preparation/frame scratch and external
-    // RenderInstance/content allocations have separate or transient owners.
-    [[nodiscard]] std::size_t TrackedLogicalCapacityBytes() const noexcept
+    // Canonical and queued output rows; frame scratch and actual allocator/RSS are separate.
+    [[nodiscard]] std::size_t LogicalBytes() const noexcept
     {
-        using namespace vfx_retained_size;
-        return Add(active_effects.LogicalCapacityBytes(),
-            Add(decoded.LogicalCapacityBytes(),
-            Add(native_batch.LogicalCapacityBytes(),
-            Add(raw_events.LogicalCapacityBytes(), PersistentBurstCapacityBytes()))));
+        return vfx_retained_size::Add(active_effects.LogicalBytes(),
+            vfx_retained_size::Add(decoded.LogicalBytes(), native_batch.LogicalBytes()));
     }
 
     [[nodiscard]] std::size_t PersistentBurstCount() const noexcept
@@ -1868,8 +1669,8 @@ struct VfxSessionState
     {
         vfx_birth_admission::ReserveAndSelectBirthRows(rows, requests, order,
             measure_held_bytes, prepared_births.particle_spawns, decoded.particle_spawns,
-            native_batch.particle_spawns, prepared_births.effect_lines, decoded.effect_lines,
-            native_batch.effect_lines, prepared_births.flashes, decoded.flashes,
+            prepared_births.effect_lines, decoded.effect_lines,
+            prepared_births.flashes, decoded.flashes,
             visible_flashes, required_suffix, budget_bytes);
     }
 
@@ -1936,7 +1737,7 @@ struct VfxSessionState
         const auto prepare_capacity = [](auto &owned, const auto &pending, std::size_t count, auto *scratch) {
             const auto copied = std::min(count, pending.size() - count);
             if (owned.capacity() >= copied) return;
-            // Admission credits the larger empty allocation before further growth.
+            // Reuse the larger empty allocation before further growth.
             if (scratch && scratch->capacity() > owned.capacity()) owned.swap(*scratch);
             owned.reserve(copied);
         };
@@ -2067,13 +1868,6 @@ struct VfxSessionState
         if (commit_profiles && !active_effects.CommitPreparedAppendBatch(prepared_profiles)) return false;
         raw_events.AcknowledgeActivation();
         return true;
-    }
-
-    // Only decoded retention belongs to a content generation. Publication must
-    // preserve the session clock, pending events and burst tombstones.
-    void SwapDecoded(DecodedVfxState &prepared) noexcept
-    {
-        decoded.Swap(prepared);
     }
 
     // Terminal simulation stops advancing after the final boss transition.

@@ -36,9 +36,6 @@ void AppendVfxTypedFresnelCommands(const VfxImage &image,
 {
     if (!recipes.IsAdmitted() || !recipes.Matches(image.fresnel_recipes)) return;
     const auto recipe_rows = recipes.Rows();
-    const auto original_size = result.size();
-    try
-    {
     for (const auto &owner : inputs)
     {
         const auto *entity = std::get_if<VfxEntityPayload>(&owner.payload);
@@ -79,12 +76,6 @@ void AppendVfxTypedFresnelCommands(const VfxImage &image,
             command.elapsed_seconds = owner.elapsed_seconds;
             result.push_back(command);
         }
-    }
-    }
-    catch (...)
-    {
-        result.resize(original_size);
-        throw;
     }
 }
 }

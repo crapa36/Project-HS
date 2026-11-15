@@ -134,7 +134,7 @@ namespace hs::runtime_detail
             for (const auto &recipe : image.ground_recipes.subspan(range.first, range.count))
                 if (recipe.effect_handle == handle && recipe.source_index == source_index &&
                     recipe.output_index == output_index && recipe.source_type == source.type &&
-                    recipe.effect_id == effect_id && recipe.effect_lookup_count == 1 &&
+                    recipe.effect_id == effect_id &&
                     recipe.source_stable_id == source.stable_id &&
                     recipe.profile == output.profile && recipe.payload_kind == effect.payload_kind &&
                     recipe.timing_kind == effect.timing_kind)
@@ -174,12 +174,12 @@ namespace hs::runtime_detail
         return image.HasDecalRecipes(handle);
     case ActiveEffectStore::Profile::Volume:
         return h != 0 && h <= image.volume_effect_recipes.size() &&
-            image.volume_effect_recipes[h - 1].route_valid &&
+            image.volume_effect_recipes[h - 1].route != VfxVolumeRoute::Unsupported &&
             image.volume_effect_recipes[h - 1].outputs.count != 0 &&
             ValidVfxAdmissionRange(image.volume_effect_recipes[h - 1].outputs, image.volume_recipes.size());
     case ActiveEffectStore::Profile::Screen:
         return h != 0 && h <= image.screen_effect_recipes.size() &&
-            image.screen_effect_recipes[h - 1].route_valid &&
+            image.screen_effect_recipes[h - 1].route != VfxScreenRoute::Unsupported &&
             image.screen_effect_recipes[h - 1].outputs.count != 0 &&
             ValidVfxAdmissionRange(image.screen_effect_recipes[h - 1].outputs, image.screen_recipes.size());
     default:
