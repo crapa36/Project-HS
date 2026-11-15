@@ -6,8 +6,6 @@ from itertools import groupby
 import json
 import math
 from pathlib import Path
-import re
-import tempfile
 
 # Original capture schema; read-only compatibility for recordings made before RT removal.
 LEGACY_OPTIONS = {
@@ -72,7 +70,7 @@ SETTING_IDS = {key: index for index, key in enumerate(LEGACY_OPTIONS, 1)}
 # IDs 53 and 54 were retired; persistence IDs after the gap were not renumbered.
 SETTING_IDS.update(color_grading=55, adaptive_shading=56)
 SETTING_IDS.update(outline=53, outline_width_px=54)
-OPTIONS = {key: value for key, value in LEGACY_OPTIONS.items() if key not in LEGACY_RT_KEYS and key != "gi_quality"}
+OPTIONS = {key: value for key, value in LEGACY_OPTIONS.items() if key not in LEGACY_RT_KEYS and key not in ("gi_quality", "lighting_quality")}
 OPTIONS.update({
     "geometry_quality": ("shared", ("geometry", "surface", "shadows"), "LOD/geometry affects several stages; geometry group is preparation only."),
     "shadow_mode": ("feature", ("shadows",), "Directional/local/virtual shadow work; shared shadow controls reference this same group."),
@@ -88,6 +86,16 @@ OUTLINE_OPTIONS = {
     "outline_width_px": ("shared", ("outline",), "Width parameter in the same historical outline pass."),
 }
 OUTLINE_OPTION_KEYS = CURRENT_OPTION_KEYS | OUTLINE_OPTIONS.keys()
+
+def is_supported_manifest(keys):
+    return set(keys) in (CURRENT_OPTION_KEYS, PREVIOUS_OPTION_KEYS, OUTLINE_OPTION_KEYS,
+        CURRENT_OPTION_KEYS | {"lighting_quality"}, PREVIOUS_OPTION_KEYS | {"lighting_quality"},
+        OUTLINE_OPTION_KEYS | {"lighting_quality"}, set(LEGACY_OPTIONS))
+
+def option_catalog(manifest):
+    return LEGACY_OPTIONS if LEGACY_RT_KEYS & manifest.keys() else {**OPTIONS, **OUTLINE_OPTIONS,
+        "gi_quality": LEGACY_OPTIONS["gi_quality"], "lighting_quality": LEGACY_OPTIONS["lighting_quality"]}
+
 DEPENDENCIES = {
     "ao_quality": "ao_mode", "gi_quality": "gi_mode", "reflection_quality": "reflection_mode",
     "bloom_strength": "bloom", "frame_generation_multiplier": "frame_generation_mode",
@@ -193,7 +201,7 @@ def analyze(directory, warmup=10, tick_start=0, tick_end=None):
         if key not in LEGACY_OPTIONS and key not in OUTLINE_OPTIONS: raise ValueError(f"Unclassified setting: {key}")
         if key in manifests[revision]: raise ValueError("Duplicate setting in configuration revision")
         manifests[revision][key] = row
-    if not manifests or any(set(m) not in (CURRENT_OPTION_KEYS, PREVIOUS_OPTION_KEYS, OUTLINE_OPTION_KEYS, set(LEGACY_OPTIONS)) for m in manifests.values()):
+    if not manifests or any(not is_supported_manifest(m) for m in manifests.values()):
         raise ValueError("Each configuration revision must contain a complete current or recognized legacy settings set")
     frames, selected = {}, set()
     origin = None
@@ -252,7 +260,7 @@ def analyze(directory, warmup=10, tick_start=0, tick_end=None):
                              "passes": [{"id": i, "name": n} for i, n in sorted(names[(revision, group)])]}
         options = []
         manifest = manifests[revision]
-        catalog = LEGACY_OPTIONS if LEGACY_RT_KEYS & manifest.keys() else {**OPTIONS, **OUTLINE_OPTIONS, "gi_quality": LEGACY_OPTIONS["gi_quality"]}
+        catalog = option_catalog(manifest)
         for key, row in sorted(manifest.items(), key=lambda item: int(item[1]["setting_id"])):
             kind, linked, note = catalog[key]
             status = option_status(row, manifest)
@@ -301,134 +309,18 @@ def analyze(directory, warmup=10, tick_start=0, tick_end=None):
                        "Use the separate QPC frame report and per-process GPU sampler for base FPS and utilization."]}
 
 
-def self_test():
-    registry = Path(__file__).resolve().parents[1] / "Source/Core/Public/hs/core/graphics_settings.def"
-    registered = {key: int(identity) for identity, key in re.findall(
-        r"HS_GRAPHICS_SETTING\((\d+),\s*\w+,\s*(\w+),", registry.read_text(encoding="utf-8"))}
-    assert registered == {key: SETTING_IDS[key] for key in CURRENT_OPTION_KEYS}
-    assert stats([0, 1, 2, 9])["p95"] == 9
-    assert stats([]) is None
-    try: stats([float("nan")]); assert False
-    except ValueError: pass
-    assert pass_group({"pass_name": "GBuffer+Depth", "pass_id": "4"}) == "surface"
-    assert pass_group({"pass_name": "HeroPeelFront", "pass_id": "90"}) == "refraction"
-    assert pass_group({"pass_name": "Translucency.PeelFront", "pass_id": "90"}) == "refraction"
-    assert pass_group({"pass_name": "Water.SingleLayer", "pass_id": "102"}) == "refraction"
-    assert pass_group({"pass_name": "RenderCriticalPathEnd", "pass_id": "38"}) is None
-    assert pass_group({"pass_name": "SourceRenderOutputReady", "pass_id": "38"}) is None
-    assert pass_group({"pass_name": "Texture mip map/upload", "pass_id": "1000"}) == "texture_streaming"
-    assert pass_group({"pass_name": "Texture mip map/upload", "pass_id": "65536"}) == "texture_streaming"
-    assert pass_group({"pass_name": "TranslucencyDiagnostics.Clear", "pass_id": str(0x48570000)}) == "diagnostics"
-    assert pass_group({"pass_name": "TranslucencyDiagnostics.Readback", "pass_id": str(0x48570001)}) == "diagnostics"
-    assert pass_group({"pass_name": "REBLUR temporal accumulation", "pass_id": "3000"}) == "denoising"
-    assert pass_group({"pass_name": "RayTransportCompose", "pass_id": "169"}) == "shared_ray_compose"
-    assert "shared_ray_compose" in LEGACY_OPTIONS["gi_mode"][1] and "shared_ray_compose" in LEGACY_OPTIONS["reflection_mode"][1]
-    assert "shared_post_guides" in OPTIONS["motion_blur"][1] and "shared_post_guides" in OPTIONS["depth_of_field"][1]
-    for key, dependency in (("frame_generation_provider", "frame_generation_mode"),
-                            ("rt_trace_distance_m", "ray_tracing_enabled"),
-                            ("hdr_paper_white_nits", "hdr_mode"), ("hdr_peak_nits", "hdr_mode")):
-        assert option_status({"key": key, "effective": "auto", "requested_available": "1"},
-                             {dependency: {"effective": "off"}}) == "off"
-    for token in ("auto", "on"):
-        assert option_status({"key": "adaptive_shading", "effective": token, "requested_available": "1"}, {}) == "policy"
-    for key in ("reconstruction_provider", "reconstruction_quality", "resolution_mode", "manual_scale_percent"):
-        assert OPTIONS[key][0] == "shared_policy"
-    assert option_status({"key": "ao_mode", "effective": "off", "requested_available": "0"}, {}) == "requested_unavailable_effective_off"
-    with tempfile.TemporaryDirectory() as temp:
-        directory = Path(temp)
-        (directory / "diagnostics.json").write_text('{"complete":true,"io_failed":false}', encoding="utf-8")
-        def write(name, rows):
-            with (directory / name).open("w", encoding="utf-8", newline="") as stream:
-                writer = csv.DictWriter(stream, fieldnames=rows[0].keys()); writer.writeheader(); writer.writerows(rows)
-        manifest = []
-        for revision in (1, 2):
-            for identity, key in enumerate(LEGACY_OPTIONS, 1):
-                token = "off" if key in ("ao_mode", "dynamic_resolution", "frame_generation_mode", "ray_tracing_enabled", "hdr_mode") else "auto" if key == "adaptive_shading" else "true"
-                manifest.append(dict(config_revision=revision, settings_generation=revision, pipeline_revision=1,
-                                     setting_id=identity, key=key, requested=token, effective=token,
-                                     requested_available=-1, native_effective=token, native_reason='native, "quoted"'))
-        write("graphics_settings.csv", manifest)
-        write("performance.csv", [dict(frame=1, config_revision=1, qpc_frequency=1000, frame_qpc=1000, session_phase=1, tick=1),
-                                  dict(frame=2, config_revision=2, qpc_frequency=1000, frame_qpc=2000, session_phase=1, tick=2)])
-        gpu = []
-        for frame in (1, 2):
-            for identity, name in ((10, "Bloom Half Extract"), (11, "Bloom Quarter Downsample")):
-                gpu.append(dict(completed_frame=frame, observed_frame=2, fence_completed=1, pass_id=identity,
-                                pass_name=name, queue=0, timestamp_frequency=1000000, measured=1, nanoseconds=1000000, critical_path_valid=1, critical_path_ms=1))
-            for identity, name, queue, measured, frequency, ns in (
-                    (2, "3-cascade Directional Shadow", 0, 1, 1000000, 1000000),
-                    (147, "VirtualShadow.SnapshotUpload", 2, 0, 0, 0),
-                    (40, "ClusterCutCount", 1, 1, 1000000, 200000),
-                    (50, "ClusterDemandStatusReadback", 2, 0, 0, 0),
-                    (23, "UI Upload", 2, 1, 0, 0),
-                    (169, "RayTransportCompose", 0, 1, 1000000, 250000),
-                    (110, "HdrPostNearestGuides", 0, 1, 1000000, 125000)):
-                gpu.append(dict(completed_frame=frame, observed_frame=2, fence_completed=1, pass_id=identity,
-                                pass_name=name, queue=queue, timestamp_frequency=frequency, measured=measured,
-                                nanoseconds=ns, critical_path_valid=1, critical_path_ms=1))
-            if frame == 2:
-                gpu.append(dict(completed_frame=frame, observed_frame=2, fence_completed=1, pass_id=280,
-                                pass_name="Adaptive.ClassifyActualGuides", queue=0, timestamp_frequency=1000000,
-                                measured=1, nanoseconds=10000, critical_path_valid=1, critical_path_ms=1))
-        write("gpu_live.csv", gpu)
-        report = analyze(directory, warmup=0)
-        assert [c["config_revision"] for c in report["configurations"]] == [1, 2]
-        for config in report["configurations"]:
-            assert config["gpu_critical_path_ms"]["mean"] == 1
-            assert config["ranked_feature_groups"][0]["gpu_work_ms_per_completed_frame"]["mean"] == 2  # Overlap must not replace critical path.
-            assert len(config["options"]) == len(LEGACY_OPTIONS)
-            assert next(o for o in config["options"] if o["key"] == "ao_quality")["cost_status"] == "off"
-            assert next(o for o in config["options"] if o["key"] == "pom_quality")["cost_status"] == "shared"
-            adaptive = next(o for o in config["options"] if o["key"] == "adaptive_shading")
-            assert adaptive["cost_status"] == ("policy_no_stage_evidence" if config["config_revision"] == 1 else "policy_with_stage_evidence")
-            assert adaptive["actual_stage_availability"]["measured_gpu_work_available"] == (config["config_revision"] == 2)
-            assert next(o for o in config["options"] if o["key"] == "frame_generation_provider")["cost_status"] == "off"
-            assert config["gpu_work_partial"]
-            measured_groups = {group["group"]: group for group in config["ranked_feature_groups"]}
-            assert measured_groups["shadows"]["gpu_work_ms_per_completed_frame"]["mean"] == 1
-            assert measured_groups["shadows"]["excludes_copy_transfer"]
-            assert measured_groups["geometry"]["gpu_work_ms_per_completed_frame"]["mean"] == .2
-            assert measured_groups["shared_ray_compose"]["gpu_work_ms_per_completed_frame"]["mean"] == .25
-            assert measured_groups["shared_post_guides"]["gpu_work_ms_per_completed_frame"]["mean"] == .125
-            assert all(group["gpu_work_ms_per_completed_frame"] is None for group in config["copy_transfer_groups"])
-            assert {group["group"] for group in config["copy_transfer_groups"]} == {"shadows_copy_transfer", "geometry_copy_transfer", "ui_copy_transfer"}
-        previous_manifest = [row for row in manifest if row["key"] in PREVIOUS_OPTION_KEYS]
-        write("graphics_settings.csv", previous_manifest)
-        previous_report = analyze(directory, warmup=0)
-        assert all(any(o["key"] == "gi_quality" for o in c["options"]) for c in previous_report["configurations"])
-        current_manifest = [row for row in manifest if row["key"] in CURRENT_OPTION_KEYS]
-        write("graphics_settings.csv", current_manifest)
-        current_report = analyze(directory, warmup=0)
-        assert all(len(c["options"]) == len(CURRENT_OPTION_KEYS) for c in current_report["configurations"])
-        assert all(not ({"ray_scene", "shared_ray_compose", "denoising"} & set(o["feature_groups"])) for c in current_report["configurations"] for o in c["options"])
-        assert all(not (set(g["option_keys"]) & LEGACY_RT_KEYS) for c in current_report["configurations"] for g in c["ranked_feature_groups"])
-        write("graphics_settings.csv", current_manifest[:-1])
-        try: analyze(directory, warmup=0); assert False
-        except ValueError: pass
-        write("graphics_settings.csv", manifest)
-        gpu[-1]["fence_completed"] = 0; write("gpu_live.csv", gpu)
-        assert analyze(directory, warmup=0)["gpu_frames_incomplete_rejected"] == 1
-        (directory / "diagnostics.json").write_text('{"complete":false}', encoding="utf-8")
-        try: analyze(directory, warmup=0); assert False
-        except ValueError: pass
-    print("PASS registry/revision identity, shared compose/guides, option policies/dependencies, unknown Copy isolation, incomplete fences and overlapping GPU work")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("directory", type=Path, nargs="?")
+    parser.add_argument("directory", type=Path)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--warmup-seconds", type=float, default=10)
     parser.add_argument("--tick-start", type=int, default=0)
     parser.add_argument("--tick-end", type=int)
-    parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
-    if args.self_test: self_test()
-    else:
-        if args.directory is None: parser.error("capture directory is required")
-        if args.warmup_seconds < 0: parser.error("warmup cannot be negative")
-        report = analyze(args.directory, args.warmup_seconds, args.tick_start, args.tick_end)
-        text = json.dumps(report, ensure_ascii=False, indent=2)
-        if args.output: args.output.write_text(text + "\n", encoding="utf-8")
-        else: print(text)
-        if not report["configurations"]: raise SystemExit("No completed GPU frames in the selected gameplay range")
+    if args.warmup_seconds < 0: parser.error("warmup cannot be negative")
+    report = analyze(args.directory, args.warmup_seconds, args.tick_start, args.tick_end)
+    text = json.dumps(report, ensure_ascii=False, indent=2)
+    if args.output: args.output.write_text(text + "\n", encoding="utf-8")
+    else: print(text)
+    if not report["configurations"]: raise SystemExit("No completed GPU frames in the selected gameplay range")

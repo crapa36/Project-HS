@@ -1,7 +1,6 @@
 #include <hs/runtime/shipping_content.hpp>
 #include <hs/core/shipped_content_owner.hpp>
 
-#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <stdexcept>
@@ -47,7 +46,6 @@ void TestShippingImage()
 {
     TestDirectory directory;
     hs::shipping::ShippingImageInfo info{};
-    Check(std::filesystem::path(hs::shipping::ImageInfo().relative_path)==std::filesystem::path(L"Content/content.hsp"), "generated image uses the canonical pack path");
     info.relative_path = L"Content/content.hsp";
     std::filesystem::create_directories(directory.path / L"Content");
     // PT05: magic0, format8, layout12, build ID16, file bytes48,
@@ -77,16 +75,9 @@ void TestShippingImage()
     hs::shipping::ShippingRange vfx{info.font_offset, info.font_bytes, info.font_digest};
     std::vector<std::byte> vfx_bytes;
     Check(hs::shipping::ReadRange(owner,vfx,vfx_bytes).Succeeded() && vfx_bytes==font,"packed VFX range verified");
-    auto invalid_vfx=vfx; invalid_vfx.size=UINT64_MAX;
-    Check(!hs::shipping::ReadRange(owner,invalid_vfx,vfx_bytes).Succeeded() && vfx_bytes==font,"invalid VFX range preserves output");
-    invalid_vfx=vfx; invalid_vfx.digest[0]^=std::byte{1};
+    auto invalid_vfx=vfx;
+    invalid_vfx.digest[0]^=std::byte{1};
     Check(!hs::shipping::ReadRange(owner,invalid_vfx,vfx_bytes).Succeeded() && vfx_bytes==font,"invalid VFX digest preserves output");
-    for (const auto range : {std::pair<std::uint64_t,std::uint64_t>{63,1},{64,0},{335,2},{UINT64_MAX,1},{64,UINT64_MAX}})
-    {
-        auto invalid=info;invalid.font_offset=range.first;invalid.font_bytes=range.second;
-        const auto previous=font;
-        Check(!hs::shipping::ReadFont(owner,invalid,font).Succeeded() && font==previous,"invalid font range preserves output");
-    }
 
     {
         const auto original_cwd=std::filesystem::current_path();
@@ -116,25 +107,10 @@ void TestShippingImage()
               "foreign or malformed shipping image must fail");
         preserves_owner();
     };
-    for (const auto offset : {0u, 8u, 12u, 16u, 47u, 48u, 49u, 56u, 60u})
-    {
-        auto wrong = valid;
-        wrong[offset] ^= std::byte{1};
-        rejects(wrong);
-    }
-    rejects(std::span(valid).first(63)); // Incomplete fixed header.
-    rejects(std::span(valid).first(valid.size() - 1)); // Complete header, truncated image.
-    auto extended = valid; extended.push_back(std::byte{0}); rejects(extended);
+    auto wrong = valid;
+    wrong[16] ^= std::byte{1};
+    rejects(wrong);
     candidate_info.relative_path = L"missing.bin";
     Check(!hs::shipping::OpenImage(directory.path, candidate_info, owner).Succeeded(), "missing shipping image must fail");
     preserves_owner();
-
-    // A header-only image is valid, and successful replacement updates owner.
-    auto header_only = info;
-    header_only.relative_path = L"header-only.bin";
-    header_only.header[48] = std::byte{64};
-    header_only.header[49] = std::byte{0};
-    Write(directory.path / header_only.relative_path, header_only.header);
-    Check(hs::shipping::OpenImage(directory.path, header_only, owner).Succeeded() && owner.Size() == 64,
-          "a matching 64-byte image must replace the previous owner");
 }

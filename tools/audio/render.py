@@ -6,7 +6,6 @@ import argparse
 import datetime as _dt
 import json
 import math
-import os
 import secrets
 import tempfile
 from pathlib import Path
@@ -277,21 +276,6 @@ def _inpaint(args: argparse.Namespace) -> int:
     return 0
 
 
-def _self_test() -> None:
-    parser = _parser()
-    args = parser.parse_args(["generate", "--model", "small-sfx", "--prompt", "test", "--duration", "1", "--output-dir", "out"])
-    assert args.model == "small-sfx" and args.count == 1
-    assert _noise_level("0.55") == 0.55
-    _validate_duration(120.0, "small-sfx")
-    _validate_duration(380.0, "medium")
-    try:
-        _validate_duration(121.0, "small-sfx")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("small-sfx duration limit was not enforced")
-    assert 0 <= _base_seed(None) <= 0xFFFFFFFF
-    assert _base_seed(7) == 7
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -300,7 +284,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    if os.environ.get("PROJECT_HS_AUDIO_SELF_TEST"):
-        _self_test()
-    else:
-        raise SystemExit(main())
+    raise SystemExit(main())

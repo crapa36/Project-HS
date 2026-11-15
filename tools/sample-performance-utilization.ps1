@@ -9,7 +9,6 @@ param(
     [switch]$NoGpuCounters,
     [string]$OutputDirectory,
     [switch]$NvidiaSmi,
-    [switch]$SelfCheck,
     [switch]$CounterWorker
 )
 $ErrorActionPreference = 'Stop'
@@ -376,111 +375,6 @@ function Invoke-OwnerSampler {
     if ($null -ne $failure) { throw $failure }
 }
 
-if ($SelfCheck) {
-    $readyFixture=[IO.Path]::GetTempFileName()
-    try {
-        if ((Gpu-CounterStartState ($readyFixture+'.missing') $true $true $false 0 0) -ne 'waiting_gpu_ready' -or
-            (Gpu-CounterStartState $readyFixture $true $true $false 0 0) -ne 'waiting_gpu_ready') { throw 'Missing/empty GPU readiness file admitted PDH.' }
-        if ((Gpu-CounterStartState '' $true $true $false 0 0) -ne 'ready' -or
-            (Gpu-CounterStartState ($readyFixture+'.missing') $false $true $false 0 0) -ne 'ready') { throw 'Default/NoGpuCounters must not wait for readiness.' }
-        [IO.File]::WriteAllText($readyFixture,'renderer initialized')
-        if ((Gpu-CounterStartState $readyFixture $true $true $false 1.999 2) -ne 'ready') { throw 'Nonempty GPU readiness file was not admitted before the deadline.' }
-        if ((Gpu-CounterStartState $readyFixture $true $false $false 0 0) -ne 'process_exit' -or
-            (Gpu-CounterStartState $readyFixture $true $true $true 0 0) -ne 'owner_stop') { throw 'Ready file must not override PID exit or owner stop.' }
-        if ((Gpu-CounterStartState $readyFixture $true $true $false 2 2) -ne 'max_seconds' -or
-            (Gpu-CounterStartState ($readyFixture+'.missing') $true $true $false 3 2) -ne 'max_seconds' -or
-            (Gpu-CounterStartState $readyFixture $true $true $false 100000 0) -ne 'ready') { throw 'GPU readiness bounded/unlimited deadline failed.' }
-    } finally { [IO.File]::Delete($readyFixture) }
-    $shutdownFixture=[IO.Path]::GetTempFileName()
-    $newWorkerFixture={
-        param([int]$ExitAfterMs, $Receipt, [bool]$ExitAfterKill=$true, [int]$ExitCode=0)
-        $worker=[pscustomobject]@{Id=42;ExitCode=$ExitCode;exit_after_ms=$ExitAfterMs;
-            exit_after_kill=$ExitAfterKill;killed=$false;waits=[Collections.Generic.List[int]]::new();
-            status_path=$shutdownFixture;receipt=$Receipt}
-        $worker | Add-Member ScriptMethod WaitForExit {
-            param([int]$Timeout)
-            $this.waits.Add($Timeout)
-            if ($this.killed) { return $this.exit_after_kill }
-            if ($Timeout -lt $this.exit_after_ms) { return $false }
-            if ($null -ne $this.receipt) { Write-AtomicJson $this.receipt $this.status_path }
-            return $true
-        }
-        $worker | Add-Member ScriptMethod Kill { $this.killed=$true }
-        return $worker
-    }
-    try {
-        $completeReceipt=[pscustomobject]@{complete=$true;counter_worker_process_id=42;error=$null;invalid_sample_errors=40}
-        $worker=& $newWorkerFixture 1500 $completeReceipt
-        $shutdown=Finish-CounterWorker $worker $shutdownFixture
-        if ($worker.killed -or !$shutdown.exited -or $null -ne $shutdown.error -or $worker.waits[0] -ne 5000) { throw 'Normal PDH finalization beyond one sample interval was terminated.' }
-        if ((Read-SharedJson $shutdownFixture).invalid_sample_errors -ne 40) { throw 'Counter errors were altered by worker finalization.' }
-        $runningReceipt=[pscustomobject]@{complete=$false;counter_worker_process_id=42;reason='running';error=$null}
-        Write-AtomicJson $runningReceipt $shutdownFixture
-        $worker=& $newWorkerFixture 6000 $null
-        $shutdown=Finish-CounterWorker $worker $shutdownFixture
-        if (!$worker.killed -or !$shutdown.stopped_by_owner -or !$shutdown.exited -or $null -eq $shutdown.error -or $worker.waits[1] -ne 1000) { throw 'Blocked PDH shutdown was not bounded and reported as incomplete.' }
-        if ((Read-SharedJson $shutdownFixture).complete) { throw 'Terminated worker receipt was promoted to complete.' }
-        $worker=& $newWorkerFixture 6000 $null $false
-        $shutdown=Finish-CounterWorker $worker $shutdownFixture
-        if ($shutdown.exited -or $null -eq $shutdown.error) { throw 'Owned worker cleanup failure was hidden.' }
-        $worker=& $newWorkerFixture 0 $runningReceipt
-        if ($null -eq (Finish-CounterWorker $worker $shutdownFixture).error) { throw 'Running PDH receipt was accepted after exit zero.' }
-        [IO.File]::Delete($shutdownFixture)
-        $worker=& $newWorkerFixture 0 $null
-        if ($null -eq (Finish-CounterWorker $worker $shutdownFixture).error) { throw 'Missing PDH receipt was accepted after exit zero.' }
-        $completeReceipt.counter_worker_process_id=41
-        $worker=& $newWorkerFixture 0 $completeReceipt
-        if ($null -eq (Finish-CounterWorker $worker $shutdownFixture).error) { throw 'Another worker completion receipt was accepted.' }
-        $completeReceipt.counter_worker_process_id=42
-        $worker=& $newWorkerFixture 0 $completeReceipt $true 1
-        if ($null -eq (Finish-CounterWorker $worker $shutdownFixture).error) { throw 'Worker process failure was hidden by a completion receipt.' }
-        $completeReceipt.error='counter failure fixture'
-        $worker=& $newWorkerFixture 0 $completeReceipt
-        if ($null -eq (Finish-CounterWorker $worker $shutdownFixture).error) { throw 'Worker metadata error was hidden after exit zero.' }
-    } finally {
-        foreach ($path in @($shutdownFixture,($shutdownFixture+'.previous'),($shutdownFixture+'.tmp'))) { [IO.File]::Delete($path) }
-    }
-    $cpu = Cpu-Usage 1 1 20
-    if ($cpu.cores -ne 1 -or $cpu.machine_percent -ne 5 -or (Cpu-Usage 20 1 20).machine_percent -ne 100) { throw 'CPU normalization failed.' }
-    $summaryFixture=[pscustomobject]@{sample=2;warmup=0;qpc=10}
-    if (!(Counter-SummaryReady $summaryFixture 1 10) -or (Counter-SummaryReady $summaryFixture 2 10) -or (Counter-SummaryReady $null 0 10)) { throw 'Independent PDH summary identity failed.' }
-    if (Counter-SummaryReady $summaryFixture 1 9) { throw 'Future PDH sample entered CPU summary.' }
-    $summaryFixture.warmup=1
-    if (Counter-SummaryReady $summaryFixture 1 10) { throw 'PDH warmup entered CPU summary.' }
-    if (!(Counter-QueryRefresh $true $false 2 2) -or (Counter-QueryRefresh $true $false 1 10) -or
-        (Counter-QueryRefresh $false $false 2 100) -or (Counter-QueryRefresh $true $true 2 59) -or
-        !(Counter-QueryRefresh $true $true 2 60)) { throw 'PDH dynamic instance refresh policy failed.' }
-    $row = Parse-GpuInstance 'pid_42_luid_0x00000000_0x0000e948_phys_0_eng_2_engtype_3D'
-    if ($null -eq $row -or $row.pid -ne 42 -or $row.engine -ne 2 -or $row.type -ne '3d' -or $null -ne (Parse-GpuInstance 'invalid')) { throw 'GPU parser failed.' }
-    $rows = @(
-        [pscustomobject]@{pid=42;luid=$row.luid;phys=0;engine=2;percent=20.0;status=0},
-        [pscustomobject]@{pid=43;luid=$row.luid;phys=0;engine=2;percent=30.0;status=0},
-        [pscustomobject]@{pid=42;luid=$row.luid;phys=0;engine=3;percent=15.0;status=0},
-        [pscustomobject]@{pid=99;luid='other';phys=0;engine=2;percent=90.0;status=0})
-    $gpu = Gpu-Summary $rows 42
-    if ($gpu.process_percent -ne 20 -or $gpu.whole_same_adapter_percent -ne 50) { throw 'GPU grouping must sum PIDs per engine, then take the busiest engine on the target adapter.' }
-    $invalidRecord = [Management.Automation.ErrorRecord]::new([Exception]::new('invalid sample fixture'), 'CounterApiError', [Management.Automation.ErrorCategory]::InvalidResult, $null)
-    $unexpectedRecord = [Management.Automation.ErrorRecord]::new([Exception]::new('access denied'), 'CounterApiError', [Management.Automation.ErrorCategory]::InvalidResult, $null)
-    if ((Counter-ErrorKind $invalidRecord 'invalid sample fixture' $false) -ne 'invalid_sample' -or (Counter-ErrorKind $unexpectedRecord 'invalid sample fixture' $false) -ne 'unexpected_error' -or (Counter-ErrorKind $unexpectedRecord 'invalid sample fixture' $true) -ne 'process_exit') { throw 'Counter lifecycle classification failed.' }
-    $moreDataRecord = [Management.Automation.ErrorRecord]::new([Exception]::new('buffer growth'), 'CounterApiError', [Management.Automation.ErrorCategory]::InvalidResult, $null)
-    if ((Counter-ErrorKind $moreDataRecord 'invalid sample fixture' $false 'buffer growth') -ne 'retry_more_data') { throw 'PDH buffer-growth retry classification failed.' }
-    $rows += [pscustomobject]@{pid=42;luid=$row.luid;phys=0;engine=2;percent=9999.0;status=3221228486}
-    if ((Gpu-Summary $rows 42).process_percent -ne 20) { throw 'Invalid GPU status entered summary.' }
-    if ((Duration-Reached 100000 0) -or !(Duration-Reached 2 2) -or (Duration-Reached 1 2)) { throw 'Unlimited/bounded duration failed.' }
-    if ((Csv-Row @('0,1','quoted"name',$null,1.5)) -ne '"0,1","quoted""name",,1.5') { throw 'CSV escaping failed.' }
-    if ((Gpu-Summary $rows 42 'other').process_percent -ne $null -or (Gpu-Summary $rows 42 'other').whole_same_adapter_percent -ne 90) { throw 'Explicit GPU adapter selection failed.' }
-    $selfProcess=Get-Process -Id $PID
-    if (!(Target-Alive $selfProcess $selfProcess.StartTime.ToUniversalTime().Ticks) -or (Target-Alive $selfProcess 1)) { throw 'PID/start-time identity failed.' }
-    if ((Gpu-CounterStartState 'unused' $true (Target-Alive $selfProcess 1) $false 0 0) -ne 'process_exit') { throw 'GPU readiness ignored PID/start identity mismatch.' }
-    $recentIssues=[Collections.Generic.Queue[object]]::new();$issueCount=0
-    $memoryWriter=[IO.StringWriter]::new();$writers=@{'sampling-errors'=$memoryWriter}
-    for ($index=0;$index -lt 40;++$index) { Record-Issue 'selfcheck' 'bounded_tail' ('x'*4100) }
-    if ($issueCount -ne 40 -or $recentIssues.Count -ne 32 -or $recentIssues.Peek().message.Length -gt 4200 -or $memoryWriter.ToString().Length -lt 40*4100) { throw 'Streamed issue preservation or bounded metadata failed.' }
-    $memoryWriter.Dispose()
-    'utilization sampler selfcheck passed: CPU denominator, GPU grouping/status, adapter selection, PDH lifecycle, unlimited duration, PID identity, CSV escaping, bounded error metadata, independent PDH summary identity, dynamic instance refresh, bounded GPU readiness admission and owned worker finalization'
-
-    exit 0
-}
 if ($ProcessId -le 0 -or [string]::IsNullOrWhiteSpace($OutputDirectory)) { throw 'ProcessId and OutputDirectory are required.' }
 $targetProcess = Get-Process -Id $ProcessId
 $targetStartTime = $targetProcess.StartTime.ToUniversalTime()

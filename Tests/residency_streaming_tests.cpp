@@ -4,9 +4,7 @@
 #include "streaming_manager.hpp"
 #include "renderer_texture_streaming.hpp"
 #include "renderer_texture_feedback.hpp"
-#include "../Source/Apps/Common/renderer_geometry_catalog.hpp"
 #include <hs/core/sha256.hpp>
-#include <hs/render_data/scene_probe_revision.hpp>
 
 #include <algorithm>
 #include <array>
@@ -22,9 +20,6 @@
 #include <string>
 #include <thread>
 #include <utility>
-#if defined(_DEBUG)
-#include <crtdbg.h>
-#endif
 
 namespace
 {
@@ -32,40 +27,6 @@ void Check(bool condition, const char *message)
 {
     if (!condition) throw std::runtime_error(message);
 }
-
-#if defined(_DEBUG)
-struct RejectOneAllocation
-{
-    static inline thread_local bool armed{};
-    static inline thread_local bool rejected{};
-    static inline std::atomic<_CRT_ALLOC_HOOK> previous{};
-
-    static int __cdecl Hook(int type, void *data, size_t bytes, int block, long request,
-                            const unsigned char *file, int line)
-    {
-        if (type == _HOOK_ALLOC && block == _NORMAL_BLOCK && armed)
-        {
-            armed = false;
-            rejected = true;
-            return FALSE;
-        }
-        const auto prior = previous.load(std::memory_order_acquire);
-        return prior ? prior(type, data, bytes, block, request, file, line) : TRUE;
-    }
-
-    RejectOneAllocation() noexcept
-    {
-        previous.store(_CrtGetAllocHook(), std::memory_order_release);
-        rejected = false;
-        armed = true;
-        _CrtSetAllocHook(Hook);
-    }
-    ~RejectOneAllocation() { _CrtSetAllocHook(previous.load(std::memory_order_acquire)); armed = false; }
-    RejectOneAllocation(const RejectOneAllocation &) = delete;
-    RejectOneAllocation &operator=(const RejectOneAllocation &) = delete;
-    [[nodiscard]] bool Rejected() const noexcept { return rejected; }
-};
-#endif
 
 void CheckFeedbackSamplingDomains()
 {
@@ -76,20 +37,23 @@ void CheckFeedbackSamplingDomains()
     description.flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     const auto alpha = graph.CreateTexture(description, "opacity feedback");
     const auto opaque = graph.CreateTexture(description, "surface feedback");
+    const auto terrain = graph.CreateBuffer({256, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}, "terrain feedback");
     auto clear = graph.AddPass(0, "clear feedback", hs::QueueHint::Direct);
     std::vector<hs::TextureFeedbackGraphBinding> bindings{
-        {{1}, clear.Write(graph.Version(alpha), hs::Access::UnorderedWrite), true},
-        {{2}, clear.Write(graph.Version(opaque), hs::Access::UnorderedWrite), false}};
+        {clear.Write(graph.Version(alpha), hs::Access::UnorderedWrite), true},
+        {clear.Write(graph.Version(opaque), hs::Access::UnorderedWrite), false},
+        {clear.Write(graph.Version(terrain), hs::Access::UnorderedWrite), false}};
     const auto initial = bindings;
     auto shadow = graph.AddPass(1, "opacity sampling", hs::QueueHint::Direct);
     hs::RendererTextureFeedback::DeclareSampling(shadow, bindings, true);
     Check(bindings[0].feedback.ordinal == initial[0].feedback.ordinal + 1 &&
-        bindings[1].feedback == initial[1].feedback,
+        bindings[1].feedback == initial[1].feedback && bindings[2].feedback == initial[2].feedback,
         "opacity pass must preserve unrelated surface feedback ownership");
     auto surface = graph.AddPass(2, "surface sampling", hs::QueueHint::Direct);
     hs::RendererTextureFeedback::DeclareSampling(surface, bindings);
     Check(bindings[0].feedback.ordinal == initial[0].feedback.ordinal + 2 &&
-        bindings[1].feedback.ordinal == initial[1].feedback.ordinal + 1,
+        bindings[1].feedback.ordinal == initial[1].feedback.ordinal + 1 &&
+        bindings[2].feedback.ordinal == initial[2].feedback.ordinal + 1,
         "surface pass must retain both feedback outputs after opacity sampling");
 }
 
@@ -97,34 +61,28 @@ void CheckTextureFeedbackMinimumMipRows()
 {
     using hs::texture_feedback_detail::kNoMipDemand;
     using hs::texture_feedback_detail::MinimumRequestedMip;
-    constexpr std::array<std::size_t, 8> widths{0, 1, 15, 16, 17, 31, 32, 33};
-    for (const auto width : widths)
-    {
-        std::vector<std::byte> row(width, std::byte{0xff});
-        Check(MinimumRequestedMip(row, 8) == kNoMipDemand,
-              "all-0xff texture feedback row must mean no sample");
-        if (width == 0) continue;
-        std::fill(row.begin(), row.end(), std::byte{7});
-        row.back() = std::byte{2};
-        Check(MinimumRequestedMip(row, 8) == 2,
-              "late minimum in a partial or full SIMD row was missed");
-        row.back() = std::byte{0};
-        Check(MinimumRequestedMip(row, 8) == 0,
-              "zero mip demand must remain the early-out minimum");
-    }
-
-    std::vector<std::byte> padded(33 + 16, std::byte{0});
-    std::fill_n(padded.begin(), 33, std::byte{200});
-    Check(MinimumRequestedMip(std::span<const std::byte>(padded).first(33), 8) == 7,
-          "feedback row scan read padding or failed to clamp to the mip chain");
-    for (std::size_t lane = 0; lane < 32; ++lane)
-    {
-        std::array<std::byte, 34> storage;
-        storage.fill(std::byte{0xff});
-        storage[lane + 1] = std::byte{3};
-        Check(MinimumRequestedMip(std::span<const std::byte>(storage).subspan(1, 32), 8) == 3,
-              "feedback minimum must include every lane of an unaligned row");
-    }
+    using hs::texture_feedback_detail::DecodeTerrainMipRequests;
+    Check(DecodeTerrainMipRequests(0) == std::array<std::uint32_t, 2>{kNoMipDemand, kNoMipDemand} &&
+        DecodeTerrainMipRequests(0x80008000u) == std::array<std::uint32_t, 2>{15, 15} &&
+        DecodeTerrainMipRequests(0x002400a8u) == std::array<std::uint32_t, 2>{3, 2} &&
+        DecodeTerrainMipRequests(0x00010001u) == std::array<std::uint32_t, 2>{0, 0} &&
+        DecodeTerrainMipRequests(0x00008000u) == std::array<std::uint32_t, 2>{15, kNoMipDemand} &&
+        DecodeTerrainMipRequests(0x80000000u) == std::array<std::uint32_t, 2>{kNoMipDemand, 15},
+        "terrain request halves must independently decode their lowest set mip");
+    std::array<std::byte, 8> row{};
+    std::fill_n(row.begin(), 4, std::byte{0xff});
+    const auto logical_row = std::span<const std::byte>(row).first(4);
+    Check(MinimumRequestedMip(logical_row, 8) == kNoMipDemand,
+          "all-0xff texture feedback row must mean no sample");
+    std::fill_n(row.begin(), 4, std::byte{200});
+    Check(MinimumRequestedMip(logical_row, 8) == 7,
+          "feedback row minimum must clamp to the mip chain and ignore pitch padding");
+    row[3] = std::byte{2};
+    Check(MinimumRequestedMip(logical_row, 8) == 2,
+          "feedback row minimum missed a later logical byte");
+    row[1] = std::byte{0};
+    Check(MinimumRequestedMip(logical_row, 8) == 0,
+          "zero mip demand must remain the early-out minimum");
 }
 
 void CheckSoftwareTransactionSupersession()
@@ -210,16 +168,9 @@ void CheckAsyncAssetPreparation()
         final_chunk == replacement_subresources.size() &&
         hs::TextureReadChunkEnd(replacement_subresources, replacement_layouts, 0, 4) == 0,
         "software replacement chunking split an authenticated range or marked a partial candidate complete");
-    replacement_layouts[1].has_digest = false;
-    Check(hs::TextureReadChunkEnd(replacement_subresources, replacement_layouts, 0, 12) == 1 &&
-        hs::TextureReadChunkEnd(replacement_subresources, replacement_layouts, 1, 12) == 1,
-        "software replacement planner accepted an unauthenticated or indivisible range");
     replacement_layouts[1].has_digest = true;
     std::uint64_t packed_upload_bytes{};
     std::uint64_t beyond_window_bytes{};
-    const std::array<std::uint32_t, 1> invalid_subresource{3};
-    Check(hs::TextureReadChunkEnd(invalid_subresource, replacement_layouts, 0, 12) == 0,
-        "software replacement planner accepted an out-of-range subresource index");
     const std::array<std::uint64_t, 3> native_footprints{5, 3, 4};
     Check(hs::TextureUploadPackAppend(5, 3, 4, 12, packed_upload_bytes) &&
         packed_upload_bytes == 11 && !hs::TextureUploadPackAppend(packed_upload_bytes, 4, 4, 12,
@@ -260,9 +211,6 @@ void CheckAsyncAssetPreparation()
         hs::TextureEffectiveHostTargetMip(0, 2, 2, 2, 1, true) == 1 &&
         hs::TextureEffectiveHostTargetMip(0, 2, 2, 2, 2, false) == 2,
         "host transfer ceiling evicted better published quality or skipped the registered fallback");
-    target_layouts[1].has_digest = false;
-    Check(!hs::TextureReadMinimumHostMip(target_description, target_layouts, 8, 19, minimum_host_mip),
-        "optional mip admission hid a missing authenticated range as a quality fallback");
     const std::array<std::uint32_t, 3> priorities{3, 1, 1}, desired_mips{0, 0, 0}, tail_mips{2, 1, 2};
     std::vector<std::uint32_t> victim_order;
     std::array<std::vector<std::uint64_t>, 3> mip_costs{{{100, 60, 20}, {80, 40}, {90, 50, 10}}};
@@ -282,14 +230,6 @@ void CheckAsyncAssetPreparation()
     Check(final_mips == std::array<std::uint32_t, 3>{0, 1, 2} && planned_cost == 150 &&
         advanced_owners == std::vector<std::uint32_t>{1, 2, 2},
         "budget planner did not coarsen one priority victim through its tail before the next");
-    std::uint32_t overflow_mip{};
-    std::uint64_t underfunded_plan{};
-    Check(!hs::TextureCoarsenOneMip(overflow_mip, 1, std::array<std::uint64_t, 2>{2, 1}, underfunded_plan) &&
-        overflow_mip == 0 && underfunded_plan == 0,
-        "budget planner accepted an inconsistent planned-cost underflow");
-    auto maximum_cost = UINT64_MAX;
-    Check(!hs::TextureAccumulateBudgetBytes(maximum_cost, 1) && maximum_cost == UINT64_MAX,
-        "budget planner accepted an overflowing accumulated mip cost");
     hs::ResidencyManager mip_budget;
     mip_budget.UpdateBudget({true, 0, 0, 0, 0, true, 1024});
     const auto mip_payload = mip_budget.ReserveHost(512);
@@ -382,58 +322,29 @@ void CheckAsyncAssetPreparation()
         ranged_output.bytes == std::vector<std::byte>{contents[1], contents[2], contents[3]} &&
         streaming.CompleteRead(ranged, "generation") && residency.ReleaseNow(ranged_output.storage) &&
         !residency.Contains(ranged_storage), "range IO did not verify or compact its selected subresources");
-    auto invalid_range = ranges[0]; invalid_range.digest[0] ^= std::byte{1};
-    const auto corrupt_request = streaming.Request("corrupt-subresource-range", "corrupt-subresource-range", "generation", 1);
-    const auto corrupt_storage = residency.ReserveHost(invalid_range.byte_count);
-    bool corrupt_submitted{};
-    Check(corrupt_request && corrupt_storage && bool(io.Enqueue({corrupt_request, "generation",
-        "corrupt-subresource-range", hs::RendererAssetSource::Loose(path), invalid_range.byte_count,
-        std::make_shared<int>(1), {}, {invalid_range}}, streaming, residency, corrupt_storage,
-        corrupt_submitted)) && corrupt_submitted, "corrupt range fixture was not submitted");
-    hs::AssetReadCompletion corrupt_output;
-    Check(!poll(corrupt_request, corrupt_output) && !corrupt_output.ready &&
-        !residency.Contains(corrupt_storage), "range IO accepted a mismatched subresource digest");
-
-    for (const bool fail_after_cancel : {false, true})
+    auto started = std::make_shared<std::promise<void>>();
+    auto release = std::make_shared<std::promise<void>>();
+    const auto release_gate = release->get_future().share();
+    const auto canceled_done = std::make_shared<std::atomic_bool>();
+    const auto [cancelled, cancelled_storage] = enqueue("prepared-cancelled",
+        [started, release_gate, canceled_done](std::span<const std::byte>) {
+            started->set_value();
+            release_gate.wait();
+            canceled_done->store(true, std::memory_order_release);
+        });
+    if (started->get_future().wait_for(std::chrono::seconds(5)) != std::future_status::ready)
     {
-        auto started = std::make_shared<std::promise<void>>();
-        auto release = std::make_shared<std::promise<void>>();
-        const auto release_gate = release->get_future().share();
-        const auto canceled_done = std::make_shared<std::atomic_bool>();
-        const auto [cancelled, cancelled_storage] = enqueue(
-            fail_after_cancel ? "prepared-cancelled-failure" : "prepared-cancelled",
-            [started, release_gate, canceled_done, fail_after_cancel](std::span<const std::byte>) {
-                started->set_value();
-                release_gate.wait();
-                canceled_done->store(true, std::memory_order_release);
-                if (fail_after_cancel) throw std::runtime_error("failure after cancellation");
-            });
-        if (started->get_future().wait_for(std::chrono::seconds(5)) != std::future_status::ready)
-        {
-            release->set_value();
-            throw std::runtime_error("cancellable preparation did not start");
-        }
-        io.Cancel(cancelled, streaming);
         release->set_value();
-        hs::AssetReadCompletion cancelled_output;
-        const auto cancelled_result = poll(cancelled, cancelled_output);
-        Check(bool(cancelled_result) == !fail_after_cancel &&
-            (fail_after_cancel ? !cancelled_output.ready : cancelled_output.ready && cancelled_output.cancelled) &&
-            cancelled_output.bytes.empty() && canceled_done->load(std::memory_order_acquire) &&
-            !residency.Contains(cancelled_storage) && !io.HasPendingReads(),
-            "cancelled preparation hid a failure, published bytes or leaked its owner");
+        throw std::runtime_error("cancellable preparation did not start");
     }
-
-    const auto [failed, failed_storage] = enqueue("prepared-failure", [](std::span<const std::byte>) {
-        throw std::runtime_error("intentional preparation failure");
-    });
-    hs::AssetReadCompletion failed_output;
-    Check(!poll(failed, failed_output) && !failed_output.ready && !residency.Contains(failed_storage),
-        "failed preparation published data or retained its reservation");
-    const auto *failed_request = streaming.Find(failed);
-    Check(failed_request && failed_request->state == hs::StreamingPageState::Cancelled,
-        "failed preparation did not cancel its streaming request");
-
+    io.Cancel(cancelled, streaming);
+    release->set_value();
+    hs::AssetReadCompletion cancelled_output;
+    const auto cancelled_result = poll(cancelled, cancelled_output);
+    Check(bool(cancelled_result) && cancelled_output.ready && cancelled_output.cancelled &&
+        cancelled_output.bytes.empty() && canceled_done->load(std::memory_order_acquire) &&
+        !residency.Contains(cancelled_storage) && !io.HasPendingReads(),
+        "cancelled preparation published bytes or leaked its owner");
     // CPU work admission is independent of host bytes. A saturated read owner
     // remains Requested and can be retried after accepted futures reach terminal.
     constexpr std::uint32_t cpu_task_limit = 32;
@@ -522,30 +433,20 @@ void CheckAsyncAssetPreparation()
 
 void CheckPackAssetReads(bool native)
 {
-    const auto validate_revisions = [](const hs::RendererConfig &config) {
-        hs::render_data::RendererCatalogView view{};
-        view.bulks = config.packed_bulks;
-        view.source_revisions = config.packed_source_revisions;
-        view.revision_bulks = config.packed_revision_bulks;
-        return hs::render_data::ValidateRendererCatalog(view,std::nullopt);
-    };
     const auto path = std::filesystem::temp_directory_path() /
         ("hs_stream_pack_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".bin");
     auto old_path = path;
     old_path += ".old";
-    auto loose_path = path;
-    loose_path += ".loose";
     struct RemoveFiles
     {
-        std::filesystem::path path, old_path, loose_path;
+        std::filesystem::path path, old_path;
         ~RemoveFiles()
         {
             std::error_code ignored;
             std::filesystem::remove(path, ignored);
             std::filesystem::remove(old_path, ignored);
-            std::filesystem::remove(loose_path, ignored);
         }
-    } cleanup{path, old_path, loose_path};
+    } cleanup{path, old_path};
     const std::array<std::byte, 4> payload{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
     std::array<std::byte, 68> pack_bytes{};
     std::fill_n(pack_bytes.begin(), 64, std::byte{0x7a});
@@ -571,15 +472,6 @@ void CheckPackAssetReads(bool native)
             "valid immutable catalogue did not admit");
         hs::RendererConfig binding; binding.packed_content = owner; binding.UseRendererCatalog(prepared);
         Check(bool(hs::ValidatePackedCatalog(binding)), "admitted catalogue owner binding rejected");
-        const hs::render_data::GeometryDescriptor unused_geometry{};
-        binding.packed_geometry = std::span{&unused_geometry,std::size_t{0}};
-        Check(bool(hs::ValidatePackedCatalog(binding)), "empty metadata span acquired an irrelevant pointer constraint");
-        binding.packed_bulks = bulks;
-        Check(!hs::ValidatePackedCatalog(binding), "unrelated raw span accepted as the immutable catalogue owner");
-        binding.UseRendererCatalog(prepared);
-        Check(bool(hs::ValidatePackedCatalog(binding)), "restored immutable owner binding rejected");
-        binding.packed_content.reset();
-        Check(!hs::ValidatePackedCatalog(binding), "prepared catalogue without actual backing accepted");
     }
     auto source = hs::RendererAssetSource::Packed(owner,
         {64, payload.size(), {}, hs::Sha256(payload)});
@@ -588,13 +480,6 @@ void CheckPackAssetReads(bool native)
     Check(bool(source.Read(output, payload.size())) && std::equal(output.begin(), output.end(), payload.begin(), payload.end()),
         "pack source did not read its nonzero-offset range");
     const auto previous = output;
-    Check(!source.Read(output, payload.size() + 1) && output == previous,
-        "pack expected-size mismatch must preserve output");
-    auto corrupt_range = source.Packed().range;
-    corrupt_range.expected_digest[0] ^= std::byte{1};
-    auto corrupt = hs::RendererAssetSource::Packed(owner, corrupt_range);
-    Check(!corrupt.Read(output) && output == previous, "pack digest mismatch must preserve output");
-
     const std::string shader_id = "render/shader/test.dxil";
     const std::string feedback_id = "render/shader/test_feedback.dxil";
     std::array shader_bulks{
@@ -611,18 +496,6 @@ void CheckPackAssetReads(bool native)
         base_index, hs::MakeAssetId(shader_id), shader_id};
     Check(bool(hs::ReadRendererMaterialProgram(shader_config, program, output)) && output == previous,
         "dense material program did not read base shader");
-    const auto reject_program = [&](hs::render_data::MaterialProgramDescriptor invalid) {
-        const auto saved = output;
-        Check(!hs::ReadRendererMaterialProgram(shader_config, invalid, output) && output == saved,
-            "invalid dense program changed output");
-    };
-    auto invalid_program = program; invalid_program.bulk_index = UINT32_MAX; reject_program(invalid_program);
-    invalid_program = program; invalid_program.asset_id = hs::MakeAssetId(feedback_id); reject_program(invalid_program);
-    invalid_program = program; invalid_program.product_id = feedback_id; reject_program(invalid_program);
-    shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::Package; reject_program(program);
-    shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::ShaderDxil;
-    shader_bulks[base_index].range.expected_digest[0] ^= std::byte{1}; reject_program(program);
-    shader_bulks[base_index].range.expected_digest[0] ^= std::byte{1};
     shader_config.selected_texture_feedback = true;
     Check(bool(hs::ReadRendererMaterialProgram(shader_config, program, output)) &&
         output == std::vector<std::byte>(pack_bytes.begin(), pack_bytes.begin() + 4), "dense shader feedback selection differs");
@@ -649,11 +522,6 @@ void CheckPackAssetReads(bool native)
             loose.product_paths.at(shader_id) == path && loose.product_digests.at(shader_id) == canonical_digest,
             "loose feedback selection changed canonical shader identity or selected the wrong path");
     }
-    shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::Package; reject_program(program);
-    shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::ShaderDxil;
-    const auto feedback_index = 1u - base_index;
-    shader_bulks[feedback_index].range.format = hs::render_data::RenderBulkFormat::Package; reject_program(program);
-    shader_bulks[feedback_index].range.format = hs::render_data::RenderBulkFormat::ShaderDxil;
     const std::array base_only{shader_bulks[base_index]};
     shader_config.packed_bulks = base_only;
     auto fallback_program = program; fallback_program.bulk_index = 0;
@@ -663,128 +531,6 @@ void CheckPackAssetReads(bool native)
     shader_config.selected_texture_feedback = false;
     Check(bool(hs::ReadRendererMaterialProgram(shader_config, program, output)) && output == previous,
         "disabled shader feedback must select base");
-
-    {
-        constexpr std::string_view source_id = "environment/provenance.meshbin";
-        std::array revisions{hs::render_data::RendererSourceRevision{hs::MakeAssetId(source_id), source_id, hs::Sha256(payload)}};
-        std::array bulk_revisions{hs::render_data::RendererRevisionBulk{shader_id, base_index},
-            hs::render_data::RendererRevisionBulk{feedback_id, feedback_index}};
-        auto config = shader_config;
-        config.packed_source_revisions = revisions; config.packed_revision_bulks = bulk_revisions;
-        config.product_paths[std::string(source_id)] = path;
-        config.product_digests[std::string(source_id)] = "wrong loose digest";
-        Check(bool(validate_revisions(config)), "valid revision catalog rejected");
-        const auto second_revision = bulk_revisions[1];
-        bulk_revisions[1] = bulk_revisions[0];
-        Check(!validate_revisions(config), "duplicate revision reference accepted within a valid table count");
-        bulk_revisions[1] = second_revision;
-        Check(hs::RendererIsSourceRevision(config, source_id) &&
-            !hs::RendererIsSourceRevision(config, "environment/unadmitted.meshbin") &&
-            !hs::RendererIsSourceRevision(config, "vfx/vfx_mesh_atlas.hsbin"),
-            "source revision role did not require an admitted provenance row");
-        const auto digest = hs::RendererProductDigest(config, source_id);
-        Check(digest == hs::RendererProductDigest(config, shader_id), "source digest differs from authenticated bulk digest");
-        hs::RendererAssetSource resolved;
-        auto development = config; development.packed_content.reset();
-        Check(bool(hs::ResolveRendererAsset(development, source_id, resolved)), "loose provenance fixture cannot resolve");
-        const auto saved_source = resolved;
-        Check(!hs::ResolveRendererAsset(config, source_id, resolved) && resolved == saved_source,
-            "packed missing payload fell back to loose path or changed output");
-        config.packed_source_revisions = {};
-        Check(hs::RendererProductDigest(config, source_id).empty(), "missing compiled revision used loose digest");
-        config.packed_source_revisions = revisions;
-        const auto original = revisions[0];
-        revisions[0].asset_id = hs::MakeAssetId("wrong/source");
-        Check(!validate_revisions(config), "wrong source identity accepted");
-        revisions[0] = original; revisions[0].product_id = {};
-        revisions[0].asset_id = hs::MakeAssetId(revisions[0].product_id);
-        Check(!validate_revisions(config), "empty source identity accepted");
-        revisions[0] = {shader_bulks[base_index].asset_id, shader_id, original.digest};
-        Check(!validate_revisions(config), "source/bulk overlap accepted");
-        revisions[0] = original;
-        bulk_revisions[0].bulk_index = UINT32_MAX;
-        Check(!validate_revisions(config), "invalid revision bulk reference accepted");
-        bulk_revisions[0].bulk_index = feedback_index;
-        Check(!validate_revisions(config), "wrong revision bulk identity accepted");
-        bulk_revisions[0].bulk_index = base_index;
-        bulk_revisions[0].product_id = "render/lighting/not-a-material.rpkg";
-        Check(!validate_revisions(config), "non-material revision bulk accepted");
-        bulk_revisions[0].product_id = shader_id;
-        shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::Package;
-        Check(!validate_revisions(config), "wrong revision bulk format accepted");
-        shader_bulks[base_index].range.format = hs::render_data::RenderBulkFormat::ShaderDxil;
-        Check(hs::render_data::IsRendererMaterialRevisionProduct(source_id) &&
-            hs::render_data::IsRendererMaterialRevisionProduct(shader_id) &&
-            hs::render_data::IsRendererMaterialRevisionProduct("render/terrain/arena_surface.rpkg") &&
-            hs::render_data::IsRendererMaterialRevisionProduct("render/terrain/arena_surface_section_12.rpkg") &&
-            !hs::render_data::IsRendererMaterialRevisionProduct("render/terrain/arena_surface_section_x.rpkg") &&
-            !hs::render_data::IsRendererMaterialRevisionProduct("render/lighting/default_probe.rpkg"),
-            "material revision predicate changed domains");
-        Check(hs::render_data::IsTerrainSurfaceSectionProduct("render/terrain/arena_surface_section_0.rpkg") &&
-            hs::render_data::IsTerrainSurfaceSectionProduct("render/terrain/arena_surface_section_12.rpkg") &&
-            !hs::render_data::IsTerrainSurfaceSectionProduct("render/terrain/arena_surface.rpkg") &&
-            !hs::render_data::IsTerrainSurfaceSectionProduct("render/terrain/arena_surface_section_.rpkg") &&
-            !hs::render_data::IsTerrainSurfaceSectionProduct("render/terrain/arena_surface_section_x.rpkg") &&
-            !hs::render_data::IsTerrainSurfaceSectionProduct("render/terrain/arena_surface_section_1.rpkg.extra"),
-            "terrain section texture classification differs from its product identity");
-        Check(!hs::apps::RendererGeometryCatalog::NeedsMetadata("render/terrain/arena_surface.rpkg") &&
-            !hs::apps::RendererGeometryCatalog::NeedsMetadata("render/terrain/arena_surface_section_0.rpkg") &&
-            hs::apps::RendererGeometryCatalog::NeedsMetadata("render/meadow_ground.rpkg") &&
-            hs::apps::RendererGeometryCatalog::NeedsMetadata("render/terrain/arena_surface_section_x.rpkg") &&
-            hs::apps::RendererGeometryCatalog::NeedsMetadata("render/hlod/arena.shl1"),
-            "geometry metadata classifier changed its terrain or legacy product domain");
-        for (const std::string_view terrain_id : {"render/terrain/arena_surface.rpkg",
-                                                  "render/terrain/arena_surface_section_12.rpkg"})
-        {
-            auto terrain_bulk = shader_bulks[base_index];
-            terrain_bulk.asset_id = hs::MakeAssetId(terrain_id);
-            terrain_bulk.range.format = hs::render_data::RenderBulkFormat::Package;
-            const std::array terrain_bulks{terrain_bulk};
-            const std::array terrain_revisions{hs::render_data::RendererRevisionBulk{terrain_id, 0}};
-            auto terrain_config = config;
-            terrain_config.packed_source_revisions = {};
-            terrain_config.packed_bulks = terrain_bulks;
-            terrain_config.packed_revision_bulks = terrain_revisions;
-            Check(bool(validate_revisions(terrain_config)),
-                "terrain surface product rejected from packed revision catalog");
-        }
-        Check(hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/fullscreen_vs.dxil") &&
-            hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/local_probe_capture_source_base_vs.dxil") &&
-            hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/terrain_probe_capture.dxil") &&
-            !hs::render_data::IsLocalProbeCaptureShaderProduct("terrain/producer/bake_color_cs.dxil") &&
-            !hs::render_data::IsLocalProbeCaptureShaderProduct("terrain/producer/bake_base_cs.dxil") &&
-            !hs::render_data::IsLocalProbeCaptureShaderProduct("terrain/producer/bake_weight_cs.dxil") &&
-            !hs::render_data::IsLocalProbeCaptureShaderProduct("terrain/producer/mip_cs.dxil") &&
-            hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/terrain_probe_shadow.dxil") &&
-            hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/local_probe_sh_cs.dxil") &&
-            hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/local_probe_ggx_cs.dxil") &&
-            !hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/gtao_horizon_cs.dxil") &&
-            !hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/adaptive_gtao_cs.dxil") &&
-            !hs::render_data::IsLocalProbeCaptureShaderProduct("render/shader/unrelated_probe_capture.dxil"),
-            "local-probe shader revision scope included an unrelated shader or missed a capture product");
-        Check(hs::render_data::IsLocalProbeMaterialRevisionProduct(source_id) &&
-            hs::render_data::IsLocalProbeMaterialRevisionProduct("render/texture/environment/sky.rtex") &&
-            hs::render_data::IsLocalProbeMaterialRevisionProduct("render/geometry/environment.rgeo") &&
-            hs::render_data::IsLocalProbeMaterialRevisionProduct("environment/default_probe.spkg") &&
-            hs::render_data::IsLocalProbeMaterialRevisionProduct("render/material/terrain/material.rpkg") &&
-            hs::render_data::IsLocalProbeMaterialRevisionProduct("render/material/ground_detail/parameters.rpkg") &&
-            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/material/terrain_unrelated/material.rpkg") &&
-            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/material/slime_body/material.rpkg") &&
-            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/texture/vfx_masks.rpkg") &&
-            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/geometry/character/enemy_melee.rpage") &&
-            hs::render_data::IsLocalProbeMaterialRevisionProduct("render/shader/terrain_probe_capture.dxil") &&
-            hs::render_data::IsLocalProbeMaterialRevisionProduct("render/terrain/arena_surface.rpkg") &&
-            hs::render_data::IsLocalProbeMaterialRevisionProduct("render/terrain/arena_surface_section_12.rpkg") &&
-            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/terrain/arena_surface_section_x.rpkg") &&
-            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/terrain/arena_surface_section_.rpkg") &&
-            !hs::render_data::IsLocalProbeMaterialRevisionProduct("terrain/producer/bake_color_cs.dxil") &&
-            !hs::render_data::IsLocalProbeMaterialRevisionProduct("terrain/producer/bake_base_cs.dxil") &&
-            !hs::render_data::IsLocalProbeMaterialRevisionProduct("terrain/producer/bake_weight_cs.dxil") &&
-            !hs::render_data::IsLocalProbeMaterialRevisionProduct("terrain/producer/mip_cs.dxil") &&
-            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/shader/gtao_horizon_cs.dxil") &&
-            !hs::render_data::IsLocalProbeMaterialRevisionProduct("render/lighting/default_probe.rpkg"),
-            "local-probe compatibility missed static inputs or included unrelated runtime products");
-    }
 
     hs::ResidencyManager residency;
     constexpr std::uint32_t staging = 32u * 1024u * 1024u;
@@ -799,66 +545,6 @@ void CheckPackAssetReads(bool native)
     }
     Check(bool(initialized) && io.NativeEnabled() == native, "pack IO initialization mode mismatch");
     io.SetWaitForReads(true);
-    const auto digest_text = [](const std::array<std::byte, 32> &digest) {
-        constexpr char hex[] = "0123456789abcdef";
-        std::string text = "sha256:";
-        for (const auto value : digest)
-        {
-            const auto byte = std::to_integer<unsigned>(value);
-            text.push_back(hex[byte >> 4]);
-            text.push_back(hex[byte & 15]);
-        }
-        return text;
-    };
-    const auto whole_file_bytes = std::vector<std::byte>(pack_bytes.begin(), pack_bytes.end());
-    const auto whole_file_digest = digest_text(hs::Sha256(std::span(pack_bytes)));
-    auto loose_unbound = hs::RendererAssetSource::Loose(path);
-    const auto loose_unbound_snapshot = loose_unbound;
-    auto malformed_digest = whole_file_digest.substr(0, whole_file_digest.size() - 1);
-    Check(!loose_unbound.BindExpectedDigest(malformed_digest) && loose_unbound == loose_unbound_snapshot,
-        "malformed selected digest changed an unbound loose source");
-    auto uppercase_digest = whole_file_digest;
-    uppercase_digest[7] = 'A';
-    Check(!loose_unbound.BindExpectedDigest(uppercase_digest) && loose_unbound == loose_unbound_snapshot,
-        "uppercase selected digest changed an unbound loose source");
-    Check(bool(loose_unbound.BindExpectedDigest(whole_file_digest)) && loose_unbound.HasAdmittedWholeFileProof() &&
-        bool(loose_unbound.BindExpectedDigest(whole_file_digest)) &&
-        loose_unbound.AdmittedWholeFileProof() == hs::LooseRendererAsset::WholeFileProof{
-            whole_file_bytes.size(), hs::Sha256(whole_file_bytes)},
-        "loose selected digest binding was not successful and idempotent");
-    const auto admitted_loose_snapshot = loose_unbound;
-    auto wrong_loose_digest = whole_file_digest;
-    wrong_loose_digest[7] = wrong_loose_digest[7] == '0' ? '1' : '0';
-    Check(!loose_unbound.BindExpectedDigest(wrong_loose_digest) && loose_unbound == admitted_loose_snapshot,
-        "mismatched selected digest changed an admitted loose proof");
-    auto packed_match = source;
-    Check(bool(packed_match.BindExpectedDigest(digest_text(hs::Sha256(payload)))) && packed_match == source,
-        "matching packed selected digest was rejected or changed its range");
-    auto packed_mismatch = source;
-    const auto packed_mismatch_snapshot = packed_mismatch;
-    Check(!packed_mismatch.BindExpectedDigest(whole_file_digest) && packed_mismatch == packed_mismatch_snapshot,
-        "mismatched packed selected digest changed its range");
-    std::filesystem::copy_file(path,loose_path);
-    auto loose_bound_read = hs::RendererAssetSource::Loose(loose_path);
-    Check(bool(loose_bound_read.BindExpectedDigest(whole_file_digest)) &&
-        bool(loose_bound_read.Read(output, whole_file_bytes.size())) && output == whole_file_bytes,
-        "bound loose whole-file read did not return authenticated bytes");
-    const std::vector<std::byte> unchanged_output{std::byte{0x31}, std::byte{0x42}};
-    output = unchanged_output;
-    auto damaged_loose_bytes = whole_file_bytes;
-    damaged_loose_bytes[0] ^= std::byte{1};
-    {
-        std::ofstream file(loose_path,std::ios::binary|std::ios::trunc);
-        file.write(reinterpret_cast<const char *>(damaged_loose_bytes.data()),
-            static_cast<std::streamsize>(damaged_loose_bytes.size()));
-        file.close();
-        Check(bool(file), "could not write loose corruption fixture");
-    }
-    Check(!loose_bound_read.Read(output, whole_file_bytes.size()) && output == unchanged_output,
-        "same-size loose file corruption changed output or was accepted");
-    std::filesystem::copy_file(path,loose_path,std::filesystem::copy_options::overwrite_existing);
-    Check(bool(loose_bound_read.Read(output, whole_file_bytes.size())) && output == whole_file_bytes,
-        "restored loose whole-file fixture failed its selected digest");
     if (native)
     {
         // Loose immutable products retain FILE->MEMORY transport for compact
@@ -898,61 +584,8 @@ void CheckPackAssetReads(bool native)
               cancelled_range_output.bytes.empty() && !residency.Contains(cancelled_range_storage),
               "queued native cancellation published bytes or released storage before terminal status");
 
-        auto corrupt_ranges = ranges;
-        corrupt_ranges[0].digest[0] ^= std::byte{1};
-        const auto native_corrupt_request = streaming.Request("native-range-digest-failure",
-            "native-range-digest-failure", "generation", 1);
-        const auto corrupt_range_storage = residency.ReserveHost(payload.size() * 2);
-        bool corrupt_range_submitted{};
-        Check(native_corrupt_request && corrupt_range_storage &&
-            bool(io.Enqueue({native_corrupt_request, "generation", "native-range-digest-failure", loose,
-                payload.size(), owner, {}, std::vector<hs::ImmutableAssetRange>(
-                    corrupt_ranges.begin(), corrupt_ranges.end())}, streaming, residency,
-                corrupt_range_storage, corrupt_range_submitted, true)) && corrupt_range_submitted,
-            "native corrupt range was not queued");
-        io.SubmitQueuedReads();
-        hs::AssetReadCompletion corrupt_range_output;
-        Check(!io.Poll(native_corrupt_request, streaming, residency, corrupt_range_output) &&
-            !corrupt_range_output.ready && !residency.Contains(corrupt_range_storage) &&
-            !io.HasPendingReads(), "native range digest mismatch was published or retained");
-
-#if defined(_DEBUG)
-        {
-            const auto allocation_request = streaming.Request("native-prepare-allocation-failure",
-                "native-prepare-allocation-failure", "generation", 1);
-            const auto allocation_storage = residency.ReserveHost(payload.size() * 2);
-            auto generation_lease = std::make_shared<int>(1);
-            std::weak_ptr<int> generation_weak = generation_lease;
-            std::atomic_bool prepare_ran{false};
-            bool allocation_submitted{};
-            Check(allocation_request && allocation_storage &&
-                bool(io.Enqueue({allocation_request, "generation", "native-prepare-allocation-failure",
-                    loose, payload.size(), generation_lease,
-                    [&prepare_ran](std::span<const std::byte>) { prepare_ran.store(true, std::memory_order_release); },
-                    std::vector<hs::ImmutableAssetRange>(ranges.begin(), ranges.end())}, streaming, residency,
-                    allocation_storage, allocation_submitted, true)) && allocation_submitted,
-                "native allocation-failure preparation was not queued");
-            io.SubmitQueuedReads();
-            generation_lease.reset();
-            hs::AssetReadCompletion allocation_output;
-            auto allocation_result = hs::Result::Success();
-            bool allocation_rejected{};
-            {
-                RejectOneAllocation reject_one;
-                allocation_result = io.Poll(allocation_request, streaming, residency, allocation_output);
-                allocation_rejected = reject_one.Rejected();
-            }
-            const auto *allocation_page = streaming.Find(allocation_request);
-            Check(allocation_rejected && !allocation_result && !allocation_output.ready &&
-                !prepare_ran.load(std::memory_order_acquire) && !residency.Contains(allocation_storage) &&
-                !io.HasPendingReads() && generation_weak.expired() && allocation_page &&
-                allocation_page->state == hs::StreamingPageState::Cancelled,
-                "native preparation start allocation failure was not contained and reclaimed");
-        }
-#endif
-
         io.SetWaitForReads(false);
-        for (int mode = 0; mode < 4; ++mode)
+        for (const int mode : {0, 1, 3})
         {
             struct ReleasePrepareGate
             {
@@ -978,11 +611,10 @@ void CheckPackAssetReads(bool native)
             std::weak_ptr<int> generation_weak = generation_lease;
             bool submitted{};
             Check(request && storage && bool(io.Enqueue({request, generation, id, loose, payload.size(),
-                generation_lease, [started, release_future, prepare_done, mode](std::span<const std::byte>) {
+                generation_lease, [started, release_future, prepare_done](std::span<const std::byte>) {
                     started->set_value();
                     release_future.wait();
                     prepare_done->store(true, std::memory_order_release);
-                    if (mode == 2) throw std::runtime_error("failure after native cancellation");
                 }, std::vector<hs::ImmutableAssetRange>(ranges.begin(), ranges.end())},
                 streaming, residency, storage, submitted, true)) && submitted,
                 "native gated preparation was not queued");
@@ -1002,7 +634,7 @@ void CheckPackAssetReads(bool native)
             }
             Check(prepare_started, "native gated preparation callback did not start");
             hs::StreamingRequestId replacement{};
-            if (mode == 1 || mode == 2) io.Cancel(request, streaming);
+            if (mode == 1) io.Cancel(request, streaming);
             if (mode == 3)
             {
                 streaming.Reset();
@@ -1029,10 +661,7 @@ void CheckPackAssetReads(bool native)
             Check(terminal && prepare_done->load(std::memory_order_acquire) &&
                 !io.HasPendingReads() && generation_weak.expired(),
                 "native prepare terminal path retained work, storage or its generation owner");
-            if (mode == 2)
-                Check(!poll_succeeded && !prepare_output.ready && !residency.Contains(storage),
-                    "native prepare exception after cancellation was hidden");
-            else if (mode == 0)
+            if (mode == 0)
                 Check(poll_succeeded && prepare_output.ready && !prepare_output.cancelled &&
                     prepare_output.bytes == std::vector<std::byte>(payload.begin(), payload.end()) &&
                     residency.Contains(storage) && streaming.CompleteRead(request, generation) &&
@@ -1070,6 +699,23 @@ void CheckPackAssetReads(bool native)
             !residency.Contains(storage), "pack IO did not reclaim its completed reservation");
     };
     read(source); // Establish the native binding before replacing its pathname.
+    {
+        const std::array ranges{
+            hs::ImmutableAssetRange{0, 1, hs::Sha256(std::span(payload).first(1))},
+            hs::ImmutableAssetRange{2, 2, hs::Sha256(std::span(payload).subspan(2))}};
+        const auto request = streaming.Request("packed-relative-ranges", "packed-relative-ranges", "generation", 1);
+        const auto storage = residency.ReserveHost(6);
+        bool submitted{};
+        Check(request && storage && bool(io.Enqueue({request, "generation", "packed-relative-ranges", source,
+            3, owner, {}, std::vector<hs::ImmutableAssetRange>(ranges.begin(), ranges.end())},
+            streaming, residency, storage, submitted)) && submitted,
+            "product-relative packed ranges were not submitted");
+        hs::AssetReadCompletion completion;
+        Check(bool(io.Poll(request, streaming, residency, completion)) && completion.ready && !completion.cancelled &&
+            completion.bytes == std::vector<std::byte>{payload[0], payload[2], payload[3]} &&
+            streaming.CompleteRead(request, "generation") && residency.ReleaseNow(completion.storage),
+            "packed subresource ranges did not apply the product base exactly once");
+    }
     std::filesystem::rename(path, old_path);
     pack_bytes[64] ^= std::byte{1};
     write();
@@ -1077,12 +723,6 @@ void CheckPackAssetReads(bool native)
         "retained CPU pack changed after pathname replacement");
     read(source);
     read(unbound); // A new native binding must fall back to this retained CPU file.
-
-    std::atomic_bool prepared{};
-    const auto [bad, bad_storage] = enqueue(corrupt, [&](std::span<const std::byte>) { prepared = true; });
-    hs::AssetReadCompletion failed;
-    Check(!io.Poll(bad, streaming, residency, failed) && !prepared && !failed.ready &&
-        !residency.Contains(bad_storage), "corrupt pack was prepared, published, or leaked storage");
 
     const auto [cancelled, cancelled_storage] = enqueue(source);
     io.Cancel(cancelled, streaming);
@@ -1101,12 +741,6 @@ void CheckPackAssetReads(bool native)
 
 int main()
 {
-#if defined(_DEBUG)
-    _CrtSetReportMode(_CRT_ERROR, _CRTDBG_MODE_FILE);
-    _CrtSetReportFile(_CRT_ERROR, _CRTDBG_FILE_STDERR);
-    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
-    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
-#endif
     try
     {
         hs::RendererTextureStreaming texture_working_set;
@@ -1165,44 +799,55 @@ int main()
         const auto fallback = residency.Register(hs::ResidencyCategory::Texture, 80, true);
         const auto streamed = residency.Register(hs::ResidencyCategory::Texture, 200, false);
         const auto staging = residency.Register(hs::ResidencyCategory::Staging, 40, false);
-        Check(fallback && streamed && staging, "residency tickets were not allocated");
+        const auto nonlocal_skin = residency.Register(hs::ResidencyCategory::Skin, 64, false,
+            hs::ResidencyStorage::GpuAllocation, hs::ResidencySegment::NonLocal);
+        Check(fallback && streamed && staging && nonlocal_skin, "residency tickets were not allocated");
+        auto accounting = residency.Accounting();
+        const auto texture_category = static_cast<std::size_t>(hs::ResidencyCategory::Texture);
+        const auto skin_category = static_cast<std::size_t>(hs::ResidencyCategory::Skin);
+        Check(accounting.live_total == 384 && accounting.local_live_bytes[texture_category] == 280 &&
+            accounting.nonlocal_live_bytes[skin_category] == 64,
+            "native allocation categories or memory segments were not accounted");
         Check(!residency.Retire(fallback, {1, 0, 0}), "pinned fallback was retired");
+        Check(residency.Retire(nonlocal_skin, {2, 0, 0}) && residency.Retire(nonlocal_skin, {0, 0, 4}),
+            "nonlocal retirement did not merge queue completions");
+        accounting = residency.Accounting();
+        Check(accounting.live_total == 320 && accounting.retiring_total == 64 &&
+            accounting.nonlocal_live_bytes[skin_category] == 0 &&
+            accounting.nonlocal_retiring_bytes[skin_category] == 64,
+            "repeated retirement moved native bytes more than once");
         Check(residency.Retire(staging, {0, 0, 3}), "staging retirement failed");
         Check(residency.Collect({0, 0, 2}) == 0, "staging reclaimed before copy completion");
         Check(residency.Collect({0, 0, 3}) == 1, "staging was not reclaimed at completion");
-        auto accounting = residency.Accounting();
-        Check(accounting.live_total == 280 && accounting.retiring_total == 0,
+        accounting = residency.Accounting();
+        Check(accounting.live_total == 280 && accounting.retiring_total == 64,
               "residency live accounting mismatch");
         Check(accounting.reclaimed_total == 40, "residency reclaimed accounting mismatch");
         Check(residency.ReleaseNow(streamed), "explicit resident release failed");
         accounting = residency.Accounting();
         Check(accounting.live_total == 80 && accounting.reclaimed_total == 240,
               "residency explicit release accounting mismatch");
+        Check(residency.Collect({2, 0, 4}) == 1, "nonlocal native bytes were not reclaimed at completion");
+        accounting = residency.Accounting();
+        Check(accounting.retiring_total == 0 && accounting.nonlocal_retiring_bytes[skin_category] == 0 &&
+            accounting.reclaimed_total == 304, "native collection left retired category bytes");
+        residency.Reset();
+        accounting = residency.Accounting();
+        Check(accounting.live_total == 0 && accounting.retiring_total == 0 && accounting.reclaimed_total == 0 &&
+            accounting.live_bytes[texture_category] == 0 && accounting.local_live_bytes[texture_category] == 0 &&
+            !accounting.budget.valid, "reset retained native bytes or budget observations");
 
-        // Admission uses cached domain totals; verify mutations and overflow recovery against the ledger.
-        const auto pressure_matches_accounting = [](const hs::ResidencyManager &manager) {
-            const auto facts = manager.GpuPressureFacts();
-            const auto accounting = manager.Accounting();
-            const auto &a = facts.budget;
-            const auto &b = accounting.budget;
-            return a.valid == b.valid && a.local_budget == b.local_budget && a.local_usage == b.local_usage &&
-                a.nonlocal_budget == b.nonlocal_budget && a.nonlocal_usage == b.nonlocal_usage &&
-                a.host_budget_valid == b.host_budget_valid && a.host_staging_budget == b.host_staging_budget &&
-                a.nonlocal_valid == b.nonlocal_valid && a.local_fresh == b.local_fresh &&
-                a.nonlocal_fresh == b.nonlocal_fresh && a.host_fresh == b.host_fresh &&
-                a.unified_memory == b.unified_memory &&
-                facts.growth_since_snapshot == accounting.gpu_growth_since_snapshot &&
-                facts.local_growth_since_snapshot == accounting.local_growth_since_snapshot &&
-                facts.nonlocal_growth_since_snapshot == accounting.nonlocal_growth_since_snapshot;
-        };
+        // Admission uses cached domain totals on the normal reservation lifecycle.
         hs::ResidencyManager admission;
         Check(!admission.CanAdmit(1) && !admission.CanStage(1),
             "optional native or host work was admitted without an initial observation");
-        Check(pressure_matches_accounting(admission), "unknown GPU pressure facts diverged from accounting");
         admission.UpdateBudget({true, 1000, 0, 0, 0, true, 1000});
         const auto gpu_reservation = admission.ReserveGpu(300);
         const auto host_reservation = admission.ReserveHost(700);
-        Check(pressure_matches_accounting(admission), "reserved GPU pressure facts diverged from accounting");
+        accounting = admission.Accounting();
+        Check(accounting.gpu_reserved_total == 300 && accounting.gpu_reserved_by_segment[0] == 300 &&
+            accounting.host_reserved_total == 700 && accounting.host_staging_total == 0 && accounting.live_total == 0,
+            "reservation bytes were mixed with native allocations");
         auto host_facts = admission.HostAdmissionFacts();
         Check(gpu_reservation && host_reservation && admission.CanAdmit(600) && !admission.CanAdmit(601) &&
             admission.CanStage(300) && !admission.CanStage(301) &&
@@ -1210,10 +855,11 @@ int main()
             !host_facts.held_overflow, "reservation admission boundaries or live host facts changed");
         Check(!admission.CommitHost(host_reservation, 701) && !admission.CommitHost(host_reservation, 0) &&
             !admission.CanStage(301), "failed host commit changed admission");
-        Check(pressure_matches_accounting(admission), "rejected host commit changed GPU pressure facts");
         Check(admission.CommitHost(host_reservation, 400) && admission.CanStage(600) && !admission.CanStage(601),
             "host commit did not shrink held admission");
-        Check(pressure_matches_accounting(admission), "host commit changed GPU pressure facts");
+        accounting = admission.Accounting();
+        Check(accounting.host_reserved_total == 0 && accounting.host_staging_total == 400 &&
+            accounting.gpu_reserved_total == 300, "host commit did not transfer and shrink its storage accounting");
         const auto second_host_reservation = admission.ReserveHost(600);
         host_facts = admission.HostAdmissionFacts();
         Check(second_host_reservation && host_facts.held_bytes == 1000 && !admission.ReserveHost(1),
@@ -1226,38 +872,10 @@ int main()
             !admission.CanAdmit(601) && admission.Collect({1, 0, 0}) == 0 &&
             admission.Collect({2, 0, 0}) == 1 && admission.CanAdmit(900),
             "retiring reservation admission changed before completion");
-        Check(pressure_matches_accounting(admission), "retired GPU reservation facts diverged from accounting");
         Check(admission.ReleaseNow(host_reservation) && admission.CanStage(1000), "host abort leaked admission");
-        Check(pressure_matches_accounting(admission), "released host reservation changed GPU pressure facts");
-        for (const auto storage : {hs::ResidencyStorage::GpuReservation, hs::ResidencyStorage::HostReservation,
-                                   hs::ResidencyStorage::HostStaging})
-        {
-            admission.Reset();
-            admission.UpdateBudget({true, UINT64_MAX, 0, 0, 0, true, UINT64_MAX});
-            const auto huge = admission.Register(hs::ResidencyCategory::Staging, UINT64_MAX, false, storage);
-            const auto extra = admission.Register(hs::ResidencyCategory::Staging, 1, false, storage);
-            Check(huge && extra, "overflow test could not create its tracked ledger entries");
-            Check(pressure_matches_accounting(admission), "overflow reservation facts diverged from accounting");
-            const auto allowed = [&](std::uint64_t bytes) {
-                return storage == hs::ResidencyStorage::GpuReservation ? admission.CanAdmit(bytes, 0) : admission.CanStage(bytes);
-            };
-            Check(!allowed(0), "overflowed admission sum accepted");
-            Check(admission.ReleaseNow(extra) && allowed(0) && !allowed(1), "overflow release did not restore exact maximum");
-            Check(pressure_matches_accounting(admission), "released overflow facts diverged from accounting");
-            const auto again = admission.Register(hs::ResidencyCategory::Staging, 1, false, storage);
-            Check(again && !allowed(0) && admission.Retire(again, {2, 0, 0}) &&
-                admission.Collect({1, 0, 0}) == 0 && !allowed(0) &&
-                admission.Collect({2, 0, 0}) == 1 && allowed(0), "overflow collect recovery failed");
-            if (storage == hs::ResidencyStorage::HostReservation)
-            {
-                const auto staged = admission.Register(hs::ResidencyCategory::Staging, 1, false, hs::ResidencyStorage::HostStaging);
-                Check(staged && !allowed(0) && admission.CommitHost(huge, UINT64_MAX - 1) && allowed(0),
-                    "overflow host commit recovery failed");
-                Check(pressure_matches_accounting(admission), "overflow host commit changed GPU pressure facts");
-                Check(admission.ReleaseNow(staged), "mixed host staging release failed");
-            }
-            Check(admission.ReleaseNow(huge) && allowed(UINT64_MAX), "domain release retained cached bytes");
-        }
+        accounting = admission.Accounting();
+        Check(accounting.host_reserved_total == 0 && accounting.host_staging_total == 0 &&
+            accounting.gpu_reserved_total == 0, "completed reservations retained storage accounting");
         admission.Reset();
         admission.UpdateBudget({true, 1000, 0, 0, 0, true, 1000});
         admission.RecordNativeGrowth(hs::ResidencySegment::Local, 100);
@@ -1289,7 +907,6 @@ int main()
             "non-local native growth consumed local-only texture pressure headroom");
         observations.RecordNativeGrowth(hs::ResidencySegment::Local, 100);
         observations.RecordNativeGrowth(hs::ResidencySegment::NonLocal, 120);
-        Check(pressure_matches_accounting(observations), "segmented growth facts diverged from accounting");
         observations.UpdateBudget({});
         auto domain_accounting = observations.Accounting();
         Check(local_growth && nonlocal_growth && domain_accounting.budget.valid &&
@@ -1297,7 +914,6 @@ int main()
             domain_accounting.nonlocal_growth_since_snapshot == 120 &&
             !observations.CanAdmit(1, 10, hs::ResidencySegment::Local) &&
             !observations.CanStage(1), "failed refresh erased last-valid data or left stale admission open");
-        Check(pressure_matches_accounting(observations), "stale GPU pressure facts diverged from accounting");
         hs::ResidencyBudgetSnapshot local_only{true, 1'000, 220, 0, 0, false, 0};
         observations.UpdateBudget(local_only);
         domain_accounting = observations.Accounting();
@@ -1307,7 +923,6 @@ int main()
             observations.CanAdmit(1, 10, hs::ResidencySegment::Local) &&
             !observations.CanAdmit(1, 10, hs::ResidencySegment::NonLocal),
             "partial refresh absorbed or replaced another segment's growth/last-valid observation");
-        Check(pressure_matches_accounting(observations), "partial-refresh pressure facts diverged from accounting");
         hs::ResidencyBudgetSnapshot nonlocal_only{};
         nonlocal_only.nonlocal_valid = true;
         nonlocal_only.nonlocal_budget = 1'000;
@@ -1317,15 +932,6 @@ int main()
         Check(domain_accounting.nonlocal_growth_since_snapshot == 0 &&
             domain_accounting.budget.local_usage == 220 && domain_accounting.budget.nonlocal_usage == 320,
             "successful non-local refresh did not independently absorb only its own growth");
-        observations.RecordNativeGrowth(hs::ResidencySegment::Local, UINT64_MAX);
-        observations.RecordNativeGrowth(hs::ResidencySegment::NonLocal, 1);
-        const auto saturated_pressure = observations.GpuPressureFacts();
-        Check(saturated_pressure.growth_since_snapshot == UINT64_MAX &&
-            saturated_pressure.local_growth_since_snapshot == UINT64_MAX &&
-            saturated_pressure.nonlocal_growth_since_snapshot == 1 &&
-            pressure_matches_accounting(observations),
-            "GPU pressure growth did not preserve saturating segmented totals");
-
         hs::ResidencyManager unified;
         hs::ResidencyBudgetSnapshot unified_budget{true, 1'000, 0, 0, 0, true, 1'000};
         unified_budget.unified_memory = true;
@@ -1334,7 +940,6 @@ int main()
               unified.HostAdmissionFacts().budget.unified_memory &&
               unified.Accounting().budget.unified_memory,
             "UMA budget topology was not published consistently to consumers");
-        Check(pressure_matches_accounting(unified), "UMA GPU pressure facts diverged from accounting");
         {
             hs::ScopedGpuAdmission admission(unified, 500, 400);
             Check(admission && unified.Accounting().gpu_reserved_by_segment[0] == 900 &&

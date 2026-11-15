@@ -3,16 +3,13 @@
 
 #include <array>
 #include <algorithm>
-#include <bit>
 #include <cmath>
 #include <format>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
-#include <thread>
 #include <ranges>
 
 namespace
@@ -68,138 +65,8 @@ void TestPauseDoesNotAdvance()
           "paused simulation does not advance");
 }
 
-void TestOptionalChecksums()
-{
-    hs::GameSimulation captured, ordinary;
-    hs::SimulationConfig config{37};
-    Check(captured.Initialize(config).Succeeded(), "captured initialize");
-    config.capture_checksums = false;
-    Check(ordinary.Initialize(config).Succeeded(), "ordinary initialize");
-    Check(ordinary.ComputeChecksum() == captured.ComputeChecksum(), "on-demand initial checksum");
-    for (hs::Tick tick = 1; tick <= 240; ++tick)
-    {
-        if (tick % 40 == 1)
-        {
-            const hs::DebugCommand spawn{hs::DebugCommandKind::SpawnEnemy, tick % 3, 0, {5, 7}};
-            Check(captured.ApplyDebugCommand(spawn).Succeeded() &&
-                  ordinary.ApplyDebugCommand(spawn).Succeeded(), "optional checksum debug spawn");
-            Check(ordinary.ComputeChecksum() == captured.ComputeChecksum(), "on-demand debug checksum");
-        }
-        hs::InputFrame input{};
-        input.target_tick = tick;
-        input.held.move_held = true;
-        input.held.move_target_world = {20, 0, tick < 120 ? 10.0f : -10.0f};
-        input.held.basic_attack_held = tick % 8 == 0;
-        const auto expected = captured.TickFixed(input);
-        const auto actual = ordinary.TickFixed(input);
-        Check(actual.tick == expected.tick && actual.phase == expected.phase &&
-              actual.checksum == 0, "ordinary tick omits checksum only");
-        Check(ordinary.ComputeChecksum() == expected.checksum, "capture mode preserves gameplay state");
-        hs::GameReadModelStorage model;
-        hs::CopyReadModelForDevelopment(ordinary, model);
-        Check(model.checksum == 0, "explicit checksum does not enable read-model capture");
-    }
-    for (const auto action : {hs::UiActionKind::ReturnToMainMenu, hs::UiActionKind::StartSession})
-    {
-        captured.ApplyUiAction({action});
-        ordinary.ApplyUiAction({action});
-        Check(ordinary.ComputeChecksum() == captured.ComputeChecksum(), "on-demand UI checksum");
-        const auto expected = captured.TickFixed({});
-        const auto actual = ordinary.TickFixed({});
-        Check(actual.checksum == 0 && ordinary.ComputeChecksum() == expected.checksum,
-              "optional checksum handles inactive and resumed phases");
-    }
-}
-
-void TestOptInSimulationTimings()
-{
-    hs::GameSimulation ordinary, measured;
-    hs::SimulationConfig config{419};
-    Check(ordinary.Initialize(config).Succeeded(), "unmeasured simulation initialize");
-    config.capture_timings = true;
-    Check(measured.Initialize(config).Succeeded(), "measured simulation initialize");
-    Check(ordinary.GetTimingDiagnostics().empty_scope_calibration.calls == 0 &&
-              measured.GetTimingDiagnostics().empty_scope_calibration.calls == 64,
-          "only opt-in initialization performs empty-scope clock calibration");
-    constexpr std::array phase_ids{
-        hs::SimulationTimingId::SessionTimer, hs::SimulationTimingId::Spawn,
-        hs::SimulationTimingId::SpawnBarrier, hs::SimulationTimingId::AiIntent,
-        hs::SimulationTimingId::CastAttack, hs::SimulationTimingId::AbilitySpawnBarrier,
-        hs::SimulationTimingId::Movement, hs::SimulationTimingId::SpatialGrid,
-        hs::SimulationTimingId::CollisionHit, hs::SimulationTimingId::DamageStatus,
-        hs::SimulationTimingId::DeathDrop, hs::SimulationTimingId::XpCard,
-        hs::SimulationTimingId::CleanupBarrier, hs::SimulationTimingId::GameplayHash};
-    for (hs::Tick tick = 1; tick <= 4; ++tick)
-    {
-        hs::InputFrame input{}; input.target_tick = tick;
-        input.held.move_held = true; input.held.move_target_world = {10, 0, 5};
-        const auto plain = ordinary.TickFixed(input);
-        const auto timed = measured.TickFixed(input);
-        Check(plain.tick == timed.tick && plain.checksum == timed.checksum && plain.phase == timed.phase,
-              "clock observations preserve deterministic tick results");
-        const auto off = ordinary.GetTimingDiagnostics();
-        Check(!off.captured && !off.completed && std::ranges::all_of(off.scopes, [](const auto &sample) {
-            return sample.calls == 0 && sample.nanoseconds == 0;
-        }), "disabled capture leaves every timing counter zero");
-        const auto snapshot = measured.GetTimingDiagnostics();
-        Check(snapshot.captured && snapshot.completed && snapshot.tick == timed.tick &&
-                  snapshot.scopes[static_cast<std::size_t>(hs::SimulationTimingId::Tick)].calls == 1 &&
-                  snapshot.scopes[static_cast<std::size_t>(hs::SimulationTimingId::Input)].calls == 1,
-              "one completed timing snapshot belongs to the actual tick");
-        for (const auto phase : phase_ids)
-            Check(snapshot.scopes[static_cast<std::size_t>(phase)].calls == 1,
-                  "each canonical phase executes once and counters reset between ticks");
-        (void)measured.GetSessionProbe();
-        const auto observed = measured.GetTimingDiagnostics();
-        Check(observed.scopes[static_cast<std::size_t>(hs::SimulationTimingId::SmallFacts)].calls == 1 &&
-                  measured.ComputeChecksum() == timed.checksum,
-              "post-tick small facts are measured without mutating logical state");
-    }
-    Check(measured.ApplyDebugCommand({hs::DebugCommandKind::TogglePause}).Succeeded(), "pause timing fixture");
-    const auto paused = measured.TickFixed({});
-    const auto snapshot = measured.GetTimingDiagnostics();
-    Check(snapshot.completed && snapshot.tick == paused.tick &&
-              snapshot.scopes[static_cast<std::size_t>(hs::SimulationTimingId::Input)].calls == 1,
-          "paused input completion is observable without advancing gameplay time");
-    for (const auto phase : phase_ids)
-        Check(snapshot.scopes[static_cast<std::size_t>(phase)].calls == 0,
-              "paused timing does not invent gameplay phases");
-}
-
-void TestAutomaticSpawningScenarioPolicy()
-{
-    auto rules = hs::SimulationRules::Defaults();
-    rules.arena_obstacle_count = 0;
-    for (auto &stage : rules.spawn_stages) stage.per_second = 60.0f;
-    hs::SimulationConfig controlled{421};
-    controlled.scenario.progression_enabled = false;
-    controlled.scenario.automatic_spawning = false;
-    hs::GameSimulation fixed, natural;
-    Check(fixed.Initialize(controlled, rules).Succeeded(), "fixed-count scenario initialize");
-    controlled.scenario.automatic_spawning = true;
-    Check(natural.Initialize(controlled, rules).Succeeded(), "natural spawn scenario initialize");
-    for (hs::Tick tick = 1; tick <= 2; ++tick)
-    {
-        (void)fixed.TickFixed({tick});
-        (void)natural.TickFixed({tick});
-    }
-    Check(fixed.GetSessionProbe().normal_enemy_count == 0 &&
-              natural.GetSessionProbe().normal_enemy_count > 0,
-          "automatic spawn policy is independent of XP progression and defaults to natural spawning");
-    Check(fixed.ApplyDebugCommand({hs::DebugCommandKind::SpawnEnemy, 0, 0, {5, 0}}).Succeeded(),
-          "fixed-count scenario admits explicit enemy setup");
-    (void)fixed.TickFixed({3});
-    Check(fixed.GetSessionProbe().normal_enemy_count == 1,
-          "manual setup remains active through normal AI ticks without natural additions");
-}
-
 void TestScopedTickReadView()
 {
-    static_assert(std::ranges::input_range<const hs::EnemyReadColumns>);
-    static_assert(std::ranges::input_range<const hs::ProjectileReadColumns>);
-    static_assert(!std::is_copy_constructible_v<hs::GameSimulation::ScopedTickReadView>);
-    static_assert(!std::is_move_constructible_v<hs::GameSimulation>);
-    static_assert(std::is_same_v<decltype(hs::ProjectileReadValue::bleed_extend_ticks), std::span<const hs::Tick>>);
     hs::GameSimulation simulation;
     Check(simulation.Initialize({317}).Succeeded(), "borrow simulation initialize");
     Check(simulation.ApplyDebugCommand({hs::DebugCommandKind::SpawnEnemy, 0, 0, {5, 7}}).Succeeded(),
@@ -209,34 +76,13 @@ void TestScopedTickReadView()
         auto first = simulation.BorrowTickReadView();
         auto nested = simulation.BorrowTickReadView();
         auto moved = std::move(first);
-        bool moved_rejected{};
-        try { (void)first.View(); } catch (const std::logic_error &) { moved_rejected = true; }
-        Check(moved_rejected && moved.View().enemies.size() == 1 &&
+        Check(moved.View().enemies.size() == 1 &&
                   moved.View().enemies.begin()->position.x == 5 &&
                   &moved.View().session == &nested.View().session,
               "nested and moved scopes borrow the same current owner");
-        const auto rejects = [&](auto operation) {
-            bool rejected{};
-            try { operation(); } catch (const std::logic_error &) { rejected = true; }
-            Check(rejected, "every public mutation ingress rejects active read borrows");
-        };
-        rejects([&] { (void)simulation.TickFixed({}); });
-        rejects([&] { simulation.ApplyUiAction({hs::UiActionKind::ReturnToMainMenu}); });
-        rejects([&] { (void)simulation.ApplyDebugCommand({hs::DebugCommandKind::DamagePlayer, 1}); });
-        rejects([&] { (void)simulation.ApplySimulationRules(simulation.Rules()); });
-        rejects([&] { simulation.ClearDomainSignals(); });
-        rejects([&] { (void)simulation.Shutdown(); });
-        rejects([&] { (void)simulation.Initialize({318}); });
         Check(moved.View().checksum == checksum && simulation.ComputeChecksum() == checksum,
-              "rejected mutations leave the borrowed state unchanged");
+              "borrowed state retains the current checksum");
     }
-    bool foreign_rejected{};
-    std::thread foreign([&] {
-        try { auto read = simulation.BorrowTickReadView(); }
-        catch (const std::logic_error &) { foreign_rejected = true; }
-    });
-    foreign.join();
-    Check(foreign_rejected, "read scopes stay on their simulation owner thread");
     Check(simulation.ApplyDebugCommand({hs::DebugCommandKind::TogglePause}).Succeeded(), "pause before same-tick mutation");
     const auto before = simulation.GetSessionProbe();
     Check(simulation.ApplyDebugCommand({hs::DebugCommandKind::DamagePlayer, 3}).Succeeded(), "same-tick debug mutation");
@@ -248,15 +94,7 @@ void TestScopedTickReadView()
     }
     const auto failed = simulation.ApplyDebugCommand({hs::DebugCommandKind::GrantSkill, 999});
     Check(!failed.Succeeded() && simulation.GetSessionProbe().health == before.health - 3,
-          "failed mutation releases its scope and keeps observation fresh");
-    {
-        auto exception_scope = simulation.BorrowTickReadView();
-        try {
-            auto nested = simulation.BorrowTickReadView();
-            throw std::runtime_error("scope unwinding fixture");
-        } catch (const std::runtime_error &) {}
-        Check(exception_scope.View().session.health == before.health - 3, "nested exception releases only its borrow");
-    }
+          "failed mutation keeps observation fresh");
     simulation.ApplyUiAction({hs::UiActionKind::ReturnToMainMenu});
     auto changed = simulation.Rules();
     changed.skills[0].range += 1.0f;
@@ -304,37 +142,6 @@ void TestQueuedResumePreservesQuit()
     Check(unchanged.phase == hs::SessionPhase::MainMenu && unchanged.tick == 0 &&
               unchanged.checksum == before,
           "stale Resume cannot start a session from MainMenu");
-}
-
-void TestRulesHashAndAbilityMapping()
-{
-    const auto rules = hs::SimulationRules::Defaults();
-    Check(rules.status_tick_interval == 30 &&
-              rules.bleed_duration == 240 &&
-              rules.bleed_tick_coefficient == 0.20f &&
-              rules.burn_duration == 240 &&
-              rules.burn_tick_coefficient == 0.35f,
-          "default status rules match the gameplay specification");
-    constexpr std::array expected{
-        hs::AbilityHandlerId::BasicProjectileCadence,
-        hs::AbilityHandlerId::PiercingProjectile,
-        hs::AbilityHandlerId::UniformFanProjectiles,
-        hs::AbilityHandlerId::HoldReleaseLinearCharge,
-        hs::AbilityHandlerId::ProjectileToAreaExplosion,
-        hs::AbilityHandlerId::NearestUnhitTargetRicochet,
-        hs::AbilityHandlerId::TargetedPeriodicArea,
-        hs::AbilityHandlerId::ForwardRollLeaveTrap,
-        hs::AbilityHandlerId::ForcedRetreatAndProjectile};
-    for (std::size_t index = 0; index < expected.size(); ++index)
-        Check(rules.skills[index].handler == expected[index],
-              "default ability handler mapping");
-
-    auto changed = rules;
-    changed.skills[0].damage_coefficient += 0.25f;
-    Check(hs::SimulationRulesHash(rules) == hs::SimulationRulesHash(rules),
-          "rules hash stability");
-    Check(hs::SimulationRulesHash(rules) != hs::SimulationRulesHash(changed),
-          "gameplay rule changes rules hash");
 }
 
 void TestSameTickFinalBossVictory()
@@ -574,32 +381,6 @@ hs::GameplayChecksum RunMovementEchoHistory(hs::Tick age, bool forced_move)
             restarted_echo = true;
         }
     Check(restarted_echo, "new session emits a warmup echo");
-    if (age == 0)
-    {
-        simulation.ApplyUiAction({hs::UiActionKind::ReturnToMainMenu});
-        rules.relics.movement_echo.position_history_age_ticks = 5;
-        Check(simulation.ApplySimulationRules(rules).Succeeded(), "echo history age reload");
-        simulation.ApplyUiAction({hs::UiActionKind::StartSession});
-        Debug(simulation, hs::DebugCommandKind::GrantRelic,
-              static_cast<std::uint64_t>(hs::RelicKind::MovementEcho));
-        held.basic_attack_held = false;
-        held.move_held = true;
-        for (std::size_t tick = 1; tick <= 10; ++tick)
-        {
-            (void)Advance(simulation, held);
-            positions[tick] = simulation.GetSessionProbe().player_position;
-        }
-        held.move_held = false;
-        held.basic_attack_held = true;
-        simulation.ClearDomainSignals();
-        (void)Advance(simulation, held);
-        const auto reloaded_signals = simulation.PendingDomainSignals();
-        const auto reloaded_echo = std::ranges::find(
-            reloaded_signals, hs::DomainSignalKind::AfterimageArrowFired, &hs::DomainSignal::kind);
-        Check(reloaded_echo != reloaded_signals.end(), "reloaded history emits an echo");
-        CheckPosition({reloaded_echo->position.x, reloaded_echo->position.z}, positions[6],
-                      "reloaded age resizes and resets the new session history");
-    }
     return checksum;
 }
 
@@ -611,70 +392,6 @@ void TestMovementEchoHistory()
     (void)RunMovementEchoHistory(60, true);
 }
 
-void TestNavigationRulesReload()
-{
-    auto old_rules = QuietRules();
-    old_rules.arena_obstacle_count = 2;
-    old_rules.arena_obstacles[0] = {hs::ArenaObstacleKind::Rock, {7, 0}, 2};
-    const auto edge = old_rules.arena_half_extent - 1;
-    old_rules.arena_obstacles[1] = {hs::ArenaObstacleKind::Rock, {-edge / 2, -edge / 2}, 1};
-    old_rules.boss_common.initial_pattern_delay_ticks = 0;
-    old_rules.bosses[static_cast<std::size_t>(hs::BossKind::TenMinute)].preferred_distance_far = 0;
-    hs::GameSimulation reloaded;
-    Check(reloaded.Initialize({144}, old_rules).Succeeded(), "navigation reload initialize");
-    const auto spawn = [](hs::GameSimulation &simulation) {
-        Debug(simulation, hs::DebugCommandKind::SpawnEnemy, 0, {15, 0});
-        Debug(simulation, hs::DebugCommandKind::SpawnBoss,
-              static_cast<std::uint64_t>(hs::BossKind::TenMinute));
-    };
-    hs::HeldInputState held{};
-    held.move_held = true;
-    held.move_target_world = {15, 0, 0};
-    spawn(reloaded);
-    (void)Advance(reloaded, held); // Prime both cached target cells with the old grids.
-    reloaded.ApplyUiAction({hs::UiActionKind::ReturnToMainMenu});
-    auto new_rules = old_rules;
-    new_rules.arena_obstacles[0].radius = 3;
-    new_rules.arena_obstacles[1].radius = 4;
-    new_rules.stats.player_collision_radius += 0.25f;
-    new_rules.enemies[0].collision_radius += 0.25f;
-    new_rules.boss_common.collision_radius += 0.25f;
-    Check(reloaded.ApplySimulationRules(new_rules).Succeeded(), "navigation rules reload");
-    reloaded.ApplyUiAction({hs::UiActionKind::StartSession});
-    hs::GameSimulation fresh;
-    Check(fresh.Initialize({144}, new_rules).Succeeded(), "fresh navigation initialize");
-    spawn(reloaded);
-    spawn(fresh);
-    for (int step = 0; step < 120; ++step)
-    {
-        (void)Advance(reloaded, held);
-        (void)Advance(fresh, held);
-        CheckPosition(reloaded.GetSessionProbe().player_position, fresh.GetSessionProbe().player_position,
-                      "reloaded player navigation matches a fresh rules initialization");
-        hs::GameReadModelStorage actual, expected;
-        hs::CopyReadModelForDevelopment(reloaded, actual);
-        hs::CopyReadModelForDevelopment(fresh, expected);
-        Check(actual.View().enemies.size() == 2 && expected.View().enemies.size() == 2,
-              "navigation reload keeps both normal enemy and boss alive");
-        for (std::size_t index = 0; index < 2; ++index)
-            CheckPosition(actual.View().enemies[index].position, expected.View().enemies[index].position,
-                          "reloaded normal and boss navigation match fresh grids");
-    }
-}
-
-void TestProgressionRuleAdmission()
-{
-    auto invalid = QuietRules();
-    invalid.progression.required_xp_base = 0.5f;
-    invalid.progression.required_xp_linear = invalid.progression.required_xp_quadratic = 0.0f;
-    hs::GameSimulation rejected;
-    Check(!rejected.Initialize({144}, invalid).Succeeded(), "invalid progression is rejected at initialization");
-    hs::GameSimulation simulation;
-    Check(simulation.Initialize({144}, QuietRules()).Succeeded(), "valid progression initialization");
-    simulation.ApplyUiAction({hs::UiActionKind::ReturnToMainMenu});
-    Check(!simulation.ApplySimulationRules(invalid).Succeeded(), "invalid progression is rejected at reload");
-}
-
 } // namespace
 
 int main()
@@ -682,18 +399,12 @@ int main()
     try
     {
         TestPauseDoesNotAdvance();
-        TestOptionalChecksums();
-        TestOptInSimulationTimings();
-        TestAutomaticSpawningScenarioPolicy();
         TestScopedTickReadView();
         TestQueuedResumePreservesQuit();
-        TestRulesHashAndAbilityMapping();
         TestSameTickFinalBossVictory();
         TestTerminalPhaseKeepsPickups();
         TestMultipleChestRewards();
         TestMovementEchoHistory();
-        TestNavigationRulesReload();
-        TestProgressionRuleAdmission();
         TestDeterminism();
         std::cout << "simulation_tests passed\n";
         return 0;

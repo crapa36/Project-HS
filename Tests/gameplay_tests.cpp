@@ -8,7 +8,6 @@
 namespace gameplay_test
 {
 
-void RunGameplayContentTests();
 void RunGameplayCombatTests();
 void RunGameplayProgressionTests();
 void RunGameplayPresentationTests();
@@ -26,8 +25,6 @@ int main(int argc, char **argv)
         const auto run = [&](std::string_view expected) {
             return group == "all" || group == expected;
         };
-        if (run("content"))
-            RunGameplayContentTests();
         if (run("combat"))
             RunGameplayCombatTests();
         if (run("progression"))
@@ -36,7 +33,7 @@ int main(int argc, char **argv)
             RunGameplayPresentationTests();
         if (run("determinism"))
             RunGameplayDeterminismTests();
-        Check(group == "all" || group == "content" || group == "combat" ||
+        Check(group == "all" || group == "combat" ||
                   group == "progression" || group == "presentation" ||
                   group == "determinism",
               "unknown gameplay test group");

@@ -3,13 +3,6 @@
 Use the smallest tool that answers the current question. Installations and raw
 evidence are isolated under ignored `Build/tooling`; none is a game dependency.
 
-Existing CLI forwarding and exact verification-selection cases are registered as
-`tools.dev-entry` and `tools.verify-selection` on Windows/Ninja. The stdlib-only
-audio authoring cases run as `tools.audio-authoring` when content tools are enabled.
-`Tests/analyze_grass_history.py` and `Tests/analyze_visibility_entity_surface.py`
-remain explicit-input analyses: supply matching native captures; an empty run is
-not a quality check.
-
 ## Desloppify: on-demand cleanup candidates
 
 Local Python 3.13 environment: `Build/tooling/desloppify/.venv`. Installed

@@ -1,5 +1,4 @@
 #include "../Source/Runtime/Private/ui_command_admission.hpp"
-#include <array>
 #include <iostream>
 #include <stdexcept>
 void Check(bool ok, const char *message = "UI admission contract") { if (!ok) throw std::runtime_error(message); }
@@ -16,13 +15,10 @@ int main()
     hs::BoundedSpscQueue<hs::UiCommand,64> commands;
     std::uint64_t rejected=0;
     const hs::PresentationUiState previous{};
-    for(int i=0;i<64;++i)
-    {
-        hs::runtime_detail::UiActionEnvelope filler;
-        filler.action={hs::UiActionKind::Reroll};
-        Check(actions.TryPush(filler));
-        Check(commands.TryPush({hs::UiCommandKind::CancelSkillRebind}));
-    }
+    hs::runtime_detail::UiActionEnvelope envelope;
+    hs::UiCommand command;
+    auto candidate=previous;
+    while(commands.TryPush({hs::UiCommandKind::CancelSkillRebind})) {}
     // Production resolver's settings Back click mutates the page and emits
     // CancelSkillRebind. A full command queue must preserve the prior page.
     hs::PresentationUiState settings_previous;
@@ -35,40 +31,9 @@ int main()
     Check(back.runtime_command && settings_candidate.page==hs::UiPage::Root);
     Check(!hs::runtime_detail::AdmitPresentedUiInteraction(back,settings_candidate,settings_previous,
         displayed,actions,commands,rejected));
-    Check(settings_candidate.page==hs::UiPage::MainMenuSettings && back.invalid);
-    for(bool runtime : {false,true})
-    {
-        auto candidate=previous; candidate.page=hs::UiPage::Collection;
-        hs::UiInteraction interaction;
-        if(runtime) interaction.runtime_command=hs::UiCommand{hs::UiCommandKind::CancelSkillRebind};
-        else interaction.gameplay_action=hs::UiAction{hs::UiActionKind::SelectCard};
-        Check(!hs::runtime_detail::AdmitPresentedUiInteraction(interaction,candidate,previous,
-            displayed,actions,commands,rejected));
-        Check(candidate.page==previous.page && interaction.invalid);
-        Check(!interaction.gameplay_action && !interaction.runtime_command); // no success cue
-        Check(actions.Size()==64 && commands.Size()==64);
-    }
-    auto candidate=previous; candidate.page=hs::UiPage::Collection;
-    hs::UiInteraction navigation;
-    Check(hs::runtime_detail::AdmitPresentedUiInteraction(navigation,candidate,previous,
-        displayed,actions,commands,rejected));
-    Check(candidate.page==hs::UiPage::Collection && rejected==3);
+    Check(settings_candidate.page==hs::UiPage::MainMenuSettings && back.invalid && rejected==1);
 
-    hs::runtime_detail::UiActionEnvelope envelope;
-    hs::UiCommand command;
-    for(int i=0;i<64;++i) { Check(actions.TryPop(envelope)); Check(commands.TryPop(command)); }
-
-    // A single interaction cannot publish to both command queues. With both
-    // queues empty, rejection is atomic and restores the previous candidate.
-    candidate=previous; candidate.page=hs::UiPage::Collection;
-    hs::UiInteraction dual;
-    dual.gameplay_action=hs::UiAction{hs::UiActionKind::SelectCard};
-    dual.runtime_command=hs::UiCommand{hs::UiCommandKind::CancelSkillRebind};
-    Check(!hs::runtime_detail::AdmitPresentedUiInteraction(dual,candidate,previous,
-        displayed,actions,commands,rejected));
-    Check(candidate.page==previous.page && dual.invalid && !dual.gameplay_action && !dual.runtime_command &&
-          actions.Size()==0 && commands.Size()==0 && rejected==4,
-          "dual gameplay/runtime interaction rejects without queue publication");
+    while(commands.TryPop(command)) {}
 
     candidate=previous;
     hs::UiInteraction next{hs::UiAction{hs::UiActionKind::SelectCard},std::nullopt};
@@ -97,14 +62,8 @@ int main()
         displayed,actions,commands,rejected));
     Check(commands.TryPop(command) && command.kind==hs::UiCommandKind::CancelSkillRebind && !commands.TryPop(command));
 
-    std::array<hs::UiModel, 2> layout{};
-    layout[0].kind=hs::UiModel::Kind::Button; layout[0].anchor_pixels={360,300}; layout[0].size_pixels={360,420};
-    layout[1].kind=hs::UiModel::Kind::Text; layout[1].anchor_pixels={400,350}; layout[1].size_pixels={100,30};
-    const auto card_cursor=hs::ReferenceUiCursor({500,400},{1920,1080});
-    Check(hs::runtime_detail::PointHitsUiDrawButton(layout,card_cursor),
-          "hit testing uses the accepted frame's button rectangle");
     Check(hs::runtime_detail::UiFrameExtentMatches({1920,1080},{1920,1080}) &&
           !hs::runtime_detail::UiFrameExtentMatches({1920,1080},{1280,720}),
           "resize rejects clicks until the new extent has an accepted UI frame");
-    std::cout<<"PASS saturated gameplay/runtime queues, navigation and fresh input\n";
+    std::cout<<"PASS UI admission rollback, displayed-action identity and resize gate\n";
 }

@@ -147,6 +147,12 @@ function(hs_reject_target_links target)
         return() # Target is genuinely absent in this build configuration.
     endif()
     set(root "${hs_id_${target}}")
+    set(forbidden_targets ${ARGN})
+    if(hs_render_data IN_LIST forbidden_targets AND
+       NOT target MATCHES "^hs_render_data_(package|material|texture)$")
+        list(APPEND forbidden_targets
+            hs_render_data_package hs_render_data_material hs_render_data_texture)
+    endif()
     # Keep link and compile-only usage requirements distinct. A dependency's
     # private implementation edges do not propagate to its consumers.
     foreach(kind IN ITEMS link compile)
@@ -172,7 +178,7 @@ function(hs_reject_target_links target)
                 message(FATAL_ERROR "CMake File API ${kind} target ${current} is absent from its codemodel")
             endif()
             set(name "${hs_name_${key}}")
-            if(name IN_LIST ARGN)
+            if(name IN_LIST forbidden_targets)
                 message(FATAL_ERROR "${target} has forbidden ${kind} dependency ${name} (directly or through its interface)")
             endif()
             hs_target_edges("${current}" ${interface_member} next)
@@ -186,6 +192,10 @@ hs_reject_target_links(hs_render_data_values hs_jobs hs_game_domain hs_game_rule
 hs_reject_target_links(hs_asset_manifest hs_jobs hs_game_domain hs_game_rules hs_gameplay hs_presentation hs_render_data hs_renderer_d3d12 hs_runtime)
 hs_reject_target_links(hs_generation_lock hs_jobs hs_game_domain hs_game_rules hs_gameplay hs_presentation hs_render_data hs_renderer_d3d12 hs_runtime)
 hs_reject_target_links(hs_render_data hs_jobs hs_game_domain hs_game_rules hs_gameplay hs_presentation hs_renderer_d3d12 hs_runtime hs_material_compiler)
+foreach(codec IN ITEMS hs_render_data_package hs_render_data_material hs_render_data_texture)
+    hs_reject_target_links(${codec} hs_jobs hs_game_domain hs_game_rules hs_gameplay
+        hs_presentation hs_render_data hs_renderer_d3d12 hs_runtime hs_material_compiler)
+endforeach()
 hs_reject_target_links(hs_material_compiler hs_jobs hs_game_domain hs_game_rules hs_gameplay hs_presentation hs_renderer_d3d12 hs_runtime)
 hs_reject_target_links(hs_jobs hs_game_domain hs_game_rules hs_gameplay hs_presentation hs_render_data hs_render_data_values hs_renderer_d3d12 hs_runtime)
 hs_reject_target_links(hs_game_domain hs_jobs hs_game_rules hs_gameplay hs_presentation hs_render_data hs_render_data_values hs_renderer_d3d12 hs_runtime)

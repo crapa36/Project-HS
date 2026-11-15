@@ -151,9 +151,5 @@ hs::Float2 NormalizedCursor(float x, float y)
     return {x / 960.0f - 1.0f, 1.0f - y / 540.0f};
 }
 
-void SetCursor(hs::HeldInputState &held, float x, float y)
-{
-    held.cursor_normalized = NormalizedCursor(x, y);
-}
 
 } // namespace gameplay_test

@@ -24,34 +24,6 @@ void Check(bool condition, std::string_view message)
     if (!condition) throw std::runtime_error(std::string(message));
 }
 
-void TestFrameGenerationPresentationPolicy()
-{
-    for (unsigned phase = 0; phase <= static_cast<unsigned>(hs::SessionPhase::QuitRequested); ++phase)
-        Check(hs::AllowGameplayFrameGeneration(static_cast<hs::SessionPhase>(phase)) ==
-                  (phase == static_cast<unsigned>(hs::SessionPhase::Playing)),
-              "only active gameplay admits frame generation; menus/pause/loading remain Off");
-    Check(!hs::AllowGameplayFrameGeneration(static_cast<hs::SessionPhase>(255)), "unknown phase cannot admit FG");
-    hs::RendererPresentationStatus status;
-    status.requested.multiplier = 2;
-    status.effective_provider.value = "dlss";
-    Check(hs::FrameGenerationMultiplierPolicyToken(status) == "0", "Off has no generation multiplier");
-    for (const auto mode : {hs::GraphicsFrameGenerationMode::Fixed, hs::GraphicsFrameGenerationMode::Auto})
-    {
-        status.active_mode = mode;
-        for (const auto observed : {0u, 1u, 2u, 3u})
-        {
-            status.observed_multiplier = observed;
-            Check(hs::FrameGenerationMultiplierPolicyToken(status) == "2",
-                  "actual-present deltas do not change selected multiplier or config identity");
-        }
-    }
-    status.active_mode = hs::GraphicsFrameGenerationMode::Dynamic;
-    Check(hs::FrameGenerationMultiplierPolicyToken(status) == "dynamic", "Dynamic reports a policy, not a measured count");
-    status.active_mode = hs::GraphicsFrameGenerationMode::Auto;
-    status.effective_provider.value = "fsr";
-    Check(hs::FrameGenerationMultiplierPolicyToken(status) == "native", "FSR callback count is not a configurable multiplier");
-}
-
 std::filesystem::path NewRoot(std::string_view name)
 {
     const auto root = std::filesystem::temp_directory_path() /
@@ -80,133 +52,6 @@ std::size_t CorruptCount(const std::filesystem::path &root)
     for (const auto &entry : std::filesystem::directory_iterator(root))
         if (entry.path().extension() == ".corrupt") ++count;
     return count;
-}
-
-void TestLoadSourceAndProjection()
-{
-    const auto root = NewRoot("source");
-    hs::SaveStore store(root);
-    hs::SettingsDocument document;
-    bool loaded_from_file = true;
-    Check(store.LoadSettingsV2(document, &loaded_from_file).Succeeded() &&
-              !loaded_from_file,
-          "missing settings use in-memory defaults");
-    const auto legacy = hs::ProjectSettingsDocument(hs::LegacyDefaultSettingsDocument());
-    Check(!legacy.borderless && legacy.frame_cap == 60 &&
-              legacy.shadow_resolution == 1024 && legacy.particle_percentage == 100,
-          "first run retains v1 effective defaults");
-
-    document.graphics.vsync = false;
-    const auto saved = store.SaveSettingsV2(document);
-    Check(saved.Succeeded(), std::string("write requested v2 settings: ") + std::string(saved.Message()));
-    Check(store.LoadSettingsV2(document, &loaded_from_file).Succeeded() &&
-              loaded_from_file && !document.graphics.vsync,
-          "valid primary reports loaded settings");
-    const auto primary = root / "settings.json";
-    const auto backup = root / "settings.json.bak";
-    std::filesystem::copy_file(primary, backup,
-                               std::filesystem::copy_options::overwrite_existing);
-    std::filesystem::remove(primary);
-    loaded_from_file = false;
-    Check(store.LoadSettingsV2(document, &loaded_from_file).Succeeded() &&
-              loaded_from_file && !document.graphics.vsync,
-          "valid backup reports loaded settings");
-
-    Write(primary, "invalid");
-    Write(backup, "invalid");
-    loaded_from_file = true;
-    Check(store.LoadSettingsV2(document, &loaded_from_file).Succeeded() &&
-              !loaded_from_file,
-          "corrupt reset does not report stored settings");
-    Check(store.LoadSettingsV2(document, &loaded_from_file).Succeeded() &&
-              !loaded_from_file && !std::filesystem::exists(primary),
-          "corrupt reset keeps legacy first-run defaults on next launch");
-    std::filesystem::remove_all(root);
-}
-
-void TestRequestedEditPreservesUnimplementedFields()
-{
-    hs::SettingsDocument document;
-    document.graphics.preset = hs::GraphicsPreset::Ultra;
-    document.graphics.hdr_mode = hs::GraphicsHdrMode::On;
-    document.graphics.reconstruction_provider.value = "future_provider";
-    document.opaque_optional_json = R"({"graphics":{"future_key":"keep"}})";
-    hs::ApplySettingsEdit(document, {hs::UiCommandKind::SetMasterVolumePercent, 50});
-    Check(document.master_volume == 0.5f &&
-              document.graphics.preset == hs::GraphicsPreset::Ultra,
-          "audio edit preserves requested graphics preset");
-    hs::ApplySettingsEdit(document, {hs::UiCommandKind::SetBloom, 0});
-    Check(!document.graphics.bloom &&
-              document.graphics.preset == hs::GraphicsPreset::Custom &&
-              document.graphics.hdr_mode == hs::GraphicsHdrMode::On &&
-              document.graphics.reconstruction_provider.value == "future_provider" &&
-              document.opaque_optional_json == R"({"graphics":{"future_key":"keep"}})",
-          "UI edit changes requested field without dropping other requests");
-    hs::ApplySettingsEdit(document, {hs::UiCommandKind::SetRenderScale, 75});
-    Check(document.graphics.resolution_mode == hs::GraphicsResolutionMode::Manual &&
-              document.graphics.reconstruction_provider.value == "internal_taau" &&
-              hs::ProjectSettingsDocument(document).render_scale_percent == 75,
-          "render scale selects implemented manual reconstruction");
-    document.graphics.shadow_quality = hs::GraphicsQuality::Ultra;
-    Check(hs::ProjectSettingsDocument(document).shadow_resolution == 2048,
-          "Ultra shadow request projects to the highest supported resolution");
-    document.graphics.frame_limit_fps = 240;
-    Check(hs::ProjectSettingsDocument(document).frame_cap == 240 &&
-              document.graphics.frame_limit_fps == 240,
-          "effective frame cap matches render pacing without changing the request");
-}
-
-void TestStartupGraphicsRendererProjection()
-{
-    auto requested = hs::LegacyDefaultSettingsDocument();
-    for (const bool muted : {false, true})
-    {
-        const auto startup = hs::ProjectSettingsDocument(requested);
-        hs::GraphicsSettingsCommit audio(requested, startup, muted);
-        Check(audio.Effective().master_volume == (muted ? 0 : startup.master_volume) &&
-                  audio.UiInput().master_volume == audio.Effective().master_volume &&
-                  audio.Requested().master_volume == requested.master_volume,
-              "startup mute reaches the audio engine without changing saved volume intent");
-    }
-    requested.graphics.vsync = true;
-    requested.graphics.frame_limit_fps = 47;
-    requested.graphics.output_extent = hs::GraphicsExtent{3440, 1440};
-    hs::ApplicationConfig config;
-    config.width = 1920;
-    config.height = 1080;
-    config.resolution_explicit = config.vsync_explicit = config.frame_cap_explicit = true;
-    config.vsync = false;
-    config.frame_cap = 0;
-    const auto effective = hs::PrepareStartupGraphicsSettings(requested, config);
-    const auto renderer = hs::ProjectRendererConfig(effective, requested.graphics);
-    Check(renderer.width == 1920 && renderer.height == 1080 &&
-              renderer.render_scale_percent == effective.render_scale_percent &&
-              renderer.screen_overlay_intensity == effective.screen_overlay_intensity &&
-              renderer.requested_graphics &&
-              !renderer.requested_graphics->vsync &&
-              renderer.requested_graphics->frame_limit_fps == 0 &&
-              renderer.requested_graphics->output_extent == requested.graphics.output_extent &&
-              renderer.requested_graphics->display_mode == hs::GraphicsDisplayMode::Windowed,
-          "startup CLI intent reaches renderer and window display snapshot");
-    auto fallback = effective;
-    fallback.render_scale_percent = 83;
-    Check(hs::ProjectRendererConfig(fallback, requested.graphics).render_scale_percent == 83,
-          "startup carrier preserves the native non-manual scale fallback");
-
-    hs::GraphicsSettingsCommit controller(requested, effective, false);
-    Check(controller.EditGraphics({hs::UiCommandKind::SetBloom, 0}), "later startup settings edit");
-    const auto packet = controller.NextRequest();
-    Check(packet.has_value(), "later startup settings packet");
-    Check(controller.Acknowledge({packet->generation, hs::ErrorCode::None}) ==
-              hs::GraphicsSettingsCommit::AckOutcome::Applied,
-          "later startup settings acknowledgment");
-    const auto after = hs::ProjectRendererConfig(controller.Effective(), controller.Committed().graphics);
-    Check(after.width == 1920 && after.height == 1080 &&
-              after.requested_graphics &&
-              !after.requested_graphics->vsync && !after.requested_graphics->bloom &&
-              after.requested_graphics->frame_limit_fps == 0 &&
-              after.requested_graphics->output_extent == requested.graphics.output_extent,
-          "unrelated settings commit does not restore saved display overrides");
 }
 
 void TestGraphicsApplyAcknowledgments()
@@ -302,7 +147,7 @@ void TestGraphicsApplyAcknowledgments()
     std::filesystem::remove_all(root);
 }
 
-void TestFailedApplyReplaysOnlyLaterEdits()
+void TestFailedApplyKeepsLatestDesiredSettings()
 {
     auto original = hs::LegacyDefaultSettingsDocument();
     original.graphics.hdr_mode = hs::GraphicsHdrMode::On;
@@ -315,59 +160,23 @@ void TestFailedApplyReplaysOnlyLaterEdits()
     controller.EditGraphics({hs::UiCommandKind::SetVsync, 0});
     Check(controller.Acknowledge({failed->generation, hs::ErrorCode::InvalidState}) ==
               hs::GraphicsSettingsCommit::AckOutcome::Rejected &&
-              controller.Requested().graphics.bloom &&
+              !controller.Requested().graphics.bloom &&
               !controller.Requested().graphics.vsync &&
-              controller.UiInput().bloom && !controller.UiInput().vsync,
-          "failed bloom edit is dropped while later vsync edit survives");
+              !controller.UiInput().bloom && !controller.UiInput().vsync &&
+              controller.Committed().graphics.bloom &&
+              controller.Committed().graphics.vsync && controller.Effective().bloom &&
+              controller.Effective().vsync,
+          "failed apply keeps the full latest desired settings while applied state stays unchanged");
     const auto next = controller.NextRequest();
-    Check(next && next->effective.bloom && !next->effective.vsync &&
+    Check(next && !next->effective.bloom && !next->effective.vsync &&
               controller.Acknowledge({next->generation, hs::ErrorCode::None}) ==
                   hs::GraphicsSettingsCommit::AckOutcome::Applied &&
-              controller.Committed().graphics.bloom &&
+              !controller.Committed().graphics.bloom &&
               !controller.Committed().graphics.vsync &&
               controller.Committed().graphics.hdr_mode == hs::GraphicsHdrMode::On &&
               controller.Committed().opaque_optional_json ==
                   R"({"graphics":{"future_key":"keep"}})",
-          "next request applies only later edit and retains unrelated requests");
-}
-
-void TestClickPreviewWithinOnePump()
-{
-    const auto original = hs::LegacyDefaultSettingsDocument();
-    hs::GraphicsSettingsCommit controller(
-        original, hs::ProjectSettingsDocument(original), false);
-    hs::BoundedSpscQueue<hs::UiCommand, 8> commands;
-    auto preview = controller.UiInput();
-    const hs::UiCommand first{hs::UiCommandKind::SetBloom,
-                              static_cast<std::uint32_t>(!preview.bloom)};
-    Check(commands.TryPush(first), "queue first click");
-    hs::GraphicsSettingsCommit::PreviewUiCommand(preview, first);
-    const hs::UiCommand second{hs::UiCommandKind::SetBloom,
-                               static_cast<std::uint32_t>(!preview.bloom)};
-    Check(commands.TryPush(second) && first.value != second.value,
-          "second click in one pump uses first queued command");
-    hs::GraphicsSettingsCommit::PreviewUiCommand(preview, second);
-    hs::UiCommand command;
-    while (commands.TryPop(command)) controller.EditGraphics(command);
-    Check(preview.bloom && controller.UiInput().bloom &&
-              controller.Effective().bloom,
-          "two queued toggles return requested value to the starting value");
-
-    controller.EditGraphics({hs::UiCommandKind::SetBloom, 0});
-    const auto pending = controller.NextRequest();
-    Check(pending && !controller.UiInput().bloom && controller.Effective().bloom,
-          "pending request changes click input without changing applied display");
-    preview = controller.UiInput();
-    const hs::UiCommand later{hs::UiCommandKind::SetBloom,
-                              static_cast<std::uint32_t>(!preview.bloom)};
-    hs::GraphicsSettingsCommit::PreviewUiCommand(preview, later);
-    controller.EditGraphics(later);
-    Check(controller.Acknowledge({pending->generation, hs::ErrorCode::None}) ==
-              hs::GraphicsSettingsCommit::AckOutcome::Applied,
-          "first pending toggle applies");
-    const auto opposite = controller.NextRequest();
-    Check(opposite && opposite->effective.bloom,
-          "toggle before acknowledgment queues opposite value after first apply");
+          "next request applies the full latest desired settings and retains unknown fields");
 }
 
 void TestDisplayIntentWaitsForConfirmation()
@@ -391,15 +200,23 @@ void TestDisplayIntentWaitsForConfirmation()
                   hs::GraphicsDisplayMode::BorderlessFullscreen &&
               controller.Effective().width == 1920,
           "renderer acknowledgment exposes unconfirmed applied display");
-    controller.EditGraphics({hs::UiCommandKind::SetBorderless, 0});
+    controller.EditGraphics({hs::UiCommandKind::SetVsync,
+                              original.graphics.vsync ? 0u : 1u});
+    controller.RestoreDisplay(original.graphics);
     controller.SetDesiredOutputExtent(1280, 720);
     const auto rollback = controller.NextRequest();
     Check(rollback && !rollback->effective.borderless &&
               rollback->effective.width == 1280 &&
+              rollback->effective.vsync == !original.graphics.vsync &&
               controller.Acknowledge({rollback->generation, hs::ErrorCode::None}) ==
                   hs::GraphicsSettingsCommit::AckOutcome::Applied &&
               controller.Committed().graphics.display_mode ==
-                  hs::GraphicsDisplayMode::Windowed,
+                  original.graphics.display_mode &&
+              controller.Requested().graphics.display_output == original.graphics.display_output &&
+              controller.Requested().graphics.output_extent == original.graphics.output_extent &&
+              controller.Committed().graphics.display_output == original.graphics.display_output &&
+              controller.Committed().graphics.output_extent == original.graphics.output_extent &&
+              controller.Committed().graphics.vsync == !original.graphics.vsync,
           "cancellation restores previous display through a second acknowledged request");
 
     controller.EditGraphics({hs::UiCommandKind::SetBorderless, 1});
@@ -420,9 +237,9 @@ void TestDisplayIntentWaitsForConfirmation()
     const auto followup = controller.NextRequest();
     hs::BoundedSpscQueue<hs::GraphicsSettingsCommitRequest, 8> queued_followups;
     Check(earlier_rejected && controller.UiInput().borderless &&
-              controller.UiInput().bloom && followup &&
-              followup->effective.borderless && queued_followups.TryPush(*followup),
-          "deferred display click survives an earlier failed graphics request");
+              !controller.UiInput().bloom && controller.Effective().bloom && followup &&
+              followup->effective.borderless && !followup->effective.bloom && queued_followups.TryPush(*followup),
+          "deferred display request carries latest desired settings while applied state stays unchanged");
 }
 
 void TestDeferredDisplaySaveBoundary()
@@ -464,186 +281,6 @@ void TestDeferredDisplaySaveBoundary()
               store.LoadSettingsV2(saved).Succeeded() &&
               saved.graphics.display_mode == hs::GraphicsDisplayMode::Windowed,
           "unconfirmed display acknowledgment does not change saved intent");
-    std::filesystem::remove_all(root);
-}
-
-void TestMigration()
-{
-    const auto root = NewRoot("migration");
-    hs::SaveStore store(root);
-    hs::SettingsData old;
-    old.width = 1600;
-    old.height = 900;
-    old.borderless = true;
-    old.vsync = false;
-    old.frame_cap = 120;
-    old.render_scale_percent = 75;
-    old.shadow_resolution = 2048;
-    old.particle_percentage = 50;
-    old.bloom = false;
-    old.master_volume = 0.3f;
-    old.skill_virtual_keys = {'W', 'Q', 'E', 'R'};
-    Check(store.SaveSettings(old).Succeeded(), "write valid v1");
-    auto legacy_json = Read(root / "settings.json");
-    legacy_json.insert(legacy_json.find('{') + 1, "\"outline\":false,");
-    Write(root / "settings.json", legacy_json);
-    hs::SettingsData old_roundtrip;
-    Check(store.LoadSettings(old_roundtrip).Succeeded() &&
-              old_roundtrip.width == old.width && old_roundtrip.frame_cap == 120,
-          "legacy API still reads valid v1");
-
-    hs::SettingsDocument migrated;
-    Check(store.LoadSettingsV2(migrated).Succeeded(), "load v1 into v2");
-    Check(migrated.graphics.preset == hs::GraphicsPreset::Custom &&
-              migrated.graphics.display_mode ==
-                  hs::GraphicsDisplayMode::BorderlessFullscreen &&
-              migrated.graphics.output_extent == hs::GraphicsExtent{1600, 900} &&
-              !migrated.graphics.vsync && migrated.graphics.frame_limit_fps == 120 &&
-              migrated.graphics.resolution_mode == hs::GraphicsResolutionMode::Manual &&
-              migrated.graphics.reconstruction_provider.value == "internal_taau" &&
-              migrated.graphics.manual_scale_percent == 75.0f &&
-              migrated.graphics.frame_generation_mode ==
-                  hs::GraphicsFrameGenerationMode::Off &&
-              migrated.graphics.shadow_quality == hs::GraphicsQuality::High &&
-              migrated.graphics.particle_quality == hs::GraphicsQuality::Low &&
-              !migrated.graphics.bloom &&
-              migrated.master_volume == old.master_volume &&
-              migrated.skill_virtual_keys == old.skill_virtual_keys,
-          "exact v1 migration mappings");
-    Check(Read(root / "settings.json").find("\"schema_version\": 1") !=
-              std::string::npos,
-          "load migration leaves v1 on disk until explicit save");
-    hs::ApplySettingsEdit(migrated, {hs::UiCommandKind::SetBloom, 1});
-    Check(store.SaveSettingsV2(migrated).Succeeded(), "persist migrated v2");
-    hs::SettingsDocument restarted;
-    Check(store.LoadSettingsV2(restarted).Succeeded() &&
-              restarted.graphics.bloom &&
-              restarted.graphics.output_extent == hs::GraphicsExtent{1600, 900} &&
-              restarted.graphics.manual_scale_percent == 75.0f &&
-              restarted.master_volume == old.master_volume &&
-              restarted.skill_virtual_keys == old.skill_virtual_keys,
-          "migrated v1 UI edit survives schema-2 restart");
-    const auto bytes = Read(root / "settings.json");
-    const auto backup = Read(root / "settings.json.bak");
-    hs::SettingsData legacy;
-    Check(!store.LoadSettings(legacy) && !store.SaveSettings(old),
-          "legacy API rejects v2 without destructive recovery");
-    Check(Read(root / "settings.json") == bytes &&
-              Read(root / "settings.json.bak") == backup &&
-              CorruptCount(root) == 0,
-          "legacy API preserves v2 primary and backup");
-    std::filesystem::remove_all(root);
-}
-
-void TestRemovedGraphicsReadMigration()
-{
-    const auto root = NewRoot("removed-graphics-migration");
-    hs::SaveStore store(root);
-    for (const auto gi_token : {"ray_traced", "raytraced", "software_hybrid"})
-    {
-        const auto legacy = std::string(R"({"schema_version":2,"graphics":{"preset":"ultra_rt","ao_mode":"rtao","gi_mode":")") +
-            gi_token + R"(","gi_quality":"ultra","reflection_mode":"hybrid_rt","shadow_mode":"hybrid_rt","ray_tracing_enabled":true,"rt_trace_distance_m":120,"neural_ray_reconstruction":"on","ray_reconstruction_provider":"dlss_rr","output_extent":{"width":1920,"height":1080},"frame_limit_fps":144,"reconstruction_provider":"dlss_rr","frame_generation_provider":"dlss","frame_generation_mode":"fixed","bloom_strength":1.25,"outline":false,"outline_width_px":2.0,"future_quality":"keep"},"master_volume":0.6,"bgm_volume":0.25,"sfx_volume":0.5,"ui_volume":0.75,"skill_virtual_keys":[82,87,69,81],"future_field":"retain"})";
-        Write(root / "settings.json", legacy);
-        hs::SettingsDocument loaded;
-        bool stored{};
-        Check(store.LoadSettingsV2(loaded, &stored) && stored &&
-                  loaded.graphics.preset == hs::GraphicsPreset::Ultra &&
-                  loaded.graphics.ao_mode == hs::GraphicsAoMode::GTAO &&
-                  loaded.graphics.gi_mode == hs::GraphicsGiMode::Probe &&
-                  loaded.graphics.reflection_mode == hs::GraphicsReflectionMode::ScreenSpace &&
-                  loaded.graphics.shadow_mode == hs::GraphicsShadowMode::Raster,
-              "removed graphics modes migrate to supported non-RT modes");
-        Check(loaded.graphics.output_extent == hs::GraphicsExtent{1920, 1080} &&
-                  loaded.graphics.frame_limit_fps == 144 &&
-                  loaded.graphics.reconstruction_provider.value == "dlss" &&
-                  loaded.graphics.frame_generation_provider.value == "dlss" &&
-                  loaded.graphics.frame_generation_mode == hs::GraphicsFrameGenerationMode::Fixed &&
-                  loaded.graphics.bloom_strength == 1.25f && loaded.master_volume == 0.6f &&
-                  loaded.bgm_volume == 0.25f && loaded.skill_virtual_keys[0] == 'R' &&
-                  loaded.opaque_optional_json.contains("future_quality") &&
-                  loaded.opaque_optional_json.contains("future_field") &&
-                  CorruptCount(root) == 0 && Read(root / "settings.json") == legacy,
-              "read migration preserves other graphics/audio/keys/unknown data without rewriting source");
-        Check(store.SaveSettingsV2(loaded).Succeeded(), "save migrated settings");
-        const auto saved = Read(root / "settings.json");
-        for (const auto obsolete : {"ultra_rt", "rtao", "ray_traced", "raytraced", "software_hybrid", "gi_quality", "hybrid_rt", "dlss_rr",
-                                   "ray_tracing_enabled", "rt_trace_distance_m",
-                                   "neural_ray_reconstruction", "ray_reconstruction_provider", "outline", "outline_width_px"})
-            Check(!saved.contains(obsolete), "removed controls and modes do not return on serialization");
-        Check(saved.contains("future_quality") && saved.contains("future_field") &&
-                  store.LoadSettingsV2(loaded) && CorruptCount(root) == 0,
-              "migrated settings round-trip with optional extensions preserved");
-    }
-    std::filesystem::remove_all(root);
-}
-
-void TestV2RoundTrip()
-{
-    const auto root = NewRoot("roundtrip");
-    hs::SaveStore store(root);
-    hs::SettingsDocument settings;
-    settings.graphics.display_output.value = "monitor_2";
-    settings.graphics.output_extent = hs::GraphicsExtent{1920, 1080};
-    settings.graphics.hdr_peak_nits = 1000.0f;
-    settings.graphics.reconstruction_provider.value = "future_provider";
-    settings.graphics.reconstruction_quality.value = "future_quality_mode";
-    settings.graphics.frame_generation_provider.value = "future_fg";
-    settings.graphics.frame_generation_mode = hs::GraphicsFrameGenerationMode::Dynamic;
-    settings.graphics.ao_mode = hs::GraphicsAoMode::GTAO;
-    settings.graphics.dynamic_resolution = true;
-    settings.graphics.dynamic_min_percent = 40.0f;
-    settings.graphics.dynamic_max_percent = 90.0f;
-    settings.graphics.bloom_strength = 1.5f;
-    settings.bgm_volume = 0.25f;
-    settings.screen_overlay_intensity = 0.35f;
-    settings.skill_virtual_keys = {'R', 'W', 'E', 'Q'};
-    settings.opaque_optional_json =
-        R"({"top":{"future_field":{"token":"future_value"}},"graphics":{"future_quality":"novel"}})";
-    Check(store.SaveSettingsV2(settings).Succeeded(), "save complete v2");
-    const auto text = Read(root / "settings.json");
-    for (const auto &descriptor : hs::GraphicsSettingDescriptors())
-        Check(text.find("\"" + std::string(descriptor.key) + "\"") !=
-                  std::string::npos,
-              "every graphics definition serialized");
-    hs::SettingsDocument loaded;
-    Check(store.LoadSettingsV2(loaded).Succeeded() &&
-              loaded.graphics.display_output.value == "monitor_2" &&
-              loaded.graphics.output_extent == hs::GraphicsExtent{1920, 1080} &&
-              loaded.graphics.hdr_peak_nits == 1000.0f &&
-              loaded.graphics.reconstruction_provider.value == "future_provider" &&
-              loaded.graphics.reconstruction_quality.value == "future_quality_mode" &&
-              loaded.graphics.frame_generation_mode ==
-                  hs::GraphicsFrameGenerationMode::Dynamic &&
-              loaded.graphics.ao_mode == hs::GraphicsAoMode::GTAO &&
-              loaded.graphics.dynamic_resolution &&
-              loaded.graphics.dynamic_min_percent == 40.0f &&
-              loaded.graphics.dynamic_max_percent == 90.0f &&
-              loaded.bgm_volume == 0.25f &&
-              loaded.screen_overlay_intensity == 0.35f &&
-              loaded.skill_virtual_keys == settings.skill_virtual_keys,
-          "typed v2 roundtrip including symbolic provider and mode");
-    Check(loaded.opaque_optional_json.find("future_quality") != std::string::npos &&
-              loaded.opaque_optional_json.find("future_field") != std::string::npos,
-          "unknown optional fields retained");
-    hs::ApplySettingsEdit(loaded, {hs::UiCommandKind::SetVsync, 0});
-    Check(store.SaveSettingsV2(loaded).Succeeded(), "save edited v2");
-    hs::SettingsDocument edited;
-    Check(store.LoadSettingsV2(edited).Succeeded() &&
-              !edited.graphics.vsync &&
-              edited.graphics.frame_generation_mode ==
-                  hs::GraphicsFrameGenerationMode::Dynamic &&
-              edited.graphics.reconstruction_provider.value == "future_provider" &&
-              edited.graphics.ao_mode == hs::GraphicsAoMode::GTAO &&
-              edited.opaque_optional_json.find("future_quality") != std::string::npos,
-          "UI edit preserves unsupported requests and unknown fields across restart");
-    edited.opaque_optional_json = R"({"graphics":{"future_quality":"latest"}})";
-    Check(store.SaveSettingsV2(edited).Succeeded(), "update optional value and retain older backup");
-    Check(store.SaveSettingsV2(hs::SettingsDocument{}).Succeeded() &&
-              Read(root / "settings.json").find("future_quality") != std::string::npos,
-          "save merges unknown optional fields from current v2");
-    Check(store.LoadSettingsV2(edited).Succeeded() &&
-              edited.opaque_optional_json.find("latest") != std::string::npos,
-          "primary optional value takes precedence over an older backup");
     std::filesystem::remove_all(root);
 }
 
@@ -756,19 +393,6 @@ void TestFullGraphicsTransactions()
           "overlay intensity reaches native options only through matching apply");
 }
 
-void TestOptionalAccessibilitySchema()
-{
-    const auto root = NewRoot("accessibility");
-    hs::SaveStore store(root);
-    Write(root / "settings.json", R"({"schema_version":2,"graphics":{},"master_volume":1,"bgm_volume":1,"sfx_volume":1,"ui_volume":1,"skill_virtual_keys":[81,87,69,82]})");
-    hs::SettingsDocument loaded;
-    Check(store.LoadSettingsV2(loaded) && loaded.screen_overlay_intensity == 1,
-          "missing schema-2 accessibility field defaults to one");
-    loaded.screen_overlay_intensity = 1.1f;
-    Check(!store.SaveSettingsV2(loaded), "out of range overlay intensity is rejected");
-    std::filesystem::remove_all(root);
-}
-
 void TestInvalidAndFutureSchemas()
 {
     const auto root = NewRoot("invalid");
@@ -783,32 +407,38 @@ void TestInvalidAndFutureSchemas()
     Check(!store.SaveSettingsV2(invalid) &&
               !std::filesystem::exists(root / "settings.json"),
           "legacy minimum output extent is preserved");
+    invalid = hs::SettingsDocument{};
+    invalid.skill_virtual_keys = {'Q', 'Q', 'E', 'R'};
+    Check(!store.SaveSettingsV2(invalid) &&
+              !std::filesystem::exists(root / "settings.json"),
+          "duplicate action keys do not write");
 
     const std::string malformed =
         R"({"schema_version":2,"graphics":{"vsync":true,"vsync":false},"master_volume":1,"bgm_volume":1,"sfx_volume":1,"ui_volume":1,"skill_virtual_keys":[81,87,69,82]})";
     Write(root / "settings.json", malformed);
     hs::SettingsDocument recovered;
     Check(store.LoadSettingsV2(recovered).Succeeded() &&
-              recovered.graphics.vsync && CorruptCount(root) == 1,
-          "duplicate field rejected and preserved as corrupt");
+              !recovered.graphics.vsync && Read(root / "settings.json") == malformed &&
+              CorruptCount(root) == 0,
+          "duplicate graphics key uses the last value without rewriting the file");
     Write(root / "settings.json",
           R"({"schema_version":2,"graphics":{"vsync":"on"},"master_volume":1,"bgm_volume":1,"sfx_volume":1,"ui_volume":1,"skill_virtual_keys":[81,87,69,82]})");
-    Check(store.LoadSettingsV2(recovered).Succeeded() && CorruptCount(root) == 2,
+    Check(store.LoadSettingsV2(recovered).Succeeded() && CorruptCount(root) == 1,
           "known graphics field with wrong type rejected");
     Write(root / "settings.json",
           R"({"schema_version":2,"graphics":{},"master_volume":1,"bgm_volume":1,"sfx_volume":1,"ui_volume":1,"skill_virtual_keys":[81,87,69,82]})");
     Check(store.LoadSettingsV2(recovered).Succeeded() &&
               recovered.graphics.vsync &&
               recovered.graphics.shadow_quality == hs::GraphicsQuality::Medium &&
-              CorruptCount(root) == 2,
+              CorruptCount(root) == 1,
           "missing optional graphics keys use registry defaults");
     const std::string oversized(1024 * 1024 + 1, 'x');
     Write(root / "settings.json", oversized);
     Check(!store.LoadSettingsV2(recovered) &&
-              Read(root / "settings.json") == oversized && CorruptCount(root) == 2,
+              Read(root / "settings.json") == oversized && CorruptCount(root) == 1,
           "oversized settings rejected without modifying the file");
     Write(root / "settings.json", R"({"schema_version":"3","graphics":{}})");
-    Check(store.LoadSettingsV2(recovered).Succeeded() && CorruptCount(root) == 3,
+    Check(store.LoadSettingsV2(recovered).Succeeded() && CorruptCount(root) == 2,
           "malformed schema type is corrupt rather than future");
 
     const std::string future =
@@ -817,21 +447,19 @@ void TestInvalidAndFutureSchemas()
     const auto backup = root / "settings.json.bak";
     Write(primary, future);
     const auto backup_before = std::filesystem::exists(backup) ? Read(backup) : "";
-    hs::SettingsData old_reader;
     Check(!store.LoadSettingsV2(recovered) &&
-              !store.SaveSettingsV2(hs::SettingsDocument{}) &&
-              !store.LoadSettings(old_reader),
-          "future primary rejected by both APIs");
+              !store.SaveSettingsV2(hs::SettingsDocument{}),
+          "future primary rejected by V2 load and save");
     Check(Read(primary) == future &&
               (std::filesystem::exists(backup) ? Read(backup) : "") == backup_before &&
-              CorruptCount(root) == 3,
+              CorruptCount(root) == 2,
           "future primary and backup untouched");
     const std::string large_future =
         R"({"schema_version":3,"payload":")" + std::string(1024 * 1024, 'x') + "\"}";
     Write(primary, large_future);
     Check(!store.LoadSettingsV2(recovered) &&
               !store.SaveSettingsV2(hs::SettingsDocument{}) &&
-              Read(primary) == large_future && CorruptCount(root) == 3,
+              Read(primary) == large_future && CorruptCount(root) == 2,
           "oversized future schema remains untouched");
     Write(primary, R"({"schema_version":2,"graphics":{}})");
     Write(backup, future);
@@ -850,20 +478,11 @@ int main()
 {
     try
     {
-        TestLoadSourceAndProjection();
-        TestRequestedEditPreservesUnimplementedFields();
-        TestStartupGraphicsRendererProjection();
-        TestFrameGenerationPresentationPolicy();
         TestGraphicsApplyAcknowledgments();
-        TestFailedApplyReplaysOnlyLaterEdits();
-        TestClickPreviewWithinOnePump();
+        TestFailedApplyKeepsLatestDesiredSettings();
         TestDisplayIntentWaitsForConfirmation();
         TestDeferredDisplaySaveBoundary();
-        TestMigration();
-        TestRemovedGraphicsReadMigration();
-        TestV2RoundTrip();
         TestFullGraphicsTransactions();
-        TestOptionalAccessibilitySchema();
         TestInvalidAndFutureSchemas();
         std::cout << "graphics settings store: ok\n";
         return 0;

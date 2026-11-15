@@ -46,6 +46,5 @@ void Debug(hs::GameSimulation &simulation, hs::DebugCommandKind kind,
 bool WriteSnapshot(hs::GameSimulation &simulation, hs::RenderSnapshotStorage &snapshot);
 bool HasVfx(const hs::GameSimulation &simulation, hs::DomainSignalKind kind);
 hs::Float2 NormalizedCursor(float x, float y);
-void SetCursor(hs::HeldInputState &held, float x, float y);
 
 } // namespace gameplay_test

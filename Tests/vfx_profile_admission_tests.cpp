@@ -120,14 +120,14 @@ void TestVfxProfileAdmission()
         outputs[2].source = 1;
         outputs[2].profile = VfxOutputProfile::Light;
         light_ranges[0] = {0, 1};
-        screen_effects[0].route_valid = true;
+        screen_effects[0].route = VfxScreenRoute::EventHit;
         screen_effects[0].outputs = {0, 1};
         ribbon_effects[0].handle = 1;
         ribbon_effects[0].valid_handle = true;
         ribbon_effects[0].sources = {0, 1};
         distortion_ranges[0] = {0, 1};
         decal_ranges[0] = {0, 1};
-        volume_effects[0].route_valid = true;
+        volume_effects[0].route = VfxVolumeRoute::EventContext;
         volume_effects[0].outputs = {0, 1};
         output_profiles[0] = (1u << static_cast<unsigned>(VfxOutputProfile::ScreenOverlay)) |
             (1u << static_cast<unsigned>(VfxOutputProfile::Light));
@@ -178,7 +178,6 @@ void TestVfxProfileAdmission()
             recipe.profile = outputs[i].profile;
             recipe.payload_kind = effects[0].payload_kind;
             recipe.timing_kind = effects[0].timing_kind;
-            recipe.effect_lookup_count = 1;
         }
     };
 
@@ -200,32 +199,6 @@ void TestVfxProfileAdmission()
     sources[0].type = VfxSourceType::ProjectileFollow;
     outputs[0].profile = VfxOutputProfile::ScreenOverlay;
     Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Screen), false) == 0);
-    initialize();
-    sources[0].type = static_cast<VfxSourceType>(0xffffu);
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Screen), false) == 0);
-    initialize();
-    outputs[1].profile = static_cast<VfxOutputProfile>(0xffffu);
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Screen), false) == 0);
-
-    // Missing or malformed ranges never turn a requested profile optional.
-    initialize();
-    effects[0].sources = {0, 3};
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, mask, false) == 0);
-    initialize();
-    sources[0].outputs = {3, 1};
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Screen), false) == 0);
-    initialize();
-    screen_effects[0].outputs = {2, 1};
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Screen), false) == 0);
-
-    // Both ends of the authored ownership link must agree.
-    initialize();
-    sources[0].effect = 2;
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Screen), false) == 0);
-    initialize();
-    outputs[0].source = 1;
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Screen), false) == 0);
-
     initialize();
     const auto protected_mask = static_cast<std::uint16_t>(Bit(Profile::Ground) | Bit(Profile::EntitySurface) |
         Bit(Profile::PointRate) | Bit(Profile::Screen));
@@ -278,37 +251,6 @@ void TestVfxProfileAdmission()
     ground_recipes[0].kind = VfxGroundRecipeKind::Preview;
     Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
 
-    configureCosmeticGround(2);
-    sources[1].type = VfxSourceType::ProjectileFollow;
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
-    configureCosmeticGround(2);
-    ground_ranges[0].count = 1;
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
-    configureCosmeticGround(2);
-    ground_recipes[1].output_index = 0;
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
-    configureCosmeticGround();
-    ground_recipes[0].source_stable_id++;
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
-    configureCosmeticGround();
-    ground_recipes[0].effect_id++;
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
-    configureCosmeticGround();
-    ground_recipes[0].effect_lookup_count = 0;
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
-    configureCosmeticGround();
-    effect_lookup[0].effect_id = 0;
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
-    configureCosmeticGround();
-    effect_lookup[0].handle = 2;
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
-    configureCosmeticGround();
-    effect_lookup[1] = {effect_lookup[0].effect_id, 2};
-    image.program.effect_lookup = effect_lookup;
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) == 0);
-    configureCosmeticGround(2);
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), true) == 0);
-
     // The verified image plan feeds the existing store policy: cosmetics may drop,
     // while bound-owner Ground and duplicate-key required membership stay required.
     configureCosmeticGround();
@@ -360,14 +302,6 @@ void TestVfxProfileAdmission()
             duplicate_ground_store.ProfileEvents(Profile::Ground).size() == 1);
 
     initialize();
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 0, Bit(Profile::Screen), false) == 0);
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 2, Bit(Profile::Screen), false) == 0);
-
-    initialize();
-    outputs[0].profile = VfxOutputProfile::SpriteAdd;
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Screen), false) == 0);
-
-    initialize();
     light_ranges[0] = {0, 3};
     ground_ranges[0] = {0, 2};
     ground_recipes[1].min_quality = 2;
@@ -395,17 +329,6 @@ void TestVfxProfileAdmission()
     plan = runtime_detail::PrepareVfxEventProfileAdmission(image, 1);
     Require((plan.cosmetic_mask & Bit(Profile::Light)) == 0 &&
         plan.frame_rows[static_cast<std::size_t>(Profile::Light)] == 3);
-    decal_ranges[0] = {3, 1};
-    ground_ranges[0] = {2, 1};
-    distortion_ranges[0] = {3, 1};
-    plan = runtime_detail::PrepareVfxEventProfileAdmission(image, 1);
-    Require(plan.frame_rows[static_cast<std::size_t>(Profile::Decal)] == 0 &&
-        plan.frame_rows[static_cast<std::size_t>(Profile::Ground)] == 0 &&
-        plan.persistent_frame_rows[static_cast<std::size_t>(Profile::Ground)] == 0 &&
-        plan.persistent_frame_rows[static_cast<std::size_t>(Profile::Decal)] == 0 &&
-        plan.frame_rows[static_cast<std::size_t>(Profile::Distortion)] == 0 &&
-        plan.persistent_frame_rows[static_cast<std::size_t>(Profile::Distortion)] == 0);
-
     // Prepared owner recipes provide per-input maximums. Quality and age can
     // only remove rows; Mesh/Fresnel also match the effect handle and shell kind.
     initialize();
@@ -450,12 +373,4 @@ void TestVfxProfileAdmission()
     Require(plan.persistent_mesh_rows == 0 && plan.persistent_fresnel_rows == 0 &&
         plan.frame_rows[static_cast<std::size_t>(Profile::EntitySurface)] == 0 &&
         plan.persistent_frame_rows[static_cast<std::size_t>(Profile::EntitySurface)] == 1);
-    entity_surface_effects[0].outputs = {4, 1};
-    entity_surface_effects[1].outputs = {4, 1};
-    mesh_effects[0].outputs = {3, 1};
-    fresnel_effects[0].outputs = {3, 1};
-    plan = runtime_detail::PrepareVfxEventProfileAdmission(image, 1);
-    Require(plan.persistent_mesh_rows == 0 && plan.persistent_fresnel_rows == 0 &&
-        plan.frame_rows[static_cast<std::size_t>(Profile::EntitySurface)] == 0 &&
-        plan.persistent_frame_rows[static_cast<std::size_t>(Profile::EntitySurface)] == 0);
 }

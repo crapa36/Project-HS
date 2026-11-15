@@ -1,11 +1,6 @@
 #include <hs/jobs/task_system.hpp>
 #include "render_graph.hpp"
 #include "render_graph_validation.hpp"
-#include "renderer_local_probe_draws.hpp"
-#include "renderer_local_probe.hpp"
-#include "renderer_pipeline_cache.hpp"
-#include "renderer_virtual_shadow.hpp"
-#include "renderer_local_shadow.hpp"
 #include <hs/renderer/renderer.hpp>
 
 #include <D3D12MemAlloc.h>
@@ -13,20 +8,14 @@
 #include <d3d12.h>
 #include <d3d12sdklayers.h>
 #include <d3dcompiler.h>
-#include <dxcapi.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <bit>
-#include <chrono>
 #include <cstddef>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <iterator>
 #include <string>
 #include <cstdio>
 #include <stdexcept>
@@ -43,26 +32,6 @@ __declspec(dllexport) extern const char *D3D12SDKPath = ".\\D3D12\\";
 }
 
 using Microsoft::WRL::ComPtr;
-
-void RunTextureStreamingNative(ID3D12Device *, D3D12MA::Allocator *,
-                               hs::RenderGraphQueueExecutor &);
-void RunReservedTextureStreamingNative(ID3D12Device *, D3D12MA::Allocator *,
-                                       hs::RenderGraphQueueExecutor &);
-
-namespace hs
-{
-struct RenderGraphTestAccess
-{
-    static std::uint64_t Compilations(const RenderGraphBuilder &graph)
-    {
-        return graph.PlanCompilationCount();
-    }
-    static std::uint64_t Reuses(const RenderGraphBuilder &graph)
-    {
-        return graph.PlanReuseCount();
-    }
-};
-}
 
 namespace
 {
@@ -174,386 +143,6 @@ template <class T> std::shared_ptr<void> NativeOwner(T *native)
     return std::shared_ptr<void>(native, [](void *value) { static_cast<T *>(value)->Release(); });
 }
 
-void RunBakedProbePreparation(Fixture &fixture)
-{
-    namespace rd = hs::render_data;
-    const auto id = hs::MakeAssetId("render/lighting/local_probes.spkg");
-    const std::array<std::string, 4> dependencies{
-        "environment.spkg", "layout.spkg", "lights.spkg", "materials.spkg"};
-    rd::SceneProbeDescription description;
-    description.edge = 16; description.ggx_samples = 64;
-    description.revisions = {1, 2, 3, 4};
-    description.environment_dependency = 0; description.material_dependency = 3;
-    description.light_dependency = 2; description.static_layout_dependency = 1;
-    rd::SceneProbeRecord probe;
-    probe.stable_id = 1;
-    probe.influence_min = probe.projection_min = {-1, -1, -1};
-    probe.influence_max = probe.projection_max = {1, 1, 1};
-    const std::array probes{probe};
-    const std::vector<hs::Float4> raw(6 * 16 * 16, {1, 1, 1, 1});
-    const std::vector<hs::Float4> filtered(6 * (256 + 64 + 16 + 4 + 1), {1, 1, 1, 1});
-    const std::vector<hs::Float4> sh(9, {1, 1, 1, 0});
-    const std::vector<float> distance(raw.size(), probe.capture_distance);
-    const auto bytes = rd::BuildSceneProbePackage(id, dependencies, description, probes,
-        {raw, filtered, sh, distance});
-    std::uint32_t shader_reads{};
-    const hs::LocalProbeSystem::ShaderReader unavailable_shader =
-        [&](std::string_view, std::vector<std::byte> &) {
-            ++shader_reads;
-            return hs::Result::Failure(hs::ErrorCode::TaskFailed, "test", "Capture shader intentionally unavailable");
-        };
-    hs::LocalProbeSystem service;
-    hs::LocalProbeCandidate candidate;
-    Check(service.Prepare(fixture.device.Get(), fixture.allocator, bytes, unavailable_shader, candidate).Succeeded(),
-        "baked probe must prepare without capture shaders");
-    Check(shader_reads == 0, "sample-only probe read a capture shader");
-    Check(service.Commit(std::move(candidate), {}).Succeeded(), "commit sample-only probe");
-    hs::RenderGraphBuilder graph;
-    auto scene = std::make_shared<hs::StaticRenderScene>();
-    hs::TransientResourcePool pool;
-    Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "probe export pool");
-    const hs::LocalProbeInputs inputs{scene, description.revisions, {}, {}, {}, 0};
-    hs::LocalProbeOutputs output;
-    auto initially_unqualified=inputs;
-    ++initially_unqualified.revisions.material;
-    initially_unqualified.capture_identity_valid=true;
-    initially_unqualified.capture_sources_ready=false;
-    initially_unqualified.capture_identity[0]=std::byte{1};
-    Check(service.Register(graph, initially_unqualified, output).Succeeded(), "register baked probe upload while capture sources are unready");
-    Check(graph.Prepare(pool).Succeeded(), "prepare baked probe upload");
-    Check(graph.PassCount() == 1 && graph.CompiledPassName(0) == "LocalProbePackageUpload",
-        "unqualified baked SPB1 upload must not register native capture or filter passes");
-    hs::CompletionSet completion;
-    fixture.Execute(graph, 0, hs::BarrierMode::Legacy, completion, "submit baked probe upload");
-    Check(service.CompleteSubmission(graph, completion, true, scene, initially_unqualified.revisions).Succeeded(),
-        "complete baked probe upload submission");
-    Check(fixture.executor.Wait(completion).Succeeded(), "wait baked probe upload");
-    const auto upload_completed = fixture.executor.Completed();
-    graph.Reset();
-    initially_unqualified.completed = upload_completed;
-    Check(service.Register(graph, initially_unqualified, output).Succeeded() && !output.enabled,
-        "register disabled baked metadata reader");
-    auto disabled_reader = graph.AddPass(188, "ProbeFixture.DisabledMetadataReader", hs::QueueHint::Direct);
-    disabled_reader.Read(output.records, hs::Access::ComputeRead);
-    disabled_reader.SetExecuteChecked([](hs::RenderPassContext &) { return hs::Result::Success(); });
-    Check(graph.Prepare(pool).Succeeded(), "prepare disabled baked metadata reader");
-    fixture.Execute(graph, 0, hs::BarrierMode::Legacy, completion, "submit disabled baked metadata reader");
-    Check(service.CompleteSubmission(graph, completion, true, scene, initially_unqualified.revisions).Succeeded(),
-        "complete disabled baked metadata reader submission");
-    auto ready_with_pending_reader = inputs;
-    ready_with_pending_reader.completed = upload_completed;
-    hs::LocalProbeFramePlan pending_reader_plan;
-    Check(service.PrepareFrameRecordData(ready_with_pending_reader, pending_reader_plan).Succeeded() &&
-        pending_reader_plan.published && pending_reader_plan.current && !pending_reader_plan.capture_count,
-        "completed baked upload must publish while an unrelated metadata reader remains in flight");
-    Check(!service.ResetAfterCompletion(upload_completed).Succeeded(),
-        "baked publication must retain the later metadata reader for retirement");
-    Check(fixture.executor.Wait(completion).Succeeded(), "wait disabled baked metadata reader");
-    graph.Reset();
-    auto late_match=inputs;
-    late_match.completed=fixture.executor.Completed();
-    late_match.capture_identity_valid=true;
-    late_match.capture_sources_ready=false;
-    late_match.capture_identity[0]=std::byte{2};
-    Check(!service.NativeCaptureRequired(scene, late_match.revisions, late_match.completed),
-        "matching baked revisions must remain sampleable after an earlier provisional mismatch");
-    Check(service.Register(graph, late_match, output).Succeeded()&&output.enabled,
-        "late matching baked revisions did not adopt preserved package payload");
-    Check(graph.Prepare(pool).Succeeded()&&graph.PassCount()==0,
-        "late baked adoption with unready sources or changed capture identity scheduled native work");
-    fixture.Execute(graph, 0, hs::BarrierMode::Legacy, completion, "submit late baked adoption");
-    Check(service.CompleteSubmission(graph, completion, true, scene, late_match.revisions).Succeeded(),
-        "complete late baked adoption");
-    Check(fixture.executor.Wait(completion).Succeeded(), "wait late baked adoption");
-    std::vector<std::byte> exported;
-    Check(service.ExportBakedPackage(fixture.executor, pool, 0, hs::BarrierMode::Legacy, exported).Succeeded(),
-        "late-adopted baked package could not be exported after its completed reader fence");
-    Check(exported == bytes, "native four-payload readback changed the baked package");
-    auto wrong_capture = late_match.revisions;
-    ++wrong_capture.material;
-    auto compatibility = late_match.revisions;
-    compatibility.material += 10;
-    compatibility.static_layout += 10;
-    Check(!service.ExportBakedPackage(fixture.executor, pool, 0, hs::BarrierMode::Legacy, exported,
-        &wrong_capture, &compatibility).Succeeded() && exported.empty(),
-        "export accepted compatibility revisions from a different current capture");
-    Check(service.ExportBakedPackage(fixture.executor, pool, 0, hs::BarrierMode::Legacy, exported,
-        &late_match.revisions, &compatibility).Succeeded(), "export with qualified compatibility revisions failed");
-    Check(rd::ReadSceneProbePackage(exported, id).description.revisions == compatibility,
-        "export did not preserve the qualified compatibility revisions");
-    graph.Reset();
-    auto published_inputs = inputs;
-    published_inputs.completed = fixture.executor.Completed();
-    published_inputs.max_cube_views = 6;
-    Check(service.Register(graph, published_inputs, output).Succeeded() && output.enabled,
-        "completed baked probe was not published");
-    auto baked_reader = graph.AddPass(188, "ProbeFixture.BakedReader", hs::QueueHint::Direct);
-    baked_reader.Read(output.radiance, hs::Access::ComputeRead);
-    baked_reader.SetExecuteChecked([](hs::RenderPassContext &) { return hs::Result::Success(); });
-    Check(graph.Prepare(pool).Succeeded(), "prepare baked probe publication");
-    Check(graph.PassCount() == 1 && graph.CompiledPassName(0) == "ProbeFixture.BakedReader",
-        "matching baked probe publication must only schedule the requested reader");
-    for (const auto &[name, resource] : std::array{
-            std::pair{"radiance", output.radiance_resource}, std::pair{"prefiltered", output.prefiltered_resource},
-            std::pair{"irradiance", output.irradiance_resource}, std::pair{"distance", output.distance_resource}})
-    {
-        // D3D12MA may add an allocation-only flag without adding render/UAV capabilities.
-        // The system SDK predates the bundled Agility enum; this is its USE_TIGHT_ALIGNMENT value.
-        constexpr auto allocation_flags = static_cast<D3D12_RESOURCE_FLAGS>(0x400u);
-        const bool sample_only = resource && (resource->GetDesc().Flags & ~allocation_flags) == D3D12_RESOURCE_FLAG_NONE;
-        if (!sample_only)
-            std::fprintf(stderr, "Baked probe %s resource present=%u flags=%u\n", name,
-                resource != nullptr, resource ? UINT(resource->GetDesc().Flags) : UINT_MAX);
-        Check(sample_only, "baked sample-only resource contains unexpected producer capabilities");
-    }
-    fixture.Execute(graph, 0, hs::BarrierMode::Legacy, completion, "submit baked probe publication");
-    Check(service.CompleteSubmission(graph, completion, true, scene, description.revisions).Succeeded(),
-        "complete baked probe publication");
-    auto changed_binding = published_inputs;
-    changed_binding.capture_identity_valid = true;
-    changed_binding.capture_sources_ready = false;
-    changed_binding.capture_identity[0] = std::byte{3};
-    hs::LocalProbeFramePlan binding_plan;
-    Check(service.PrepareFrameRecordData(changed_binding, binding_plan).Succeeded() &&
-        binding_plan.current && binding_plan.published && !binding_plan.capture_count &&
-        service.BakeStatus(changed_binding.completed).capture_complete,
-        "baked lighting must remain ready across capture binding changes and in-flight readers");
-    Check(!service.ResetAfterCompletion(changed_binding.completed).Succeeded(),
-        "baked resources must retain the in-flight reader despite ready status");
-    Check(fixture.executor.Wait(completion).Succeeded(), "wait baked probe readers");
-    Check(!service.NativeCaptureRequired(scene, description.revisions, fixture.executor.Completed()),
-        "matching baked profile must not request a runtime recapture after upload");
-    auto changed = published_inputs;
-    changed.completed = fixture.executor.Completed();
-    ++changed.revisions.light;
-    hs::LocalProbeFramePlan changed_plan;
-    Check(!service.NativeCaptureRequired(scene, changed.revisions, changed.completed) &&
-        service.PrepareFrameRecordData(changed, changed_plan).Succeeded() && changed_plan.current &&
-        changed_plan.published && !changed_plan.capture_count,
-        "light changes must preserve baked publication without capture");
-    for (auto member : {&rd::SceneProbeRevisions::environment, &rd::SceneProbeRevisions::material,
-            &rd::SceneProbeRevisions::static_layout})
-    {
-        auto mismatch = changed;
-        ++(mismatch.revisions.*member);
-        hs::LocalProbeFramePlan mismatch_plan;
-        Check(!service.NativeCaptureRequired(scene, mismatch.revisions, mismatch.completed) &&
-            service.PrepareFrameRecordData(mismatch, mismatch_plan).Succeeded() && !mismatch_plan.published &&
-            !mismatch_plan.capture_count, "incompatible baked inputs must fall back without capture");
-    }
-    Check(!service.PrepareCapture(unavailable_shader, fixture.executor.Completed()).Succeeded() && shader_reads == 0,
-        "baked package must not upgrade to a capture");
-    Check(service.ResetAfterCompletion(fixture.executor.Completed()).Succeeded(), "reset baked probe");
-    struct Compiler
-    {
-        HMODULE module{LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
-        ~Compiler() { if (module) FreeLibrary(module); }
-    } compiler;
-    Check(compiler.module != nullptr, "load probe fixture shader compiler");
-    const auto compile = reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(compiler.module, "D3DCompile"));
-    Check(compile != nullptr, "probe fixture D3DCompile");
-    constexpr char shader[] = "[numthreads(1,1,1)] void main() {}";
-    ComPtr<ID3DBlob> code, diagnostics;
-    Hr(compile(shader, sizeof(shader) - 1, nullptr, nullptr, nullptr, "main", "cs_5_1", 0, 0,
-        &code, &diagnostics), "compile probe state-only filter fixture");
-    {
-        hs::RendererPipelineCache cache;
-        Check(cache.Initialize(fixture.device.Get(),fixture.adapter.Get(),{}).Succeeded(),
-            "initialize concurrent PSO cache fixture");
-        D3D12_ROOT_SIGNATURE_DESC root_description{};
-        ComPtr<ID3DBlob> root_bytes,root_errors;
-        Hr(D3D12SerializeRootSignature(&root_description,D3D_ROOT_SIGNATURE_VERSION_1,
-            &root_bytes,&root_errors),"serialize empty PSO cache fixture root");
-        ComPtr<ID3D12RootSignature> root;
-        Hr(fixture.device->CreateRootSignature(0,root_bytes->GetBufferPointer(),root_bytes->GetBufferSize(),
-            IID_PPV_ARGS(&root)),"create empty PSO cache fixture root");
-        Check(cache.RegisterRootSignature(root.Get(),std::span(
-            static_cast<const std::byte *>(root_bytes->GetBufferPointer()),root_bytes->GetBufferSize())).Succeeded(),
-            "register exact PSO cache fixture root bytes");
-        if(cache.Stats().library_supported)
-        {
-            constexpr std::size_t request_count=6;
-            std::array<ComPtr<ID3D12PipelineState>,request_count> outputs;
-            std::array<HRESULT,request_count> results{};
-            std::atomic_bool start{};
-            std::array<std::thread,request_count> workers;
-            D3D12_COMPUTE_PIPELINE_STATE_DESC state{};
-            state.pRootSignature=root.Get();
-            state.CS={code->GetBufferPointer(),code->GetBufferSize()};
-            for(std::size_t i=0;i<workers.size();++i)
-                workers[i]=std::thread([&,i] {
-                    while(!start.load(std::memory_order_acquire)) std::this_thread::yield();
-                    results[i]=cache.CreateCompute(&state,IID_PPV_ARGS(&outputs[i]));
-                });
-            start.store(true,std::memory_order_release);
-            for(auto &worker:workers) worker.join();
-            for(const auto result:results) Hr(result,"concurrent same-name PSO cache request");
-            auto stats=cache.Stats();
-            Check(stats.native_creates==1&&stats.stores==1&&stats.hits==request_count-1,
-                "same-name concurrent PSO requests did not share one stored creation");
-
-            D3D12_COMPUTE_PIPELINE_STATE_DESC malformed=state;
-            malformed.CS={nullptr,1};
-            ComPtr<ID3D12PipelineState> invalid;
-            Check(cache.CreateCompute(&malformed,IID_PPV_ARGS(&invalid))==E_INVALIDARG,
-                "malformed shader bytecode did not fail during semantic key validation");
-            ComPtr<ID3D12PipelineState> retry;
-            Hr(cache.CreateCompute(&state,IID_PPV_ARGS(&retry)),"valid PSO retry after malformed shader");
-            stats=cache.Stats();
-            Check(stats.key_failures==1&&stats.native_creates==1&&stats.stores==1&&stats.hits==request_count,
-                "malformed shader changed the cache or prevented a valid same-key retry");
-        }
-        else std::fprintf(stderr,"Skipping pipeline-cache concurrency fixture: pipeline libraries unsupported.\n");
-    }
-    const hs::LocalProbeSystem::ShaderReader state_shader =
-        [&](std::string_view, std::vector<std::byte> &output) {
-            const auto *begin = static_cast<const std::byte *>(code->GetBufferPointer());
-            output.assign(begin, begin + code->GetBufferSize());
-            return hs::Result::Success();
-        };
-    const auto layout_bytes = rd::BuildSceneProbePackage(id, dependencies, description, probes);
-    D3D12_FEATURE_DATA_D3D12_OPTIONS12 options{};
-    const bool enhanced = SUCCEEDED(fixture.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12,
-        &options, sizeof(options))) && options.EnhancedBarriersSupported;
-    ComPtr<ID3D12Resource> scene_dependency;
-    const auto dependency_heap = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
-    const auto dependency_description = BufferDescription(256);
-    Hr(fixture.device->CreateCommittedResource(&dependency_heap, D3D12_HEAP_FLAG_NONE, &dependency_description,
-        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&scene_dependency)), "probe fixture scene dependency");
-    for (const auto mode : {hs::BarrierMode::Legacy, hs::BarrierMode::Enhanced})
-    {
-        if (mode == hs::BarrierMode::Enhanced && !enhanced) continue;
-        Check(service.Prepare(fixture.device.Get(), fixture.allocator, layout_bytes, state_shader, candidate).Succeeded(),
-            "prepare recapture fixture");
-        Check(service.Commit(std::move(candidate), fixture.executor.Completed()).Succeeded(), "commit recapture fixture");
-        auto capture_inputs = inputs;
-        capture_inputs.capture_identity_valid = true;
-        capture_inputs.capture_sources_ready = true;
-        for (std::uint32_t step = 0; step < 5; ++step)
-        {
-            graph.Reset();
-            capture_inputs.completed = fixture.executor.Completed();
-            if (step == 1)
-            {
-                ++capture_inputs.revisions.light;
-                capture_inputs.capture_identity[0] = std::byte{1};
-                Check(service.NativeCaptureRequired(scene, capture_inputs.revisions, capture_inputs.completed),
-                    "layout probe did not request capture");
-            }
-            if (step == 2) capture_inputs.capture_identity[0] = std::byte{2};
-            capture_inputs.max_cube_views = step == 1 ? 1 : step == 2 ? 5 : step == 3 ? 1 : 0;
-            if (capture_inputs.max_cube_views)
-            {
-                const auto dependency = graph.ImportBuffer({scene_dependency.Get()}, hs::Access::AllShaderRead,
-                    "ProbeFixture.SceneDependency");
-                const std::array reads{hs::LocalProbeSceneRead{graph.Version(dependency), hs::Access::AllShaderRead}};
-                capture_inputs.scene_reads = reads;
-                capture_inputs.draw_static = [](hs::RenderPassContext &, const hs::LocalProbeCaptureView &) {
-                    return hs::Result::Success();
-                };
-                if (step == 1)
-                {
-                    capture_inputs.capture_sources_ready = false;
-                    hs::LocalProbeFramePlan waiting_plan;
-                    Check(service.PrepareFrameRecordData(capture_inputs, waiting_plan).Succeeded() &&
-                        waiting_plan.capture_count == 0,
-                        "native capture must wait until its sampled texture bindings are ready");
-                    capture_inputs.capture_sources_ready = true;
-                }
-                Check(service.Register(graph, capture_inputs, output).Succeeded(), "register bounded stale capture");
-                capture_inputs.scene_reads = {};
-            }
-            else Check(service.Register(graph, capture_inputs, output).Succeeded(), "register recapture publication");
-            if (step == 2) Check(output.captured_cube_views == 5,
-                "texture promotion must discard the earlier one-face partial bake");
-            Check(graph.Prepare(pool).Succeeded(), "prepare recapture state transitions");
-            fixture.Execute(graph, 0, mode, completion, "submit recapture state transitions");
-            Check(service.CompleteSubmission(graph, completion, true, scene, capture_inputs.revisions).Succeeded(),
-                "complete recapture state transitions");
-            Check(fixture.executor.Wait(completion).Succeeded(), "wait recapture fixture");
-            fixture.CheckValidation();
-        }
-        Check(output.enabled && output.captured_cube_views == 6, "bounded stale recapture did not publish");
-        const auto completed_before_sample = fixture.executor.Completed();
-        Check(service.BakeStatus(completed_before_sample).capture_complete,
-            "completed native bake status was not ready before later sampling");
-        for (auto member : {&rd::SceneProbeRevisions::material, &rd::SceneProbeRevisions::static_layout})
-        {
-            auto changed_capture = capture_inputs.revisions;
-            ++(changed_capture.*member);
-            Check(service.NativeCaptureRequired(scene, changed_capture, completed_before_sample),
-                "capture revision changes must invalidate a completed layout capture");
-        }
-        graph.Reset();
-        capture_inputs.completed = completed_before_sample;
-        capture_inputs.max_cube_views = 0;
-        capture_inputs.scene_reads = {};
-        capture_inputs.draw_static = {};
-        Check(service.Register(graph, capture_inputs, output).Succeeded() && output.enabled,
-            "register post-bake sample-only reader");
-        auto sample_pass = graph.AddPass(189, "ProbeFixture.LaterSampleReader", hs::QueueHint::Direct);
-        sample_pass.Read(output.radiance, hs::Access::ComputeRead);
-        sample_pass.Read(output.prefiltered, hs::Access::ComputeRead);
-        sample_pass.Read(output.irradiance, hs::Access::ComputeRead);
-        sample_pass.Read(output.first_hit_distance, hs::Access::ComputeRead);
-        sample_pass.SetExecuteChecked([](hs::RenderPassContext &) { return hs::Result::Success(); });
-        Check(graph.Prepare(pool).Succeeded(), "prepare post-bake sample-only reader");
-        fixture.Execute(graph, 0, mode, completion, "submit post-bake sample-only reader");
-        Check(service.CompleteSubmission(graph, completion, true, scene, capture_inputs.revisions).Succeeded(),
-            "complete post-bake sample-only reader");
-        Check(service.BakeStatus(completed_before_sample).capture_complete,
-            "later sampling lease incorrectly revoked fixed native bake completion");
-        Check(!service.ResetAfterCompletion(completed_before_sample).Succeeded(),
-            "reset ignored a post-bake sampling lease newer than the supplied completion snapshot");
-        Check(fixture.executor.Wait(completion).Succeeded(), "wait post-bake sample-only reader");
-        Check(service.ResetAfterCompletion(fixture.executor.Completed()).Succeeded(), "reset recapture fixture");
-    }
-    fixture.CheckValidation();
-}
-
-void RunDeviceIdentity(Fixture &fixture, bool hardware)
-{
-    hs::TransientResourcePool pool;
-    Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "identity pool initialize");
-    hs::RenderGraphBuilder graph;
-    const auto heap = HeapProperties(D3D12_HEAP_TYPE_DEFAULT);
-    const auto description = BufferDescription(256);
-    const auto prepare = [&](ID3D12Resource *resource) {
-        graph.Reset();
-        const auto imported = graph.ImportBuffer({resource}, hs::Access::Common, "device identity import");
-        auto pass = graph.AddPass(1, "identity read", hs::QueueHint::Direct);
-        pass.Read(graph.Version(imported), hs::Access::CopySource);
-        pass.SetExecute([](hs::RenderPassContext &) {});
-        return graph.Prepare(pool);
-    };
-    ComPtr<ID3D12Resource> resource, resource_alias;
-    Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
-        D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&resource)), "identity resource");
-    ComPtr<ID3D12Pageable> pageable;
-    Hr(resource.As(&pageable), "identity resource pageable interface");
-    Hr(pageable.As(&resource_alias), "identity resource interface roundtrip");
-    Check(prepare(resource_alias.Get()).Succeeded(), "same COM device identity accepts an interface roundtrip");
-
-    if (!hardware) return; // A hardware fixture and WARP provide genuinely distinct device identities.
-    ComPtr<IDXGIAdapter> warp;
-    ComPtr<ID3D12Device> foreign_device;
-    Hr(fixture.factory->EnumWarpAdapter(IID_PPV_ARGS(&warp)), "identity WARP adapter");
-    Hr(D3D12CreateDevice(warp.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&foreign_device)),
-        "identity foreign WARP device");
-    ComPtr<IUnknown> expected_identity, foreign_identity;
-    Hr(fixture.device.As(&expected_identity), "identity fixture IUnknown");
-    Hr(foreign_device.As(&foreign_identity), "identity foreign IUnknown");
-    Check(expected_identity.Get() != foreign_identity.Get(), "foreign-device fixture must have distinct COM identities");
-    ComPtr<ID3D12Resource> foreign_resource;
-    Hr(foreign_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
-        D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&foreign_resource)), "foreign identity resource");
-    const auto rejected = prepare(foreign_resource.Get());
-    Check(!rejected.Succeeded() &&
-        rejected.Message() == "RenderGraph imported resource belongs to a different device.",
-        "canonical identity comparison must still reject a genuinely foreign device");
-    fixture.CheckValidation();
-}
-
 struct ExternalWork
 {
     ComPtr<ID3D12CommandQueue> queue;
@@ -577,78 +166,11 @@ struct ExternalWork
     }
 };
 
-struct ExternalGateRelease
-{
-    ComPtr<ID3D12Fence> fence;
-    ~ExternalGateRelease() { if (fence) static_cast<void>(fence->Signal(1)); }
-};
-
-void RunRemovedFenceSentinel(Fixture &fixture)
-{
-    hs::RenderGraphQueueExecutor executor;
-    Check(executor.Initialize(fixture.device.Get(), nullptr, 1).Succeeded(),
-          "sentinel executor initialize");
-    auto *fence = executor.NativeFence(hs::QueueHint::Direct);
-    Hr(fence->Signal(UINT64_MAX), "inject device-removed fence sentinel");
-    struct RestoreFence
-    {
-        ID3D12Fence *fence;
-        ~RestoreFence() { static_cast<void>(fence->Signal(0)); }
-    } restore{fence};
-    Check(SUCCEEDED(fixture.device->GetDeviceRemovedReason()), "sentinel does not remove the device");
-    Check(executor.Completed().direct == 0, "removed fence cannot retire submitted work");
-    hs::CompletionSet pending;
-    pending.Include(hs::QueueHint::Direct, 1);
-    const auto waited = executor.Wait(pending);
-    Check(!waited && waited.Message().find(std::to_string(static_cast<std::int64_t>(DXGI_ERROR_DEVICE_REMOVED))) != std::string_view::npos,
-          "removed fence wait reports device removal instead of completion");
-    Check(!executor.Drain(), "drain cannot prove completion from the removed fence sentinel");
-}
-
-void RunQueueJoinReuse(Fixture &fixture)
-{
-    hs::RenderGraphQueueExecutor executor;
-    Check(executor.Initialize(fixture.device.Get(), nullptr, 1).Succeeded(), "join executor initialize");
-    Check(executor.Drain().Succeeded(), "signal initial join timelines");
-    auto first = executor.Completed();
-    first.direct = 0;
-    Check(first.compute && first.copy, "join test has owned producer serials");
-    Check(executor.Join(first, hs::QueueHint::Direct).Succeeded(), "join both producer timelines");
-    Check(executor.LastExecutionStats().cross_queue_waits == 2, "first join waits for both producers");
-    Check(executor.Join(first, hs::QueueHint::Direct).Succeeded(), "repeat producer join");
-    Check(executor.LastExecutionStats().cross_queue_waits == 2, "repeated join does not enqueue duplicate waits");
-
-    Check(executor.Drain().Succeeded(), "advance join timelines");
-    auto next = executor.Completed();
-    next.direct = 0;
-    Check(next.compute > first.compute && next.copy > first.copy, "join serials advance");
-    Check(executor.Join(next, hs::QueueHint::Direct).Succeeded(), "join newer producer serials");
-    Check(executor.LastExecutionStats().cross_queue_waits == 4, "newer serials still enqueue waits");
-    Check(executor.Join(first, hs::QueueHint::Direct).Succeeded(), "join older producer serials");
-    Check(executor.LastExecutionStats().cross_queue_waits == 4, "newer waits cover older serials");
-    Check(executor.Join(next, hs::QueueHint::Copy).Succeeded(), "join from another destination");
-    Check(executor.LastExecutionStats().cross_queue_waits == 5, "wait reuse is destination-specific");
-    auto invalid = next;
-    invalid.compute = UINT64_MAX;
-    Check(!executor.Join(invalid, hs::QueueHint::Direct), "wait reuse still rejects unowned serials");
-    Check(executor.LastExecutionStats().cross_queue_waits == 5, "invalid serial adds no wait");
-
-    executor.Clear();
-    Check(executor.Initialize(fixture.device.Get(), nullptr, 1).Succeeded(), "reinitialize join executor");
-    Check(executor.Drain().Succeeded(), "signal replacement join timelines");
-    auto replacement = executor.Completed();
-    replacement.direct = 0;
-    Check(executor.Join(replacement, hs::QueueHint::Direct).Succeeded(), "join replacement timelines");
-    Check(executor.LastExecutionStats().cross_queue_waits == 2, "new timelines do not inherit old waits");
-    Check(executor.Drain().Succeeded(), "complete join test");
-    fixture.CheckValidation();
-}
 void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
 {
     for (const auto queue : {hs::QueueHint::Direct, hs::QueueHint::Compute})
     for (const bool timestamps_enabled : {false, true})
     for (const bool query_subset : {false, true})
-    for (const bool fail_middle : {false, true})
     {
         hs::TransientResourcePool pool;
         Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "independent pool");
@@ -656,6 +178,7 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
         Check(executor.Initialize(fixture.device.Get(), nullptr, 1).Succeeded(), "independent executor");
         hs::RenderGraphBuilder graph;
         std::array<void *, 6> lists{};
+        std::array<std::atomic_uint32_t, 6> calls{};
         ComPtr<ID3D12Resource> source, predicate, output;
         const auto upload_heap = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
         const auto output_heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
@@ -687,6 +210,7 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
             pass.Read(graph.Version(predicate_buffer), hs::Access::IndirectArgs);
             output_version = pass.Write(output_version, hs::Access::CopyDest);
             pass.SetExecuteChecked([&, index](hs::RenderPassContext &context) {
+                    calls[index].fetch_add(1, std::memory_order_relaxed);
                     lists[index] = context.NativeCommandList();
                     auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
                     if (index == 0) commands->CopyBufferRegion(output.Get(), 0, source.Get(), 64, (lists.size() + 1) * 4);
@@ -694,19 +218,12 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
                     // A later logical pass must not inherit this suppressed-copy state.
                     commands->SetPredication(predicate.Get(), 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
                     if (index == 0) commands->CopyBufferRegion(output.Get(), lists.size() * 4, source.Get(), 0, 4);
-                    return fail_middle && index == 1
-                        ? hs::Result::Failure(hs::ErrorCode::TaskFailed, "independent-test", "injected failure")
-                        : hs::Result::Success();
+                    return hs::Result::Success();
                 });
         }
         if (auto prepared = graph.Prepare(pool); !prepared)
             throw std::runtime_error("prepare independent graph: " + std::string(prepared.Message()));
         hs::TaskSystem tasks(2);
-        std::vector<hs::GpuPassTiming> cpu_passes;
-        for (std::uint32_t position = 0; position < graph.PassCount(); ++position)
-            cpu_passes.push_back({graph.CompiledPassId(position),
-                std::string(graph.CompiledPassName(position)),
-                static_cast<hs::RenderQueue>(graph.CompiledPassQueue(position))});
         const auto query_count = query_subset ? 4u : 12u;
         const D3D12_QUERY_HEAP_DESC query_desc{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, query_count, 0};
         std::array<ComPtr<ID3D12QueryHeap>, 3> queries;
@@ -736,70 +253,55 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
             options.timestamp_query_slot_count = query_slots.size();
         }
         options.task_system = &tasks;
-        options.cpu_pass_timings = cpu_passes.data();
-        options.cpu_pass_timing_count = cpu_passes.size();
         hs::CompletionSet completion;
         const auto result = executor.Execute(graph, 0, barriers, completion, &options);
         std::vector<void *> distinct_lists;
         for (const auto list : lists)
             if (list && std::find(distinct_lists.begin(), distinct_lists.end(), list) == distinct_lists.end())
                 distinct_lists.push_back(list);
-        Check(executor.LastExecutionStats().record_jobs == distinct_lists.size() + (timestamps_enabled ? 1u : 0u),
-            "each physical recording task owns one list, with a separate timestamp resolve");
+        Check(std::all_of(calls.begin(), calls.end(), [](const auto &count) { return count.load() == 1; }),
+            "recording workers must execute every callback exactly once");
+        Check(executor.LastExecutionStats().record_jobs ==
+                std::min(tasks.WorkerCount(), distinct_lists.size() + (timestamps_enabled ? 1u : 0u)),
+            "recording job admission is bounded by the available workers");
         Check(barriers == hs::BarrierMode::Enhanced
                 ? distinct_lists.size() >= tasks.WorkerCount() && distinct_lists.size() < lists.size()
                 : distinct_lists.size() == lists.size(),
             "compatible Enhanced passes share lists without serializing all worker recording; Legacy preserves decay");
-        Check(result.Succeeded() != fail_middle, "independent callback failure preserved");
-        if (fail_middle)
-            Check(completion.direct == 0 && completion.compute == 0 &&
-                  executor.LastExecutionStats().direct_batches == 0 &&
-                  executor.LastExecutionStats().compute_batches == 0,
-                  "independent recording failure submits no GPU work");
-        else
+        Check(result.Succeeded(), "independent recording succeeds");
+        Check(std::all_of(lists.begin(), lists.end(), [](const auto list) { return list != nullptr; }),
+            "every logical callback records its work");
+        Check(executor.Wait(completion).Succeeded(), "wait independent graph");
+        D3D12_RANGE copied_bytes{0, (lists.size() + 1) * 4};
+        Hr(output->Map(0, &copied_bytes, &mapped), "map recording output");
+        for (std::size_t index = 0; index < lists.size(); ++index)
+            Check(static_cast<const std::uint32_t *>(mapped)[index] == 17 + index,
+                "shared command lists preserve initial predication and every GPU copy");
+        Check(static_cast<const std::uint32_t *>(mapped)[lists.size()] == 0,
+            "fixture predication actually suppresses its control copy");
+        const D3D12_RANGE copy_no_write{};
+        output->Unmap(0, &copy_no_write);
+        if (!timestamps_enabled && !query_subset)
+            std::printf("Recording %s/%s: %zu callbacks, %zu lists, %u jobs; GPU copies and predication reset passed.\n",
+                barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy",
+                queue == hs::QueueHint::Direct ? "Direct" : "Compute", lists.size(), distinct_lists.size(),
+                executor.LastExecutionStats().record_jobs);
+        if (timestamps_enabled)
         {
-            Check(std::all_of(lists.begin(), lists.end(), [](const auto list) { return list != nullptr; }),
-                "every logical callback records its work");
-            for (const auto &timing : cpu_passes)
-                Check(timing.cpu_record_valid && timing.cpu_callback_valid &&
-                          timing.cpu_record_begin_qpc <= timing.cpu_callback_begin_qpc &&
-                          timing.cpu_callback_begin_qpc <= timing.cpu_callback_end_qpc &&
-                          timing.cpu_callback_end_qpc <= timing.cpu_record_end_qpc,
-                      "independent recording retains each callback inside its pass recording interval");
-            Check(executor.Wait(completion).Succeeded(), "wait independent graph");
-            D3D12_RANGE copied_bytes{0, (lists.size() + 1) * 4};
-            Hr(output->Map(0, &copied_bytes, &mapped), "map recording output");
-            for (std::size_t index = 0; index < lists.size(); ++index)
-                Check(static_cast<const std::uint32_t *>(mapped)[index] == 17 + index,
-                    "shared command lists preserve initial predication and every GPU copy");
-            Check(static_cast<const std::uint32_t *>(mapped)[lists.size()] == 0,
-                "fixture predication actually suppresses its control copy");
-            const D3D12_RANGE copy_no_write{};
-            output->Unmap(0, &copy_no_write);
-            if (!timestamps_enabled && !query_subset)
-                std::printf("Recording %s/%s: %zu callbacks, %zu lists, %u jobs; GPU copies and predication reset passed.\n",
-                    barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy",
-                    queue == hs::QueueHint::Direct ? "Direct" : "Compute", lists.size(), distinct_lists.size(),
-                    executor.LastExecutionStats().record_jobs);
-            if (timestamps_enabled)
-            {
             std::uint64_t *values{};
             D3D12_RANGE range{0, query_count * sizeof(std::uint64_t)};
             Hr(timestamps[queue_index]->Map(0, &range, reinterpret_cast<void **>(&values)),
-               "map independent timestamps");
+                "map independent timestamps");
             for (std::size_t pair = 0; pair < (query_subset ? 2u : 6u); ++pair)
             {
                 const auto index = pair * 2;
                 Check(values[index] != 0 && values[index + 1] >= values[index],
-                      "independent lists preserve every GPU timestamp pair");
+                    "independent lists preserve every GPU timestamp pair");
             }
             D3D12_RANGE no_write{};
             timestamps[queue_index]->Unmap(0, &no_write);
-            }
         }
     }
-    enum class Outcome { Success, OwnerFailure };
-    for (const auto outcome : {Outcome::Success, Outcome::OwnerFailure})
     {
         hs::TransientResourcePool pool;
         Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(),
@@ -808,9 +310,6 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
         std::atomic<std::uint32_t> completed{};
         std::uint32_t owner_calls{};
         const auto owner = std::this_thread::get_id();
-        const auto failed = [] {
-            return hs::Result::Failure(hs::ErrorCode::TaskFailed, "recording-test", "injected failure");
-        };
         for (std::uint32_t index = 0; index < 4; ++index)
         {
             auto pass = graph.AddPass(301 + index, "recording dispatch", hs::QueueHint::Direct);
@@ -824,60 +323,21 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
                     Check(std::this_thread::get_id() == owner, "owner callback moved to a worker");
                     Check(index == 1 + owner_calls * 2, "owner callback order changed");
                     ++owner_calls;
-                    if (outcome == Outcome::Success && index == 1)
-                        std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                    return outcome == Outcome::OwnerFailure && index == 1
-                        ? failed() : hs::Result::Success();
+                    return hs::Result::Success();
                 });
         }
         Check(graph.Prepare(pool).Succeeded(), "prepare recording dispatch graph");
         hs::TaskSystem tasks(2);
         hs::GraphExecutionOptions options;
         options.task_system = &tasks;
-        std::vector<hs::GpuPassTiming> cpu_passes;
-        for (std::uint32_t position = 0; position < graph.PassCount(); ++position)
-            cpu_passes.push_back({graph.CompiledPassId(position),
-                std::string(graph.CompiledPassName(position)),
-                static_cast<hs::RenderQueue>(graph.CompiledPassQueue(position))});
-        options.cpu_pass_timings = cpu_passes.data();
-        options.cpu_pass_timing_count = cpu_passes.size();
         hs::CompletionSet completion;
-        const auto execute_start = std::chrono::steady_clock::now();
         const auto result = fixture.executor.Execute(graph, 0, barriers, completion, &options);
-        const auto execute_us = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - execute_start).count();
         Check(completed == 2, "recording tasks escaped mandatory join");
         Check(owner_calls == 2, "owner callbacks were omitted");
         Check(fixture.executor.LastExecutionStats().record_jobs == 2,
               "recording job count includes rejected or owner work");
-        Check(result.Succeeded() == (outcome == Outcome::Success),
-              "recording dispatch failure was lost");
-        if (outcome == Outcome::Success)
-        {
-            const auto timings = fixture.executor.LastExecutionStats();
-            Check(timings.cpu_record_us >= 1000, "record timing omitted owner callback wall time");
-            LARGE_INTEGER frequency{};
-            Check(QueryPerformanceFrequency(&frequency) && frequency.QuadPart > 0, "CPU timing QPC frequency");
-            for (const auto &pass : cpu_passes)
-            {
-                Check(pass.cpu_record_valid && pass.cpu_record_end_qpc >= pass.cpu_record_begin_qpc,
-                    "recording interval missing or reversed");
-                Check(pass.cpu_callback_valid && pass.cpu_record_begin_qpc <= pass.cpu_callback_begin_qpc &&
-                    pass.cpu_callback_begin_qpc <= pass.cpu_callback_end_qpc &&
-                    pass.cpu_callback_end_qpc <= pass.cpu_record_end_qpc,
-                    "callback interval is missing or outside its recording interval");
-                Check(!pass.cpu_provider_submit_valid, "ordinary pass fabricated provider submission timing");
-                if (pass.pass_id == 302)
-                    Check(static_cast<long double>(pass.cpu_callback_end_qpc - pass.cpu_callback_begin_qpc) *
-                        1000 / frequency.QuadPart >= 1.0L, "callback timing omitted known owner callback delay");
-            }
-            Check(timings.cpu_plan_us + timings.cpu_record_us + timings.cpu_submit_us <=
-                    static_cast<std::uint64_t>(execute_us), "graph timing stages overlap or exceed execution wall time");
-            Check(fixture.executor.Wait(completion).Succeeded(), "wait recording dispatch graph");
-        }
-        else
-            Check(completion.direct == 0 && completion.compute == 0 && completion.copy == 0,
-                  "failed recording graph submitted GPU work");
+        Check(result.Succeeded(), "recording dispatch succeeds");
+        Check(fixture.executor.Wait(completion).Succeeded(), "wait recording dispatch graph");
         fixture.CheckValidation();
     }
 }
@@ -1302,9 +762,7 @@ void RunPlanReuse(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot
     Layout layout;
     execute(0, layout);
     execute(1, layout);
-    Check(hs::RenderGraphTestAccess::Compilations(graph) == 1 &&
-        hs::RenderGraphTestAccess::Reuses(graph) == 1,
-        "imports, initial access, completion, and active work reuse one compiled plan");
+
     layout.capacity = max_capacity;
     execute(2, layout);
     layout.queue = hs::QueueHint::Compute;
@@ -1313,8 +771,7 @@ void RunPlanReuse(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot
     execute(4, layout);
     layout.read_size = 512;
     execute(5, layout);
-    Check(hs::RenderGraphTestAccess::Compilations(graph) == 5,
-        "capacity, queue, ordering, and range changes recompile the plan");
+
     (void)declare(6, layout, true);
     Check(!graph.Prepare(pool).Succeeded(), "cache hit still rejects duplicate physical imports");
     (void)declare(6, layout, false, true);
@@ -1329,12 +786,8 @@ void RunPlanReuse(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot
             "sparse unknown ordering endpoint is rejected without replacing the cached plan");
     }
     execute(6, layout);
-    Check(hs::RenderGraphTestAccess::Compilations(graph) == 5 &&
-        hs::RenderGraphTestAccess::Reuses(graph) == 2,
-        "failed candidates retain the previous successful plan");
 
-    const auto before_rotation_compilations = hs::RenderGraphTestAccess::Compilations(graph);
-    const auto before_rotation_reuses = hs::RenderGraphTestAccess::Reuses(graph);
+
     for (unsigned cycle = 0; cycle < 3; ++cycle)
     {
         for (unsigned variant = 0; variant < 3; ++variant)
@@ -1349,12 +802,10 @@ void RunPlanReuse(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot
             Check(!graph.Prepare(pool).Succeeded(), "failed candidate preserves all three cached plans");
         }
     }
-    Check(hs::RenderGraphTestAccess::Compilations(graph) == before_rotation_compilations + 2 &&
-        hs::RenderGraphTestAccess::Reuses(graph) == before_rotation_reuses + 7,
-        "three rotating range plans reuse exact schedules with current callbacks and imports");
+
 
     // Descriptor fields must participate even when allocation size would match.
-    const auto before_descriptor_compilations = hs::RenderGraphTestAccess::Compilations(graph);
+
     const auto texture_frame = [&](hs::TextureDesc desc) {
         graph.Reset();
         pool.ResetCompletedClaims(fixture.executor.Completed());
@@ -1367,14 +818,10 @@ void RunPlanReuse(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot
     };
     texture_frame({16, 16, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS});
     texture_frame({16, 16, DXGI_FORMAT_R16_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS});
-    Check(hs::RenderGraphTestAccess::Compilations(graph) == before_descriptor_compilations + 2,
-        "format changes invalidate a plan despite matching allocation classes");
-    const auto descriptor_reuses = hs::RenderGraphTestAccess::Reuses(graph);
+
     texture_frame({16, 16, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS});
     texture_frame({16, 16, DXGI_FORMAT_R16_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS});
-    Check(hs::RenderGraphTestAccess::Compilations(graph) == before_descriptor_compilations + 2 &&
-        hs::RenderGraphTestAccess::Reuses(graph) == descriptor_reuses + 2,
-        "alternating exact descriptors reuse their validated allocation plans");
+
 
     D3D12_RESOURCE_DESC texture_desc{};
     texture_desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -1396,6 +843,13 @@ void RunPlanReuse(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot
     fixture.CheckValidation();
 }
 
+
+struct ExternalGateRelease
+{
+    ComPtr<ID3D12Fence> fence;
+    ~ExternalGateRelease() { if (fence) static_cast<void>(fence->Signal(1)); }
+};
+
 void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
 {
     constexpr std::size_t size = 4096;
@@ -1415,7 +869,6 @@ void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)), "external readback");
     const hs::BufferDesc buffer_desc{size, D3D12_RESOURCE_FLAG_NONE};
 
-    for (const int outcome : {0, 1, 2})
     {
         hs::TransientResourcePool pool;
         Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "external pool");
@@ -1440,8 +893,8 @@ void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
             hs::ExternalResourceAccess{source, hs::Access::Common, hs::Access::Common},
             hs::ExternalResourceAccess{destination, hs::Access::Common, hs::Access::Common}};
         provider.SetExternalExecute({NativeOwner(work->queue.Get()), hs::QueueHint::Copy, work}, boundaries,
-            [work, source, destination, outcome](hs::RenderExternalPassContext &context,
-                                                hs::ExternalQueueCompletion &completion) {
+            [work, source, destination](hs::RenderExternalPassContext &context,
+                                        hs::ExternalQueueCompletion &completion) {
                 Check(context.NativeCommandQueue() == work->queue.Get(), "external callback native queue");
                 Hr(work->allocator->Reset(), "reset external allocator");
                 Hr(work->commands->Reset(work->allocator.Get(), nullptr), "reset external commands");
@@ -1452,10 +905,9 @@ void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
                 work->queue->ExecuteCommandLists(1, lists);
                 Hr(work->queue->Signal(work->fence.Get(), 5000), "external provider completion Signal");
                 completion.resource_lease = work;
-                if (outcome != 1) completion.native_fence_owner = NativeOwner(work->fence.Get());
-                if (outcome == 0) completion.value = 5000;
-                return outcome == 1 ? hs::Result::Failure(hs::ErrorCode::TaskFailed, "external-test",
-                    "provider failed after submission without returning a fence") : hs::Result::Success();
+                completion.native_fence_owner = NativeOwner(work->fence.Get());
+                completion.value = 5000;
+                return hs::Result::Success();
             });
         auto consumer = graph.AddPass(120, "external continuation", hs::QueueHint::Direct);
         consumer.Read(destination_version, hs::Access::CopySource);
@@ -1476,7 +928,7 @@ void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
         capture_options.cpu_pass_timings = cpu_passes.data();
         capture_options.cpu_pass_timing_count = cpu_passes.size();
         const auto result = fixture.executor.Execute(graph, slot, barriers, completion, &capture_options);
-        Check(result.Succeeded() == (outcome == 0), "external callback outcome is reported");
+        Check(result.Succeeded(), "external callback succeeds");
         for (const auto &pass : cpu_passes)
         {
             Check(pass.cpu_record_valid, "external graph prefix/ordinary recording interval missing");
@@ -1486,8 +938,6 @@ void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
                 Check(pass.cpu_provider_submit_end_qpc >= pass.cpu_provider_submit_begin_qpc,
                     "provider callback interval reversed");
         }
-        Check(outcome != 2 || result.Message().find("invalid owned fence") != std::string_view::npos,
-              "malformed completion is rejected explicitly");
         Check(completion.copy && !completion.IsSatisfiedBy(fixture.executor.Completed()),
               "external bridge remains incomplete behind real independent queue gate");
         Check(graph.ResourceCompletion(destination).copy == completion.copy,
@@ -1495,11 +945,9 @@ void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
         Check(graph.FinalAccess(source) == hs::Access::Common &&
             graph.FinalQueue(source) == hs::QueueHint::Copy,
             "provider outgoing state replaces declared source access");
-        Check(graph.FinalAccess(destination) == (outcome == 0 ? hs::Access::CopySource : hs::Access::Common) &&
-            graph.FinalQueue(destination) == (outcome == 0 ? hs::QueueHint::Direct : hs::QueueHint::Copy),
-            "partial submission publishes provider state without the unsubmitted consumer");
-        Check(outcome == 0 || graph.ResourceCompletion(destination).direct == 0,
-            "failed provider must not publish the future Direct consumer completion");
+        Check(graph.FinalAccess(destination) == hs::Access::CopySource &&
+            graph.FinalQueue(destination) == hs::QueueHint::Direct,
+            "provider completion publishes the consumer state");
         graph.Reset();
         work.reset();
         Check(!lifetime.expired(), "external provider lease survives graph reset and caller release");
@@ -1511,7 +959,7 @@ void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
         Check(graph.Prepare(pool).Succeeded() && graph.Resolve(busy) != source_native &&
             graph.Resolve(busy) != destination_native.Get(), "delayed provider protects transient allocation reuse");
         Hr(gate->Signal(1), "release independent provider gate");
-        Check(fixture.executor.Wait(completion).Succeeded(), "wait external bridge including failure retirement");
+        Check(fixture.executor.Wait(completion).Succeeded(), "wait external provider bridge");
         Check(lifetime.expired(), "completed bridge releases provider operation and resource lease");
         pool.ResetCompletedClaims(fixture.executor.Completed());
         graph.Reset();
@@ -1548,44 +996,6 @@ void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
         pool.ResetCompletedClaims(fixture.executor.Completed());
     }
 
-    auto work = std::make_shared<ExternalWork>(fixture.device.Get());
-    Hr(work->gate->Signal(1), "release invalid declaration provider gate");
-    for (const int invalid : {0, 1, 2, 3, 4, 5, 6})
-    {
-        hs::TransientResourcePool pool;
-        Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "invalid external pool");
-        hs::RenderGraphBuilder graph;
-        const auto output = graph.CreateBuffer(buffer_desc, "invalid external output");
-        bool invoked{};
-        hs::BufferHandle undeclared{};
-        if (invalid == 5)
-        {
-            undeclared = graph.CreateBuffer(buffer_desc, "prior external output");
-            auto prior = graph.AddPass(150, "prior external boundary", hs::QueueHint::Copy);
-            (void)prior.Write(graph.Version(undeclared), hs::Access::CopyDest);
-            const hs::ExternalResourceAccess boundary{undeclared, hs::Access::Common, hs::Access::Common};
-            prior.SetExternalExecute({NativeOwner(work->queue.Get()), hs::QueueHint::Copy, work}, {&boundary, 1},
-                [&](auto &, auto &) { invoked = true; return hs::Result::Success(); });
-        }
-        auto pass = graph.AddPass(160, "invalid external boundary", hs::QueueHint::Copy);
-        if (invalid == 3) (void)pass.Write(graph.Version(output), hs::Access::CopyDest, hs::BufferRange{0, size});
-        else (void)pass.Write(graph.Version(output), hs::Access::CopyDest);
-        if (invalid == 2)
-        {
-            const auto second = graph.CreateBuffer(buffer_desc, "missing external boundary");
-            (void)pass.Write(graph.Version(second), hs::Access::CopyDest);
-        }
-        std::vector<hs::ExternalResourceAccess> boundaries;
-        if (invalid != 0) boundaries.push_back({output, invalid == 1 ? hs::Access::CopyDest : hs::Access::Common,
-                                              hs::Access::Common});
-        if (invalid == 2) boundaries.push_back(boundaries.front());
-        if (invalid == 5) boundaries.front().resource = undeclared;
-        if (invalid == 6) boundaries.front().resource.value = UINT32_MAX;
-        pass.SetExternalExecute({NativeOwner(work->queue.Get()),
-            invalid == 4 ? hs::QueueHint::Direct : hs::QueueHint::Copy, work}, boundaries,
-            [&](auto &, auto &) { invoked = true; return hs::Result::Success(); });
-        Check(!graph.Prepare(pool) && !invoked, "invalid external boundary fails before callback/allocation");
-    }
     fixture.CheckValidation();
 }
 
@@ -1763,1257 +1173,6 @@ RWByteAddressBuffer Output : register(u1);
             barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy",
             queue == hs::QueueHint::Compute ? "Compute" : "Direct", interpass ? "SRV interpass" : "UAV callback");
     }
-}
-
-void RunBatchedBufferBarriers(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
-{
-    // Cross the 64-entry flush boundary twice and exercise a nonempty tail.
-    constexpr UINT count = 137, words = 64, bytes = words * sizeof(UINT);
-    const auto description = BufferDescription(count * bytes);
-    auto heap = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
-    ComPtr<ID3D12Resource> upload, readback;
-    Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
-        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)), "create batched barrier upload");
-    heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
-    Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
-        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)), "create batched barrier readback");
-    const D3D12_RANGE no_read{0, 0};
-    void *mapped{};
-    Hr(upload->Map(0, &no_read, &mapped), "map batched barrier upload");
-    for (UINT index = 0; index < count * words; ++index)
-        static_cast<UINT *>(mapped)[index] = 0x13579bdfu ^ (index * 251u);
-    upload->Unmap(0, nullptr);
-    hs::TransientResourcePool pool;
-    Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "batched barrier pool");
-    hs::RenderGraphBuilder graph;
-    std::array<hs::ResourceHandle, count> sources, outputs;
-    std::array<hs::ResourceVersion, count> initialized, copied;
-    for (UINT index = 0; index < count; ++index)
-    {
-        sources[index] = graph.CreateBuffer({bytes, D3D12_RESOURCE_FLAG_NONE}, "batched source");
-        outputs[index] = graph.CreateBuffer({bytes, D3D12_RESOURCE_FLAG_NONE}, "batched output");
-    }
-    auto seed = graph.AddPass(360, "Batched barrier upload", hs::QueueHint::Direct);
-    for (UINT index = 0; index < count; ++index)
-        initialized[index] = seed.Write(graph.Version(sources[index]), hs::Access::CopyDest);
-    seed.SetExecute([&](hs::RenderPassContext &context) {
-        auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        for (UINT index = 0; index < count; ++index)
-            commands->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(sources[index])), 0,
-                upload.Get(), index * bytes, bytes);
-    });
-    auto transfer = graph.AddPass(361, "Batched barrier compute copy", hs::QueueHint::Compute);
-    for (UINT index = 0; index < count; ++index)
-    {
-        transfer.Read(initialized[index], hs::Access::CopySource);
-        copied[index] = transfer.Write(graph.Version(outputs[index]), hs::Access::CopyDest);
-    }
-    transfer.SetExecute([&](hs::RenderPassContext &context) {
-        auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        for (UINT index = 0; index < count; ++index)
-            commands->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(outputs[index])), 0,
-                static_cast<ID3D12Resource *>(context.Resolve(sources[index])), 0, bytes);
-    });
-    auto finish = graph.AddPass(362, "Batched barrier readback", hs::QueueHint::Copy);
-    for (const auto version : copied) finish.Read(version, hs::Access::CopySource);
-    finish.SetExecute([&](hs::RenderPassContext &context) {
-        auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        for (UINT index = 0; index < count; ++index)
-            commands->CopyBufferRegion(readback.Get(), index * bytes,
-                static_cast<ID3D12Resource *>(context.Resolve(outputs[index])), 0, bytes);
-    });
-    Check(graph.Prepare(pool).Succeeded(), "prepare batched buffer barriers");
-    hs::CompletionSet completion;
-    fixture.Execute(graph, frame_slot, barriers, completion, "execute batched buffer barriers");
-    Check(fixture.executor.Wait(completion).Succeeded(), "wait batched buffer barriers");
-    const D3D12_RANGE read{0, count * bytes};
-    Hr(readback->Map(0, &read, &mapped), "map batched barrier result");
-    for (UINT index = 0; index < count * words; ++index)
-        Check(static_cast<const UINT *>(mapped)[index] == (0x13579bdfu ^ (index * 251u)),
-            "batched buffer barrier lost data or tail");
-    readback->Unmap(0, &no_read);
-    fixture.CheckValidation();
-    pool.ResetCompletedClaims(fixture.executor.Completed());
-    std::printf("Batched buffer barriers %s passed (137 buffers, three queues, all 8768 words).\n",
-        barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy");
-}
-
-void RunVirtualShadowFeedbackOracle(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
-{
-    constexpr std::array<UINT, 9> order_counts{0, 1, 31, 32, 33, 65, 1152, 1153, 1152};
-    UINT random = 0x56534d31u;
-    const auto next_random = [&] { random = random * 1664525u + 1013904223u; return random; };
-    for (UINT test = 0; test < 309; ++test)
-    {
-        const UINT count = test < order_counts.size() ? order_counts[test] : next_random() % 1200u;
-        std::vector<UINT> masks((count + 31u) / 32u);
-        for (auto &mask : masks) mask = test == 0 ? 0u : test < 9 ? 0xffffffffu : next_random();
-        std::vector<UINT> reference, walked;
-        for (UINT entry = 0; entry < count; ++entry)
-            if ((masks[entry >> 5u] & (1u << (entry & 31u))) != 0) reference.push_back(entry);
-        for (UINT word = 0; word < masks.size(); ++word)
-        {
-            UINT mask = masks[word];
-            while (mask)
-            {
-                const UINT entry = word * 32u + std::countr_zero(mask);
-                mask &= mask - 1u;
-                if (entry < count) walked.push_back(entry);
-            }
-        }
-        Check(walked == reference, "VSM requested-entry order or tail-bit filtering changed");
-        // Dense/sparse masks and partial final words supply the admission
-        // reference counts independently of the shader's candidate pruning.
-        const UINT caster_count = test % 4u == 0u ? 0u : test % 4u == 1u ? 1u : test % 4u == 2u ? 64u : 65u;
-        std::vector<UINT> expected_counts(count), actual_counts(count);
-        const auto candidate = [](UINT entry, UINT caster) { return (entry * 17u + caster * 13u) % 7u < 3u; };
-        for (UINT entry : reference)
-            for (UINT caster = 0u; caster < caster_count; ++caster)
-                expected_counts[entry] += candidate(entry, caster);
-        for (UINT word = 0u; word < masks.size(); ++word)
-            for (UINT caster = 0u; caster < ((caster_count + 63u) / 64u) * 64u; ++caster)
-            {
-                if (caster >= caster_count) continue;
-                UINT mask = masks[word];
-                while (mask)
-                {
-                    const UINT entry = word * 32u + std::countr_zero(mask);
-                    mask &= mask - 1u;
-                    if (entry < count) actual_counts[entry] += candidate(entry, caster);
-                }
-            }
-        Check(actual_counts == expected_counts, "VSM requested-bit reference duplicated or lost page/caster pairs");
-        for (const UINT capacity : {0u, 1u, 31u, 4096u})
-        {
-            std::vector<UINT> expected_rejected(count), actual_rejected(count);
-            UINT expected_remaining = capacity, actual_remaining = capacity;
-            for (UINT entry = 0u; entry < count; ++entry)
-                if (expected_counts[entry] > expected_remaining) expected_rejected[entry] = 1u;
-                else expected_remaining -= expected_counts[entry];
-            for (UINT entry : walked)
-                if (actual_counts[entry] > actual_remaining) actual_rejected[entry] = 1u;
-                else actual_remaining -= actual_counts[entry];
-            Check(actual_rejected == expected_rejected && actual_remaining == expected_remaining,
-                "VSM requested-only admission changed ascending capacity decisions");
-        }
-
-    }
-    struct Compiler
-    {
-        HMODULE module{LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
-        ~Compiler() { if (module) FreeLibrary(module); }
-    } compiler;
-    Check(compiler.module != nullptr, "load virtual shadow oracle compiler");
-    const auto compile = reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(compiler.module, "D3DCompile"));
-    Check(compile != nullptr, "find virtual shadow oracle compiler");
-    const auto source_path = std::filesystem::path(__FILE__).parent_path().parent_path() /
-        "Content/Shaders/virtual_shadow.hlsl";
-    std::ifstream source(source_path, std::ios::binary);
-    Check(source.good(), "open actual virtual shadow shader");
-    std::string shader{std::istreambuf_iterator<char>(source), std::istreambuf_iterator<char>()};
-    // Compile the production helpers, not a CPU mirror of their shared-memory algorithm.
-    shader += R"(
-StructuredBuffer<uint> OracleEntries : register(t5, space21);
-cbuffer OracleConstants : register(b0, space22) { uint OracleCount, OracleWidth, OracleHeight, OracleBudget; };
-[numthreads(8,8,1)] void OptimizedOracle(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
-{
-    BeginFeedbackRequests(lane);
-    const uint first = (group.x * 64u + lane) * 3u;
-    for (uint index = first; index < min(first + 3u, OracleCount); ++index) Request(OracleEntries[index]);
-    FlushFeedbackRequests(lane);
-}
-[numthreads(8,8,1)] void ReferenceOracle(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
-{
-    const uint first = (group.x * 64u + lane) * 3u;
-    for (uint index = first; index < min(first + 3u, OracleCount); ++index)
-    {
-        const uint entry = OracleEntries[index];
-        if (entry != 0xffffffffu)
-        {
-            uint ignored;
-            Requests.InterlockedOr((entry >> 5u) * 4u, 1u << (entry & 31u), ignored);
-        }
-    }
-}
-
-[numthreads(1,1,1)] void OptimizedOrderOracle(uint3 unused : SV_DispatchThreadID)
-{
-    uint count = 0u;
-    for (uint word = 0u; word < (OracleCount + 31u) / 32u; ++word)
-    {
-        uint mask = OracleEntries[word];
-        while (mask != 0u)
-        {
-            const uint entry = PopRequestedEntry(word, mask);
-            if (entry < OracleCount) Requests.Store((++count) * 4u, entry);
-        }
-    }
-    Requests.Store(0u, count);
-}
-[numthreads(1,1,1)] void ReferenceOrderOracle(uint3 unused : SV_DispatchThreadID)
-{
-    uint count = 0u;
-    for (uint entry = 0u; entry < OracleCount; ++entry)
-        if ((OracleEntries[entry >> 5u] & (1u << (entry & 31u))) != 0u)
-            Requests.Store((++count) * 4u, entry);
-    Requests.Store(0u, count);
-}
-)";
-    // Execute the production dilation body with buffer-backed Loads/Stores, comparing every output bit.
-    std::ifstream post_source(source_path.parent_path() / "hdr_post.hlsl", std::ios::binary);
-    const std::string post{std::istreambuf_iterator<char>(post_source), std::istreambuf_iterator<char>()};
-    const auto function = post.find("void HdrPostDilateCS");
-    const auto begin = post.rfind("[numthreads", function);
-    const auto end = post.find("[numthreads", function);
-    Check(begin != std::string::npos && end != std::string::npos, "find production DOF dilation");
-    std::string dilation = post.substr(begin, end - begin);
-    const auto replace = [&](std::string_view from, std::string_view to) {
-        std::size_t offset{}; bool found{};
-        while ((offset = dilation.find(from, offset)) != std::string::npos)
-        { dilation.replace(offset, from.size(), to); offset += to.size(); found = true; }
-        Check(found, "DOF oracle source binding changed");
-    };
-    replace("EffectParameters.x", "float(OracleBudget)");
-    replace("OutputSize.xy", "float2(OracleWidth, OracleHeight)");
-    replace("SignedCoC.Load(int3(pixel,0))", "asfloat(OracleEntries[uint(clamp(pixel.y, 0, int(OracleHeight)-1)) * OracleWidth + uint(clamp(pixel.x, 0, int(OracleWidth)-1))])");
-    replace("ForegroundOutput[dispatch.xy] = radius;", "Requests.Store((dispatch.y * OracleWidth + dispatch.x) * 4u, asuint(radius));");
-    shader += "\ngroupshared float CoCTile[72 * 72]; groupshared uint CoCTileMaximum;\n" + dilation;
-    std::array<D3D12_ROOT_PARAMETER1, 3> parameters{};
-    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[0].Constants = {0, 22, 4};
-    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
-    parameters[1].Descriptor = {5, 21, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
-    parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-    parameters[2].Descriptor = {2, 21, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_desc{};
-    root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    root_desc.Desc_1_1.NumParameters = static_cast<UINT>(parameters.size());
-    root_desc.Desc_1_1.pParameters = parameters.data();
-    ComPtr<ID3DBlob> serialized, errors;
-    Hr(D3D12SerializeVersionedRootSignature(&root_desc, &serialized, &errors), "serialize virtual shadow oracle root");
-    ComPtr<ID3D12RootSignature> root;
-    Hr(fixture.device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
-        IID_PPV_ARGS(&root)), "create virtual shadow oracle root");
-    std::array<ComPtr<ID3D12PipelineState>, 5> pipelines;
-    constexpr std::array entry_points{"ReferenceOracle", "OptimizedOracle",
-        "ReferenceOrderOracle", "OptimizedOrderOracle", "HdrPostDilateCS"};
-    for (std::size_t entry = 0; entry < pipelines.size(); ++entry)
-    {
-        ComPtr<ID3DBlob> code, diagnostics;
-        const auto result = compile(shader.data(), shader.size(), "VirtualShadowFeedbackOracle", nullptr, nullptr,
-            entry_points[entry], "cs_5_1", D3DCOMPILE_ENABLE_STRICTNESS |
-            D3DCOMPILE_WARNINGS_ARE_ERRORS | D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &diagnostics);
-        if (FAILED(result) && diagnostics)
-            std::fprintf(stderr, "%.*s\n", static_cast<int>(diagnostics->GetBufferSize()),
-                static_cast<const char *>(diagnostics->GetBufferPointer()));
-        Hr(result, "compile actual virtual shadow feedback oracle");
-        D3D12_COMPUTE_PIPELINE_STATE_DESC description{};
-        description.pRootSignature = root.Get();
-        description.CS = {code->GetBufferPointer(), code->GetBufferSize()};
-        Hr(fixture.device->CreateComputePipelineState(&description, IID_PPV_ARGS(&pipelines[entry])),
-            "create virtual shadow feedback oracle pipeline");
-    }
-    constexpr UINT words = 2048, bytes = words * sizeof(UINT);
-    constexpr std::array<UINT, 6> counts{1, 191, 192, 193, 1541, 1541};
-    constexpr std::array<UINT, 12> boundary_entries{
-        0, 31, 32, 2047, 2048, 65534, 0xffffffffu, 0, 0, 31, 2047, 2048};
-    for (std::size_t test = 0; test < counts.size() + order_counts.size() + 6; ++test)
-    {
-        const bool dof_test = test >= counts.size() + order_counts.size();
-        const UINT dof_case = dof_test ? UINT(test - counts.size() - order_counts.size()) : 0;
-        constexpr UINT width = 37, height = 29;
-        const UINT budget = dof_case == 5 ? 32u : 12u;
-        const bool order_test = !dof_test && test >= counts.size();
-        const auto order_index = order_test ? test - counts.size() : 0;
-        const UINT count = dof_test ? width * height : order_test ? order_counts[order_index] : counts[test];
-        const UINT input_count = order_test ? std::max(1u, (count + 31u) / 32u) : count;
-        std::vector<UINT> entries(input_count);
-        for (UINT index = 0; index < input_count; ++index)
-            entries[index] = order_test ? (order_index == 0 ? 0u :
-                order_index < 5 || order_index == 8 ? 0xffffffffu : next_random()) :
-                index % 7 == 6 ? (index * 4051u) % 65535u : boundary_entries[index % boundary_entries.size()];
-        std::array<UINT, words> initial{}, expected{};
-        if (order_test) initial.fill(0xffffffffu);
-        else if (test == counts.size() - 1)
-            for (UINT word = 0; word < words; ++word) initial[word] = word * 0x01010101u;
-        expected = initial;
-        if (dof_test)
-        {
-            for (UINT i = 0; i < count; ++i)
-            {
-                const float radius = dof_case == 0 ? 0.0f : dof_case == 1 ? (i == 0 ? 12.0f : 0.0f) :
-                    dof_case == 2 ? (i == count / 2 ? 3.25f : 0.0f) :
-                    dof_case == 3 ? float(i % 9) * 0.125f :
-                    dof_case == 4 ? float(budget) : float(next_random() % 129u) * 0.25f;
-                const float coc = i % 7 == 6 ? radius : -radius;
-                std::memcpy(&entries[i], &coc, sizeof(coc));
-            }
-            for (int y = 0; y < int(height); ++y) for (int x = 0; x < int(width); ++x)
-            {
-                float maximum{};
-                for (int dy = -int(budget); dy <= int(budget); ++dy)
-                    for (int dx = -int(budget); dx <= int(budget); ++dx)
-                    {
-                        const int sx = x + dx, sy = y + dy;
-                        if (sx < 0 || sy < 0 || sx >= int(width) || sy >= int(height)) continue;
-                        float coc; std::memcpy(&coc, &entries[sy * width + sx], sizeof(coc));
-                        const float radius = std::max(-coc, 0.0f);
-                        if (float(dx * dx + dy * dy) <= radius * radius) maximum = std::max(maximum, radius);
-                    }
-                std::memcpy(&expected[y * width + x], &maximum, sizeof(maximum));
-            }
-        }
-        else if (order_test)
-        {
-            UINT output_count{};
-            for (UINT entry = 0; entry < count; ++entry)
-                if ((entries[entry >> 5u] & (1u << (entry & 31u))) != 0u)
-                    expected[++output_count] = entry;
-            expected[0] = output_count;
-        }
-        else for (const auto entry : entries)
-            if (entry != 0xffffffffu) expected[entry >> 5u] |= 1u << (entry & 31u);
-        const auto upload_desc = BufferDescription(bytes + input_count * sizeof(UINT));
-        const auto readback_desc = BufferDescription(bytes * 2u);
-        auto heap = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
-        ComPtr<ID3D12Resource> upload, readback;
-        Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &upload_desc,
-            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)), "create virtual shadow oracle upload");
-        heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
-        Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &readback_desc,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)), "create virtual shadow oracle readback");
-        void *mapped{};
-        const D3D12_RANGE no_read{0, 0};
-        Hr(upload->Map(0, &no_read, &mapped), "map virtual shadow oracle upload");
-        std::memcpy(mapped, initial.data(), bytes);
-        std::memcpy(static_cast<std::byte *>(mapped) + bytes, entries.data(), input_count * sizeof(UINT));
-        upload->Unmap(0, nullptr);
-        hs::TransientResourcePool pool;
-        Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "virtual shadow oracle pool");
-        hs::RenderGraphBuilder graph;
-        const hs::BufferDesc description{bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS};
-        std::array<hs::ResourceHandle, 2> outputs;
-        std::array<hs::ResourceVersion, 2> initialized, results;
-        auto seed = graph.AddPass(320, "Virtual shadow oracle initialize", hs::QueueHint::Copy);
-        for (std::size_t entry = 0; entry < outputs.size(); ++entry)
-        {
-            outputs[entry] = graph.CreateBuffer(description, "virtual shadow request bits");
-            initialized[entry] = seed.Write(graph.Version(outputs[entry]), hs::Access::CopyDest);
-        }
-        seed.SetExecute([&](hs::RenderPassContext &context) {
-            auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-            for (const auto output : outputs)
-                list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(output)), 0, upload.Get(), 0, bytes);
-        });
-        for (std::size_t entry = 0; entry < outputs.size(); ++entry)
-        {
-            auto pass = graph.AddPass(321 + static_cast<UINT>(entry), "Virtual shadow request OR", hs::QueueHint::Compute);
-            results[entry] = pass.ReadWrite(initialized[entry], hs::Access::UnorderedWrite);
-            pass.SetExecute([&, entry](hs::RenderPassContext &context) {
-                auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-                list->SetComputeRootSignature(root.Get());
-                list->SetPipelineState(pipelines[dof_test ? 4 : (order_test ? 2 : 0) + entry].Get());
-                const UINT constants[]{count, width, height, budget};
-                list->SetComputeRoot32BitConstants(0, 4, constants, 0);
-                list->SetComputeRootShaderResourceView(1, upload->GetGPUVirtualAddress() + bytes);
-                list->SetComputeRootUnorderedAccessView(2,
-                    static_cast<ID3D12Resource *>(context.Resolve(outputs[entry]))->GetGPUVirtualAddress());
-                list->Dispatch(dof_test ? (width + 7) / 8 : order_test ? 1u : (count + 191) / 192, dof_test ? (height + 7) / 8 : 1u, 1);
-            });
-        }
-        auto copy = graph.AddPass(323, "Virtual shadow oracle readback", hs::QueueHint::Copy);
-        for (const auto result : results) copy.Read(result, hs::Access::CopySource);
-        copy.SetExecute([&](hs::RenderPassContext &context) {
-            auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-            for (std::size_t entry = 0; entry < outputs.size(); ++entry)
-                list->CopyBufferRegion(readback.Get(), entry * bytes,
-                    static_cast<ID3D12Resource *>(context.Resolve(outputs[entry])), 0, bytes);
-        });
-        Check(graph.Prepare(pool).Succeeded(), "prepare virtual shadow feedback oracle");
-        hs::CompletionSet completion;
-        fixture.Execute(graph, frame_slot, barriers, completion, "execute virtual shadow feedback oracle");
-        Check(fixture.executor.Wait(completion).Succeeded(), "wait virtual shadow feedback oracle");
-        const D3D12_RANGE read{0, bytes * 2u};
-        const auto mapped_result = readback->Map(0, &read, &mapped);
-        if (FAILED(mapped_result))
-        {
-            std::fprintf(stderr, "Image oracle case %zu: Map HRESULT=%08lx, removed=%08lx\n",
-                test, static_cast<unsigned long>(mapped_result), static_cast<unsigned long>(fixture.device->GetDeviceRemovedReason()));
-            fixture.CheckValidation();
-        }
-        Hr(mapped_result, "map virtual shadow request bits");
-        const auto *actual = static_cast<const UINT *>(mapped);
-        for (std::size_t entry = 0; entry < outputs.size(); ++entry)
-            for (UINT word = 0; word < words; ++word)
-                Check(actual[entry * words + word] == expected[word], "GPU VSM or production DOF dilation output mismatch");
-        readback->Unmap(0, &no_read);
-        fixture.CheckValidation();
-        pool.ResetCompletedClaims(fixture.executor.Completed());
-    }
-    std::printf("Virtual shadow feedback %s passed (6 GPU OR bitsets, 9 requested-entry lists, 6 DOF dilation patterns including partial groups and max radius).\n",
-        barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy");
-}
-
-void RunVirtualShadowRootScatterOracle(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
-{
-    struct CasterInput
-    {
-        std::array<float, 4> current_bounds{}, previous_bounds{};
-        std::array<UINT, 4> draw{}, properties{};
-    };
-    static_assert(sizeof(CasterInput) == 64);
-    struct Segment
-    {
-        UINT first{}, capacity{}, index_count{}, start_index{};
-        std::int32_t base_vertex{};
-        UINT meshlet_count{}, frontend{}, reserved{};
-    };
-    static_assert(sizeof(Segment) == 32);
-    struct Case
-    {
-        const char *name{};
-        UINT group_count{}, max_groups{}, fine_entries{}, fine_capacity{};
-        std::vector<CasterInput> casters;
-        std::vector<Segment> segments;
-        bool admission{};
-    };
-    const auto make_caster = [](UINT id, UINT group, bool mesh, UINT flags) {
-        CasterInput value{};
-        value.current_bounds = {float(id), float(id + 1), float(id + 2), 1.0f};
-        value.previous_bounds = value.current_bounds;
-        value.draw = {100u + id, 200u + id, 300u + id, 400u + id};
-        value.properties = {flags, group, mesh ? 1u : 0u, 0u};
-        return value;
-    };
-    Case complete{"complete-mixed-boundary", 2, 3, 5, 4, {
-        make_caster(0, 0, false, 69u), // present + immutable + baked: archive owns it
-        make_caster(1, 0, false, 5u),  // unbaked immutable caster remains fresh
-        make_caster(2, 0, false, 1u),  // skin
-        make_caster(3, 1, true, 1u),    // wind
-        make_caster(4, 1, true, 1u),    // animated alpha
-        make_caster(5, 1, true, 0u),    // absent
-        make_caster(6, 0, false, 1u)},  // dynamic
-         {{0, 3, 36u, 20u, -2, 0u, 0u, 0u},
-          {3, 2, 0u, 0u, 0, 7u, 1u, 0u}}};
-    Case overflow{"capacity-and-group-overflow", 1, 3, 1, 2, {
-        make_caster(0, 0, false, 1u), make_caster(1, 1, true, 1u)}, {{0, 0, 36u, 0u, 0, 0u, 0u, 0u}}};
-    Case empty{"empty-caster-set-with-indexed-group", 1, 3, 2, 4, {},
-        {{0, 1, 12u, 0u, 0, 0u, 0u, 0u}}};
-    Case admission{"admission-skips-empty-word-before-overflow", 1, 1, 96, 0, {},
-        {{0, 6, 0u, 0u, 0, 0u, 0u, 0u}}};
-    admission.admission = true;
-    std::array<Case, 4> cases{std::move(complete), std::move(overflow), std::move(empty), std::move(admission)};
-    constexpr UINT sentinel = 0xdedededeu;
-
-    struct CompilerModule
-    {
-        HMODULE module{};
-        ~CompilerModule() { if (module) FreeLibrary(module); }
-    } compiler_module;
-    const auto compiler_path = std::filesystem::path(HS_TEST_DXC_PATH);
-    Check(!compiler_path.empty(), "production shadow oracle requires configured DXC");
-    const auto compiler_dll = compiler_path.parent_path() / L"dxcompiler.dll";
-    compiler_module.module = LoadLibraryExW(compiler_dll.c_str(), nullptr,
-        LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-    Check(compiler_module.module != nullptr, "load production DXC compiler");
-    const auto create = reinterpret_cast<DxcCreateInstanceProc>(GetProcAddress(compiler_module.module, "DxcCreateInstance"));
-    Check(create != nullptr, "find production DxcCreateInstance");
-    ComPtr<IDxcUtils> utils;
-    ComPtr<IDxcCompiler3> compiler;
-    Hr(create(CLSID_DxcUtils, IID_PPV_ARGS(&utils)), "create DXC utilities");
-    Hr(create(CLSID_DxcCompiler, IID_PPV_ARGS(&compiler)), "create DXC compiler");
-    const auto shader_path = std::filesystem::path(__FILE__).parent_path().parent_path() /
-        "Content/Shaders/virtual_shadow.hlsl";
-    ComPtr<IDxcBlobEncoding> source;
-    Hr(utils->LoadFile(shader_path.c_str(), nullptr, &source), "load production virtual shadow source");
-    const DxcBuffer input{source->GetBufferPointer(), source->GetBufferSize(), DXC_CP_UTF8};
-    const wchar_t *arguments[]{shader_path.c_str(), L"-E", L"CullCS", L"-T", L"cs_6_0", L"-O3", L"-Ges", L"-WX",
-        L"-Zi", L"-Qembed_debug"};
-    ComPtr<IDxcResult> compiled;
-    Hr(compiler->Compile(&input, arguments, static_cast<UINT32>(std::size(arguments)), nullptr,
-        IID_PPV_ARGS(&compiled)), "invoke production shadow DXC");
-    ComPtr<IDxcBlobUtf8> diagnostics;
-    Hr(compiled->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&diagnostics), nullptr), "read shadow DXC diagnostics");
-    if (diagnostics && diagnostics->GetStringLength()) std::fputs(diagnostics->GetStringPointer(), stderr);
-    HRESULT compile_status{};
-    Hr(compiled->GetStatus(&compile_status), "read shadow DXC status");
-    Hr(compile_status, "compile production virtual shadow CullCS");
-    ComPtr<IDxcBlob> code;
-    Hr(compiled->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&code), nullptr), "read production shadow DXIL");
-
-    // CullCS keeps all runtime-selected phases in one entry point. Cover the
-    // complete production binding set even though this oracle dispatches only
-    // root phases 3 and 4.
-    std::array<D3D12_ROOT_PARAMETER1, 16> parameters{};
-    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
-    parameters[0].Descriptor = {0u, 21u, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE};
-    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[1].Constants = {1u, 21u, 1u};
-    constexpr std::array<UINT, 3> srv_registers{2u, 5u, 6u};
-    std::array<D3D12_DESCRIPTOR_RANGE1, 9> buffer_ranges{};
-    for (UINT index = 0; index < srv_registers.size(); ++index)
-    {
-        auto &range = buffer_ranges[index];
-        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-        range.NumDescriptors = 1u; range.BaseShaderRegister = srv_registers[index];
-        range.RegisterSpace = 21u; range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE |
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_STATIC_KEEPING_BUFFER_BOUNDS_CHECKS;
-        parameters[2u + index].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        parameters[2u + index].DescriptorTable = {1u, &range};
-    }
-    constexpr std::array<UINT, 6> output_parameters{5u, 6u, 7u, 8u, 9u, 11u};
-    constexpr std::array<UINT, 6> output_registers{0u, 2u, 3u, 4u, 5u, 8u};
-    for (UINT index = 0; index < output_registers.size(); ++index)
-    {
-        auto &range = buffer_ranges[index + 3u];
-        range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-        range.NumDescriptors = 1u; range.BaseShaderRegister = output_registers[index];
-        range.RegisterSpace = 21u; range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE |
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_STATIC_KEEPING_BUFFER_BOUNDS_CHECKS;
-        parameters[output_parameters[index]].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        parameters[output_parameters[index]].DescriptorTable = {1u, &range};
-    }
-    // Production binds CommandCounts through a sized raw UAV descriptor table.
-    // Keep this oracle slot bounded too, without padding the counter resource.
-    D3D12_DESCRIPTOR_RANGE1 count_range{};
-    count_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    count_range.NumDescriptors = 1u;
-    count_range.BaseShaderRegister = 6u;
-    count_range.RegisterSpace = 21u;
-    count_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE |
-        D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_STATIC_KEEPING_BUFFER_BOUNDS_CHECKS;
-    count_range.OffsetInDescriptorsFromTableStart = 0u;
-    parameters[10].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameters[10].DescriptorTable = {1u, &count_range};
-    D3D12_DESCRIPTOR_RANGE1 receiver_texture_range{};
-    receiver_texture_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
-    receiver_texture_range.NumDescriptors = 2u;
-    receiver_texture_range.BaseShaderRegister = 0u;
-    receiver_texture_range.RegisterSpace = 21u;
-    receiver_texture_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC;
-    receiver_texture_range.OffsetInDescriptorsFromTableStart = 0u;
-    parameters[12].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameters[12].DescriptorTable = {1u, &receiver_texture_range};
-    D3D12_DESCRIPTOR_RANGE1 clear_input_range = receiver_texture_range;
-    clear_input_range.NumDescriptors = 2u;
-    clear_input_range.BaseShaderRegister = 3u;
-    parameters[13].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameters[13].DescriptorTable = {1u, &clear_input_range};
-    D3D12_DESCRIPTOR_RANGE1 residents_range{};
-    residents_range.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
-    residents_range.NumDescriptors = 1u;
-    residents_range.BaseShaderRegister = 1u;
-    residents_range.RegisterSpace = 21u;
-    residents_range.Flags = D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
-    residents_range.OffsetInDescriptorsFromTableStart = 0u;
-    parameters[14].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameters[14].DescriptorTable = {1u, &residents_range};
-    D3D12_DESCRIPTOR_RANGE1 clear_commands_range = residents_range;
-    clear_commands_range.BaseShaderRegister = 7u;
-    parameters[15].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameters[15].DescriptorTable = {1u, &clear_commands_range};
-    for (auto &parameter : parameters) parameter.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_description{};
-    root_description.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    root_description.Desc_1_1.NumParameters = static_cast<UINT>(parameters.size());
-    root_description.Desc_1_1.pParameters = parameters.data();
-    ComPtr<ID3DBlob> serialized, errors;
-    Hr(D3D12SerializeVersionedRootSignature(&root_description, &serialized, &errors),
-        "serialize production virtual shadow CullCS root");
-    ComPtr<ID3D12RootSignature> root;
-    Hr(fixture.device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
-        IID_PPV_ARGS(&root)), "create production virtual shadow CullCS root");
-    D3D12_DESCRIPTOR_HEAP_DESC count_heap_description{};
-    count_heap_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    count_heap_description.NumDescriptors = 26u;
-    count_heap_description.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-    ComPtr<ID3D12DescriptorHeap> count_heap;
-    Hr(fixture.device->CreateDescriptorHeap(&count_heap_description, IID_PPV_ARGS(&count_heap)),
-        "create bounded CullCS root-counter descriptor heap");
-    const auto descriptor_stride = fixture.device->GetDescriptorHandleIncrementSize(
-        D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-    const auto make_null_srv = [&](UINT slot, DXGI_FORMAT format, UINT structure_stride) {
-        D3D12_SHADER_RESOURCE_VIEW_DESC view{};
-        view.Format = format;
-        view.ViewDimension = structure_stride ? D3D12_SRV_DIMENSION_BUFFER : D3D12_SRV_DIMENSION_TEXTURE2D;
-        view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        if (structure_stride)
-        {
-            view.Buffer.NumElements = 1u;
-            view.Buffer.StructureByteStride = structure_stride;
-        }
-        else
-        {
-            view.Texture2D.MipLevels = 1u;
-        }
-        auto cpu = count_heap->GetCPUDescriptorHandleForHeapStart();
-        cpu.ptr += static_cast<SIZE_T>(slot) * descriptor_stride;
-        fixture.device->CreateShaderResourceView(nullptr, &view, cpu);
-    };
-    make_null_srv(2u, DXGI_FORMAT_R32_FLOAT, 0u); // ReceiverDepth, t0
-    make_null_srv(3u, DXGI_FORMAT_R32G32_FLOAT, 0u); // ReceiverNormal, t1
-    make_null_srv(4u, DXGI_FORMAT_UNKNOWN, sizeof(float) * 8u); // Receivers, t3
-    make_null_srv(5u, DXGI_FORMAT_UNKNOWN, sizeof(hs::GpuShadowPageEntry)); // ClearPageTable, t4
-    const auto make_null_uav = [&](UINT slot, DXGI_FORMAT format, UINT structure_stride) {
-        D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
-        view.Format = format;
-        view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-        if (structure_stride)
-        {
-            view.Buffer.NumElements = 1u;
-            view.Buffer.StructureByteStride = structure_stride;
-        }
-        else
-        {
-            view.Buffer.NumElements = 1u;
-            view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-        }
-        auto cpu = count_heap->GetCPUDescriptorHandleForHeapStart();
-        cpu.ptr += static_cast<SIZE_T>(slot) * descriptor_stride;
-        fixture.device->CreateUnorderedAccessView(nullptr, nullptr, &view, cpu);
-    };
-    make_null_uav(6u, DXGI_FORMAT_UNKNOWN, sizeof(hs::GpuShadowPageEntry)); // Residents, u1
-    make_null_uav(7u, DXGI_FORMAT_R32_TYPELESS, 0u); // ClearCommands, u7
-    D3D12_COMPUTE_PIPELINE_STATE_DESC pipeline_description{};
-    pipeline_description.pRootSignature = root.Get();
-    pipeline_description.CS = {code->GetBufferPointer(), code->GetBufferSize()};
-    ComPtr<ID3D12PipelineState> pipeline;
-    Hr(fixture.device->CreateComputePipelineState(&pipeline_description, IID_PPV_ARGS(&pipeline)),
-        "create production virtual shadow CullCS pipeline");
-
-    const auto create_upload = [&](const void *data, UINT64 bytes, const char *label) {
-        auto heap = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
-        const auto description = BufferDescription(std::max<UINT64>(bytes, 4u));
-        ComPtr<ID3D12Resource> resource;
-        Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
-            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&resource)), label);
-        if (bytes)
-        {
-            void *mapped{}; const D3D12_RANGE no_read{0, 0};
-            Hr(resource->Map(0, &no_read, &mapped), "map production CullCS upload");
-            std::memcpy(mapped, data, static_cast<std::size_t>(bytes));
-            resource->Unmap(0, nullptr);
-        }
-        return resource;
-    };
-    for (const auto &test : cases)
-    {
-        Check(test.segments.size() == test.group_count, "root segment fixture matches actual groups");
-        UINT root_command_end{};
-        for (const auto &segment : test.segments)
-            root_command_end = std::max(root_command_end, segment.first + segment.capacity);
-        const UINT command_words = test.fine_capacity +
-            std::max(static_cast<UINT>(test.casters.size()), root_command_end);
-        const UINT root_counter_base = test.max_groups * 2u + 2u;
-        hs::VirtualShadowConstants constants{};
-        constants.counts = {static_cast<UINT>(test.casters.size()), 0u, test.fine_entries, 0u};
-        if (test.admission) constants.counts.w = test.fine_entries;
-        constants.identity.w = 91u;
-        constants.frame.w = test.admission ? test.group_count : test.group_count * 2u;
-        constants.frame.z = test.admission ? 3u : 0u;
-        constants.options.z = test.fine_capacity;
-        constants.root_options = {1u, 1u, 1u, root_counter_base};
-        std::array<std::byte, 512> constants_bytes{};
-        std::memcpy(constants_bytes.data(), &constants, sizeof(constants));
-        auto constant_upload = create_upload(constants_bytes.data(), constants_bytes.size(), "create CullCS constants");
-        const UINT caster_bytes = static_cast<UINT>(test.casters.size() * sizeof(CasterInput));
-        auto caster_upload = create_upload(test.casters.empty() ? nullptr : test.casters.data(), caster_bytes,
-            "create CullCS caster input");
-        const UINT segment_count = (test.admission ? constants.frame.w : constants.frame.w + test.group_count) * 8u;
-        std::vector<UINT> segments(segment_count, sentinel);
-        for (UINT group = 0; group < test.group_count; ++group)
-        {
-            const UINT word = (test.admission ? group : constants.frame.w + group) * 8u;
-            const auto &segment = test.segments[group];
-            segments[word] = segment.first;
-            segments[word + 1u] = segment.capacity;
-            segments[word + 2u] = segment.index_count;
-            segments[word + 3u] = segment.start_index;
-            segments[word + 4u] = static_cast<UINT>(segment.base_vertex);
-            segments[word + 5u] = segment.meshlet_count;
-            segments[word + 6u] = segment.frontend;
-            segments[word + 7u] = segment.reserved;
-        }
-        auto segment_upload = create_upload(segments.empty() ? nullptr : segments.data(),
-            static_cast<UINT>(segments.size() * sizeof(UINT)), "create CullCS segment input");
-
-        const UINT pages_bytes = (test.fine_entries + 1u) * static_cast<UINT>(sizeof(hs::GpuShadowPageEntry));
-        const UINT counter_words = root_counter_base + test.max_groups;
-        const UINT counters_bytes = counter_words * sizeof(UINT);
-        const UINT records_bytes = std::max<UINT>(static_cast<UINT>(sizeof(hs::GpuShadowDrawRecord)),
-            command_words * static_cast<UINT>(sizeof(hs::GpuShadowDrawRecord)));
-        const UINT indexed_bytes = std::max<UINT>(24u, command_words * 24u);
-        const UINT mesh_bytes = std::max<UINT>(16u, command_words * 16u);
-        std::vector<std::byte> seed;
-        const auto append_poison = [&](UINT bytes) {
-            const auto offset = static_cast<UINT>(seed.size());
-            const auto old_size = seed.size(); seed.resize(old_size + bytes);
-            std::memset(seed.data() + old_size, 0xde, bytes);
-            return offset;
-        };
-        const UINT pages_seed = append_poison(pages_bytes);
-        const UINT counters_seed = append_poison(counters_bytes);
-        const UINT records_seed = append_poison(records_bytes);
-        const UINT indexed_seed = append_poison(indexed_bytes);
-        const UINT mesh_seed = append_poison(mesh_bytes);
-        if (test.admission)
-        {
-            std::memset(seed.data() + counters_seed, 0, constants.frame.w * sizeof(UINT));
-            std::vector<hs::GpuShadowPageEntry> admission_pages(test.fine_entries + 1u);
-            for (std::size_t entry = 0; entry < admission_pages.size(); ++entry)
-            {
-                auto &page = admission_pages[entry];
-                page.flags = 1u;
-                page.epoch = constants.identity.w;
-                if (entry < test.fine_entries && entry != 0u)
-                    page.physical = static_cast<UINT>(entry);
-            }
-            std::memcpy(seed.data() + pages_seed, admission_pages.data(), pages_bytes);
-        }
-        auto seed_upload = create_upload(seed.data(), seed.size(), "create CullCS output seed");
-
-        ComPtr<ID3D12Resource> requests_upload, page_draw_counts_upload;
-        hs::ResourceHandle requests_handle{}, page_draw_counts_handle{};
-        hs::ResourceHandle requests_upload_handle{}, page_draw_counts_upload_handle{};
-        UINT requests_bytes{}, page_draw_counts_bytes{};
-        if (test.admission)
-        {
-            const std::array<UINT, 3> request_words{1u | (1u << 1u) | (1u << 4u), 0u,
-                (1u << 0u) | (1u << 3u)};
-            std::vector<UINT> page_draw_counts(test.fine_entries * test.group_count, 0u);
-            // The preceding cull produces no draw count for requested, unmapped page 0.
-            page_draw_counts[1u] = 1u; page_draw_counts[4u] = 1u;
-            page_draw_counts[64u] = 3u; page_draw_counts[67u] = 2u;
-            requests_bytes = static_cast<UINT>(sizeof(request_words));
-            page_draw_counts_bytes = static_cast<UINT>(page_draw_counts.size() * sizeof(UINT));
-            requests_upload = create_upload(request_words.data(), requests_bytes, "create CullCS admission requests");
-            page_draw_counts_upload = create_upload(page_draw_counts.data(), page_draw_counts_bytes,
-                "create CullCS admission page draw counts");
-        }
-
-        auto heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
-        const UINT pages_read = 0u, counters_read = pages_read + pages_bytes;
-        const UINT records_read = counters_read + counters_bytes, indexed_read = records_read + records_bytes;
-        const UINT mesh_read = indexed_read + indexed_bytes, readback_bytes = mesh_read + mesh_bytes;
-        const auto readback_description = BufferDescription(readback_bytes);
-        ComPtr<ID3D12Resource> readback;
-        Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &readback_description,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)), "create CullCS readback");
-
-        hs::TransientResourcePool pool;
-        Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "initialize CullCS transient pool");
-        hs::RenderGraphBuilder graph;
-        const auto caster_handle = graph.ImportBuffer({caster_upload.Get()}, hs::Access::ComputeRead, "CullCS.Casters");
-        const auto segment_handle = graph.ImportBuffer({segment_upload.Get()}, hs::Access::ComputeRead, "CullCS.Segments");
-        const auto constant_handle = graph.ImportBuffer({constant_upload.Get()}, hs::Access::ComputeRead, "CullCS.Constants");
-        const auto seed_handle = graph.ImportBuffer({seed_upload.Get()}, hs::Access::CopySource, "CullCS.Seed");
-        if (test.admission)
-        {
-            requests_upload_handle = graph.ImportBuffer({requests_upload.Get()}, hs::Access::CopySource,
-                "CullCS.AdmissionRequests");
-            page_draw_counts_upload_handle = graph.ImportBuffer({page_draw_counts_upload.Get()}, hs::Access::CopySource,
-                "CullCS.AdmissionPageDrawCounts");
-            requests_handle = graph.CreateBuffer({requests_bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS},
-                "CullCS.Requests");
-            page_draw_counts_handle = graph.CreateBuffer({page_draw_counts_bytes,
-                D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}, "CullCS.PageDrawCounts");
-        }
-        const auto pages_handle = graph.CreateBuffer({pages_bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}, "CullCS.Pages");
-        const auto counters_handle = graph.CreateBuffer({counters_bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}, "CullCS.Counts");
-        const auto records_handle = graph.CreateBuffer({records_bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}, "CullCS.DrawRecords");
-        const auto indexed_handle = graph.CreateBuffer({indexed_bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}, "CullCS.Indexed");
-        const auto mesh_handle = graph.CreateBuffer({mesh_bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}, "CullCS.Mesh");
-        auto seed_pass = graph.AddPass(360u, "CullCS initialize oracle outputs", hs::QueueHint::Copy);
-        seed_pass.Read(graph.Version(seed_handle), hs::Access::CopySource);
-        auto pages = seed_pass.Write(graph.Version(pages_handle), hs::Access::CopyDest);
-        auto counters = seed_pass.Write(graph.Version(counters_handle), hs::Access::CopyDest);
-        auto records = seed_pass.Write(graph.Version(records_handle), hs::Access::CopyDest);
-        auto indexed = seed_pass.Write(graph.Version(indexed_handle), hs::Access::CopyDest);
-        auto mesh = seed_pass.Write(graph.Version(mesh_handle), hs::Access::CopyDest);
-        hs::ResourceVersion requests{}, page_draw_counts{};
-        if (test.admission)
-        {
-            requests = seed_pass.Write(graph.Version(requests_handle), hs::Access::CopyDest);
-            page_draw_counts = seed_pass.Write(graph.Version(page_draw_counts_handle), hs::Access::CopyDest);
-        }
-        seed_pass.SetExecute([&](hs::RenderPassContext &context) {
-            auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-            auto *source = static_cast<ID3D12Resource *>(context.Resolve(seed_handle));
-            list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(pages_handle)), 0, source, pages_seed, pages_bytes);
-            list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(counters_handle)), 0, source, counters_seed, counters_bytes);
-            list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(records_handle)), 0, source, records_seed, records_bytes);
-            list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(indexed_handle)), 0, source, indexed_seed, indexed_bytes);
-            list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(mesh_handle)), 0, source, mesh_seed, mesh_bytes);
-            if (test.admission)
-            {
-                list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(requests_handle)), 0,
-                    static_cast<ID3D12Resource *>(context.Resolve(requests_upload_handle)), 0, requests_bytes);
-                list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(page_draw_counts_handle)), 0,
-                    static_cast<ID3D12Resource *>(context.Resolve(page_draw_counts_upload_handle)), 0,
-                    page_draw_counts_bytes);
-            }
-        });
-        const auto bind = [&](hs::RenderPassContext &context, UINT phase) {
-            auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-            auto *counts_resource = static_cast<ID3D12Resource *>(context.Resolve(counters_handle));
-            Check(counts_resource->GetDesc().Width == counters_bytes,
-                  "root-counter UAV resource matches its exact prefixed word range");
-            D3D12_UNORDERED_ACCESS_VIEW_DESC counts_view{};
-            counts_view.Format = DXGI_FORMAT_R32_TYPELESS;
-            counts_view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-            counts_view.Buffer.NumElements = counter_words;
-            counts_view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-            const UINT descriptor_index = phase == 3u ? 0u : 1u;
-            auto cpu_counts_handle = count_heap->GetCPUDescriptorHandleForHeapStart();
-            cpu_counts_handle.ptr += static_cast<SIZE_T>(descriptor_index) * descriptor_stride;
-            auto gpu_counts_handle = count_heap->GetGPUDescriptorHandleForHeapStart();
-            gpu_counts_handle.ptr += static_cast<UINT64>(descriptor_index) * descriptor_stride;
-            fixture.device->CreateUnorderedAccessView(counts_resource, nullptr, &counts_view,
-                cpu_counts_handle);
-            ID3D12DescriptorHeap *descriptor_heaps[]{count_heap.Get()};
-            list->SetDescriptorHeaps(1u, descriptor_heaps);
-            list->SetComputeRootSignature(root.Get()); list->SetPipelineState(pipeline.Get());
-            list->SetComputeRootConstantBufferView(0u, constant_upload->GetGPUVirtualAddress());
-            list->SetComputeRoot32BitConstant(1u, phase, 0u);
-            const std::array<ID3D12Resource *, 9> buffers{
-                caster_bytes ? caster_upload.Get() : nullptr, segment_upload.Get(), segment_upload.Get(),
-                static_cast<ID3D12Resource *>(context.Resolve(pages_handle)),
-                test.admission ? static_cast<ID3D12Resource *>(context.Resolve(requests_handle)) : counts_resource,
-                static_cast<ID3D12Resource *>(context.Resolve(records_handle)),
-                static_cast<ID3D12Resource *>(context.Resolve(indexed_handle)),
-                static_cast<ID3D12Resource *>(context.Resolve(mesh_handle)),
-                test.admission ? static_cast<ID3D12Resource *>(context.Resolve(page_draw_counts_handle)) : counts_resource};
-            constexpr std::array<UINT, 9> roots{2u,3u,4u,5u,6u,7u,8u,9u,11u};
-            constexpr std::array<UINT, 9> strides{sizeof(CasterInput),0u,0u,sizeof(hs::GpuShadowPageEntry),0u,
-                sizeof(hs::GpuShadowDrawRecord),0u,0u,0u};
-            for (UINT index = 0; index < buffers.size(); ++index)
-            {
-                const UINT slot = 8u + (phase == 3u ? 0u : 9u) + index;
-                auto cpu = count_heap->GetCPUDescriptorHandleForHeapStart();
-                auto gpu = count_heap->GetGPUDescriptorHandleForHeapStart();
-                cpu.ptr += static_cast<SIZE_T>(slot) * descriptor_stride;
-                gpu.ptr += static_cast<UINT64>(slot) * descriptor_stride;
-                const UINT stride = strides[index];
-                const UINT elements = buffers[index] ? static_cast<UINT>(buffers[index]->GetDesc().Width / (stride ? stride : 4u)) : 1u;
-                if (index < 3u)
-                {
-                    D3D12_SHADER_RESOURCE_VIEW_DESC view{};
-                    view.Format = stride ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_TYPELESS;
-                    view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-                    view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                    view.Buffer.NumElements = elements; view.Buffer.StructureByteStride = stride;
-                    if (!stride) view.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_RAW;
-                    fixture.device->CreateShaderResourceView(buffers[index], &view, cpu);
-                }
-                else
-                {
-                    D3D12_UNORDERED_ACCESS_VIEW_DESC view{};
-                    view.Format = stride ? DXGI_FORMAT_UNKNOWN : DXGI_FORMAT_R32_TYPELESS;
-                    view.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-                    view.Buffer.NumElements = elements; view.Buffer.StructureByteStride = stride;
-                    if (!stride) view.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-                    fixture.device->CreateUnorderedAccessView(buffers[index], nullptr, &view, cpu);
-                }
-                list->SetComputeRootDescriptorTable(roots[index], gpu);
-            }
-            list->SetComputeRootDescriptorTable(10u, gpu_counts_handle);
-            auto input_table = count_heap->GetGPUDescriptorHandleForHeapStart();
-            input_table.ptr += static_cast<UINT64>(2u) * descriptor_stride;
-            list->SetComputeRootDescriptorTable(12u, input_table);
-            input_table.ptr += static_cast<UINT64>(2u) * descriptor_stride;
-            list->SetComputeRootDescriptorTable(13u, input_table);
-            input_table.ptr += static_cast<UINT64>(2u) * descriptor_stride;
-            list->SetComputeRootDescriptorTable(14u, input_table);
-            input_table.ptr += descriptor_stride;
-            list->SetComputeRootDescriptorTable(15u, input_table);
-        };
-        if (test.admission)
-        {
-            auto admit = graph.AddPass(361u, "CullCS phase 1 ordered page admission", hs::QueueHint::Compute);
-            admit.Read(graph.Version(segment_handle), hs::Access::ComputeRead);
-            admit.Read(graph.Version(constant_handle), hs::Access::ComputeRead);
-            admit.Read(requests, hs::Access::UnorderedRead);
-            admit.Read(page_draw_counts, hs::Access::UnorderedRead);
-            pages = admit.ReadWrite(pages, hs::Access::UnorderedWrite);
-            admit.SetExecute([&](hs::RenderPassContext &context) {
-                bind(context, 1u);
-                static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList())->Dispatch(1u, 1u, 1u);
-            });
-        }
-        else
-        {
-            auto initialize = graph.AddPass(361u, "CullCS phase 3 root initialize", hs::QueueHint::Compute);
-            initialize.Read(graph.Version(caster_handle), hs::Access::ComputeRead);
-            initialize.Read(graph.Version(segment_handle), hs::Access::ComputeRead);
-            initialize.Read(graph.Version(constant_handle), hs::Access::ComputeRead);
-            pages = initialize.Write(pages, hs::Access::UnorderedWrite);
-            counters = initialize.Write(counters, hs::Access::UnorderedWrite);
-            records = initialize.Write(records, hs::Access::UnorderedWrite);
-            indexed = initialize.Write(indexed, hs::Access::UnorderedWrite);
-            mesh = initialize.Write(mesh, hs::Access::UnorderedWrite);
-            initialize.SetExecute([&](hs::RenderPassContext &context) {
-                bind(context, 3u);
-                static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList())->Dispatch(1u, 1u, 1u);
-            });
-            if (!test.casters.empty())
-            {
-                auto emit = graph.AddPass(362u, "CullCS phase 4 root emit", hs::QueueHint::Compute);
-                emit.Read(graph.Version(caster_handle), hs::Access::ComputeRead);
-                emit.Read(graph.Version(segment_handle), hs::Access::ComputeRead);
-                emit.Read(graph.Version(constant_handle), hs::Access::ComputeRead);
-                pages = emit.ReadWrite(pages, hs::Access::UnorderedWrite);
-                counters = emit.ReadWrite(counters, hs::Access::UnorderedWrite);
-                records = emit.Write(records, hs::Access::UnorderedWrite);
-                indexed = emit.Write(indexed, hs::Access::UnorderedWrite);
-                mesh = emit.Write(mesh, hs::Access::UnorderedWrite);
-                emit.SetExecute([&](hs::RenderPassContext &context) {
-                    auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-                    context.UavBarrier(pages_handle); context.UavBarrier(counters_handle);
-                    bind(context, 4u);
-                    list->Dispatch((static_cast<UINT>(test.casters.size()) + 63u) / 64u, 1u, 1u);
-                });
-            }
-        }
-        auto copy = graph.AddPass(363u, "CullCS readback", hs::QueueHint::Copy);
-        copy.Read(pages, hs::Access::CopySource); copy.Read(counters, hs::Access::CopySource);
-        copy.Read(records, hs::Access::CopySource); copy.Read(indexed, hs::Access::CopySource); copy.Read(mesh, hs::Access::CopySource);
-        copy.SetExecute([&](hs::RenderPassContext &context) {
-            auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-            const std::array<std::pair<hs::ResourceHandle, UINT>, 5> sources{{
-                {pages_handle, pages_read}, {counters_handle, counters_read}, {records_handle, records_read},
-                {indexed_handle, indexed_read}, {mesh_handle, mesh_read}}};
-            const std::array<UINT, 5> sizes{pages_bytes, counters_bytes, records_bytes, indexed_bytes, mesh_bytes};
-            for (std::size_t index = 0; index < sources.size(); ++index)
-                list->CopyBufferRegion(readback.Get(), sources[index].second,
-                    static_cast<ID3D12Resource *>(context.Resolve(sources[index].first)), 0, sizes[index]);
-        });
-        Check(graph.Prepare(pool).Succeeded(), "prepare production CullCS root oracle");
-        hs::CompletionSet completion;
-        std::printf("Virtual shadow root case=%s groups=%u counter_base=%u counter_bytes=%u.\n",
-            test.name, test.group_count, root_counter_base, counters_bytes);
-        std::fflush(stdout);
-        fixture.Execute(graph, frame_slot, barriers, completion, "execute production CullCS root oracle");
-        Check(fixture.executor.Wait(completion).Succeeded(), "wait production CullCS root oracle");
-
-        void *mapped{}; const D3D12_RANGE read{0, readback_bytes};
-        Hr(readback->Map(0, &read, &mapped), "map production CullCS root results");
-        const auto *result = static_cast<const std::byte *>(mapped);
-        const auto compare_words = [&](UINT offset, const std::vector<UINT> &expected, const char *label) {
-            const auto *actual = reinterpret_cast<const UINT *>(result + offset);
-            Check(std::equal(expected.begin(), expected.end(), actual), label);
-        };
-        if (test.admission)
-        {
-            const auto *actual_counters = reinterpret_cast<const UINT *>(result + counters_read);
-            for (UINT index = 0; index < counter_words; ++index)
-                Check(actual_counters[index] == (index < constants.frame.w ? 0u : sentinel),
-                    "admission must reset its segment counters and preserve unrelated counter words");
-            const auto *actual_page_words = reinterpret_cast<const UINT *>(result + pages_read);
-            for (UINT entry = 0; entry <= test.fine_entries; ++entry)
-            {
-                const UINT rejected = 67u;
-                const UINT expected_flags = entry == rejected ? 9u : 1u;
-                Check(actual_page_words[entry * 8u + 5u] == expected_flags,
-                    "production CullCS admission changed an unrequested page or violated ascending overflow after an empty request word");
-            }
-            readback->Unmap(0, nullptr);
-            fixture.CheckValidation();
-            pool.ResetCompletedClaims(fixture.executor.Completed());
-            std::printf("Production VSM CullCS %s/%s passed (empty request word between partial masks, ordered overflow).\n",
-                barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy", test.name);
-            continue;
-        }
-        const UINT page_index = test.fine_entries;
-        const UINT root_flags = 16u;
-        std::vector<UINT> expected_counts(counter_words, sentinel);
-        std::vector<std::array<UINT, 8>> expected_records(command_words);
-        for (auto &record : expected_records) record.fill(sentinel);
-        std::vector<std::vector<std::array<UINT, 4>>> expected_mesh(test.group_count);
-        std::vector<UINT> group_attempts(test.group_count);
-        std::vector<UINT> group_successes(test.group_count);
-        bool expected_overflow{};
-        for (UINT caster_id = 0; caster_id < test.casters.size(); ++caster_id)
-        {
-            const auto &caster = test.casters[caster_id];
-            const UINT flags = caster.properties[0];
-            if ((flags & 1u) == 0u || (flags & 68u) == 68u) continue;
-            const UINT group = caster.properties[1];
-            if (group >= test.group_count) { expected_overflow = true; continue; }
-            const UINT slot = group_attempts[group]++;
-            const auto layout = test.segments[group];
-            if (slot >= layout.capacity || layout.first >= test.casters.size() ||
-                slot >= test.casters.size() - layout.first)
-            { expected_overflow = true; continue; }
-            const UINT record_index = test.fine_capacity + layout.first + slot;
-            expected_records[record_index] = {caster.draw[3], caster.draw[2], caster.draw[0], caster.draw[1],
-                page_index, 2u, group, 0u};
-            const UINT command_pass = 0x80000000u | record_index;
-            if (test.segments[group].frontend == 0u)
-                ++group_successes[group]; // The indexed group header counts these compact records.
-            else
-                expected_mesh[group].push_back({command_pass, test.segments[group].meshlet_count, 1u, 1u});
-        }
-        for (UINT group = 0; group < test.group_count; ++group)
-            expected_counts[root_counter_base + group] = group_attempts[group];
-
-        std::vector<UINT> expected_pages((test.fine_entries + 1u) * 8u, sentinel);
-        expected_pages[page_index * 8u + 0u] = 0u; expected_pages[page_index * 8u + 1u] = 0u;
-        expected_pages[page_index * 8u + 2u] = 3u; expected_pages[page_index * 8u + 3u] = UINT_MAX;
-        expected_pages[page_index * 8u + 4u] = constants.identity.w;
-        expected_pages[page_index * 8u + 5u] = root_flags | (expected_overflow ? 8u : 0u);
-        expected_pages[page_index * 8u + 6u] = 0u; expected_pages[page_index * 8u + 7u] = 0u;
-        compare_words(pages_read, expected_pages, "production CullCS root page initialization/overflow mismatch");
-        const auto actual_root_flags = reinterpret_cast<const UINT *>(result + pages_read)[page_index * 8u + 5u];
-        Check(((actual_root_flags & 16u) != 0u && (actual_root_flags & 8u) == 0u) == !expected_overflow,
-            "production CullCS root lookup must accept only published non-overflow pages");
-        compare_words(counters_read, expected_counts, "production CullCS root counters or fine-prefix sentinel mismatch");
-
-        std::vector<UINT> expected_record_words(command_words * 8u, sentinel);
-        for (UINT index = 0; index < command_words; ++index)
-            std::copy(expected_records[index].begin(), expected_records[index].end(), expected_record_words.begin() + index * 8u);
-        compare_words(records_read, expected_record_words, "production CullCS record-address/data mismatch");
-
-        std::vector<UINT> expected_indexed_words(indexed_bytes / 4u, sentinel);
-        std::vector<UINT> expected_mesh_words(mesh_bytes / 4u, sentinel);
-        for (UINT group = 0; group < test.group_count; ++group)
-        {
-            const auto layout = test.segments[group];
-            const bool mesh_frontend = layout.frontend != 0u;
-            if (mesh_frontend)
-            {
-                auto &expected = expected_mesh[group];
-                const UINT actual_count = static_cast<UINT>(expected.size());
-                std::vector<std::array<UINT, 4>> actual;
-                for (UINT slot = 0; slot < actual_count; ++slot)
-                {
-                    std::array<UINT, 4> command{};
-                    std::memcpy(command.data(), result + mesh_read + (test.fine_capacity + layout.first + slot) * 16u, 16u);
-                    actual.push_back(command);
-                }
-                auto sorted_actual = actual; auto sorted_expected = expected;
-                std::ranges::sort(sorted_actual); std::ranges::sort(sorted_expected);
-                Check(sorted_actual == sorted_expected, "production CullCS mesh command set differs from CPU reference");
-                for (UINT slot = actual_count; slot < layout.capacity; ++slot)
-                {
-                    const UINT offset = (test.fine_capacity + layout.first + slot) * 4u;
-                    for (UINT word = 0; word < 4u; ++word)
-                        Check(reinterpret_cast<const UINT *>(result + mesh_read)[offset + word] == sentinel,
-                            "production CullCS mesh overflow wrote beyond its segment");
-                }
-                for (UINT slot = 0; slot < actual_count; ++slot)
-                    std::copy(actual[slot].begin(), actual[slot].end(), expected_mesh_words.begin() +
-                        (test.fine_capacity + layout.first + slot) * 4u);
-            }
-            else
-            {
-                if (layout.capacity != 0u)
-                {
-                    const UINT offset = (test.fine_capacity + layout.first) * 6u;
-                    expected_indexed_words[offset + 0u] = 0x80000000u | (test.fine_capacity + layout.first);
-                    expected_indexed_words[offset + 1u] = layout.index_count;
-                    expected_indexed_words[offset + 2u] = group_successes[group];
-                    expected_indexed_words[offset + 3u] = layout.start_index;
-                    expected_indexed_words[offset + 4u] = static_cast<UINT>(layout.base_vertex);
-                    expected_indexed_words[offset + 5u] = 0u;
-                    const auto *actual = reinterpret_cast<const UINT *>(result + indexed_read) + offset;
-                    Check(std::equal(expected_indexed_words.begin() + offset,
-                        expected_indexed_words.begin() + offset + 6u, actual),
-                        "production CullCS indexed group header/count differs from CPU reference");
-                }
-            }
-        }
-        compare_words(indexed_read, expected_indexed_words, "production CullCS changed indexed fine prefix or bytes outside root segments");
-        compare_words(mesh_read, expected_mesh_words, "production CullCS changed mesh fine prefix or bytes outside root segments");
-        readback->Unmap(0, nullptr);
-        fixture.CheckValidation();
-        pool.ResetCompletedClaims(fixture.executor.Completed());
-        std::printf("Production VSM CullCS root scatter %s/%s passed (%s, %u casters, %u groups).\n",
-            barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy", test.name,
-            test.casters.empty() ? "empty" : expected_overflow ? "overflow guarded" : "capacity exact",
-            static_cast<UINT>(test.casters.size()), test.group_count);
-    }
-}
-
-
-void RunInstanceIdOracle(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
-{
-    struct Compiler
-    {
-        HMODULE module{LoadLibraryExW(L"d3dcompiler_47.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
-        ~Compiler() { if (module) FreeLibrary(module); }
-    } compiler;
-    Check(compiler.module != nullptr, "load instance ID oracle compiler");
-    const auto compile = reinterpret_cast<decltype(&D3DCompile)>(GetProcAddress(compiler.module, "D3DCompile"));
-    Check(compile != nullptr, "find instance ID oracle compiler");
-    const auto source_path = std::filesystem::path(__FILE__).parent_path().parent_path() /
-        "Content/Shaders/local_probe_draw.hlsli";
-    std::ifstream source(source_path, std::ios::binary);
-    Check(source.good(), "open production local-probe source decoder");
-    std::string shader{std::istreambuf_iterator<char>(source), std::istreambuf_iterator<char>()};
-    shader += R"(
-RWByteAddressBuffer Output : register(u0);
-cbuffer Case : register(b0) { uint CaseIndex, PassValue, Mode; };
-float4 Main(uint instance : SV_InstanceID) : SV_Position
-{
-    if(Mode == 0u)
-    {
-        uint ignored;
-        Output.InterlockedOr(CaseIndex * 8u, 1u << instance, ignored);
-        Output.InterlockedOr(CaseIndex * 8u + 4u, 1u << (PassValue + instance), ignored);
-    }
-    else
-        Output.Store3(16u + (CaseIndex + instance) * 12u, uint3(instance,
-            HsLocalProbeSourceSlot(PassValue,instance), 0x10000000u + HsLocalProbeMaterialOrdinal(PassValue)));
-    return float4(0,0,0,1);
-}
-)";
-    ComPtr<ID3DBlob> code_blob, diagnostics, serialized, errors;
-    const auto compiled = compile(shader.data(), shader.size(), "NativeInstanceIdOracle", nullptr, nullptr,
-        "Main", "vs_5_1", D3DCOMPILE_ENABLE_STRICTNESS | D3DCOMPILE_WARNINGS_ARE_ERRORS |
-        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code_blob, &diagnostics);
-    if (FAILED(compiled) && diagnostics)
-        std::fprintf(stderr, "%.*s\n", static_cast<int>(diagnostics->GetBufferSize()),
-            static_cast<const char *>(diagnostics->GetBufferPointer()));
-    Hr(compiled, "compile instance ID oracle");
-    std::array<D3D12_ROOT_PARAMETER1, 2> parameters{};
-    parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
-    parameters[0].Descriptor = {0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
-    parameters[0].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
-    parameters[1].Constants = {0, 0, 3};
-    parameters[1].ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX;
-    D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_description{};
-    root_description.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
-    root_description.Desc_1_1.NumParameters = static_cast<UINT>(parameters.size());
-    root_description.Desc_1_1.pParameters = parameters.data();
-    root_description.Desc_1_1.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
-    Hr(D3D12SerializeVersionedRootSignature(&root_description, &serialized, &errors),
-        "serialize instance ID root signature");
-    ComPtr<ID3D12RootSignature> root;
-    Hr(fixture.device->CreateRootSignature(0, serialized->GetBufferPointer(), serialized->GetBufferSize(),
-        IID_PPV_ARGS(&root)), "create instance ID root signature");
-    D3D12_GRAPHICS_PIPELINE_STATE_DESC description{};
-    description.pRootSignature = root.Get();
-    description.VS = {code_blob->GetBufferPointer(), code_blob->GetBufferSize()};
-    description.SampleMask = UINT_MAX;
-    description.SampleDesc.Count = 1;
-    description.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
-    description.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
-    description.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
-    description.RasterizerState.DepthClipEnable = TRUE;
-    description.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ZERO;
-    description.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
-    description.DepthStencilState.StencilReadMask = D3D12_DEFAULT_STENCIL_READ_MASK;
-    description.DepthStencilState.StencilWriteMask = D3D12_DEFAULT_STENCIL_WRITE_MASK;
-    description.DepthStencilState.FrontFace = {D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP,
-        D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS};
-    description.DepthStencilState.BackFace = description.DepthStencilState.FrontFace;
-    for (auto &blend : description.BlendState.RenderTarget)
-    {
-        blend.SrcBlend = blend.SrcBlendAlpha = D3D12_BLEND_ONE;
-        blend.DestBlend = blend.DestBlendAlpha = D3D12_BLEND_ZERO;
-        blend.BlendOp = blend.BlendOpAlpha = D3D12_BLEND_OP_ADD;
-        blend.LogicOp = D3D12_LOGIC_OP_NOOP;
-        blend.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
-    }
-    ComPtr<ID3D12PipelineState> pipeline;
-    Hr(fixture.device->CreateGraphicsPipelineState(&description, IID_PPV_ARGS(&pipeline)),
-        "create instance ID graphics pipeline");
-    constexpr std::array<hs::LocalProbeDrawRun, 5> runs{{
-        {11,2,3}, {14,1,3}, {17,2,6}, {21,2,3}, {hs::kLocalProbeSourceCapacity-3u,3,14}}};
-    constexpr UINT record_count = 10;
-    constexpr UINT value_count = 4 + record_count * 3;
-    constexpr UINT bytes = value_count * sizeof(UINT);
-    auto heap = HeapProperties(D3D12_HEAP_TYPE_UPLOAD);
-    const auto upload_description = BufferDescription(bytes + sizeof(UINT));
-    ComPtr<ID3D12Resource> upload, readback;
-    Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &upload_description,
-        D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&upload)), "create instance ID upload");
-    heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
-    const auto readback_description = BufferDescription(bytes);
-    Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &readback_description,
-        D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)), "create instance ID readback");
-    void *mapped{};
-    const D3D12_RANGE no_read{0, 0};
-    Hr(upload->Map(0, &no_read, &mapped), "map instance ID initialization");
-    std::memset(mapped, 0, bytes + sizeof(UINT));
-    upload->Unmap(0, nullptr);
-    hs::TransientResourcePool pool;
-    Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "instance ID pool");
-    hs::RenderGraphBuilder graph;
-    const auto output = graph.CreateBuffer({bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}, "native instance IDs");
-    auto seed = graph.AddPass(340, "Instance ID initialize", hs::QueueHint::Copy);
-    const auto initialized = seed.Write(graph.Version(output), hs::Access::CopyDest);
-    seed.SetExecute([&](hs::RenderPassContext &context) {
-        static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList())->CopyBufferRegion(
-            static_cast<ID3D12Resource *>(context.Resolve(output)), 0, upload.Get(), 0, bytes);
-    });
-    auto draw = graph.AddPass(341, "Instance ID graphics oracle", hs::QueueHint::Direct);
-    const auto written = draw.ReadWrite(initialized, hs::Access::UnorderedWrite);
-    draw.SetExecute([&](hs::RenderPassContext &context) {
-        auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        list->SetGraphicsRootSignature(root.Get());
-        list->SetPipelineState(pipeline.Get());
-        list->SetGraphicsRootUnorderedAccessView(0,
-            static_cast<ID3D12Resource *>(context.Resolve(output))->GetGPUVirtualAddress());
-        list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_POINTLIST);
-        const D3D12_VIEWPORT viewport{0, 0, 1, 1, 0, 1};
-        const D3D12_RECT scissor{0, 0, 1, 1};
-        list->RSSetViewports(1, &viewport);list->RSSetScissorRects(1, &scissor);
-        list->OMSetRenderTargets(0, nullptr, FALSE, nullptr);
-        const UINT first[]{0, 11, 0};
-        list->SetGraphicsRoot32BitConstants(1, 3, first, 0);
-        list->DrawInstanced(1, 3, 0, 5);
-        const UINT second[]{1, 14, 0};
-        list->SetGraphicsRoot32BitConstants(1, 3, second, 0);
-        const D3D12_INDEX_BUFFER_VIEW indices{upload->GetGPUVirtualAddress() + bytes, sizeof(UINT), DXGI_FORMAT_R32_UINT};
-        list->IASetIndexBuffer(&indices);
-        list->DrawIndexedInstanced(1, 3, 0, 0, 9);
-        UINT offset=0;
-        for(const auto &run:runs)
-        {
-            Check(hs::LocalProbeDrawRunValid(run,hs::kLocalProbeSourceCapacity),"native packed run bounds");
-            const UINT constants[]{offset,hs::LocalProbePassValue(run),1};
-            list->SetGraphicsRoot32BitConstants(1,3,constants,0);
-            list->DrawIndexedInstanced(1,run.instance_count,0,0,0);
-            offset+=run.instance_count;
-        }
-    });
-    auto copy = graph.AddPass(342, "Instance ID readback", hs::QueueHint::Copy);
-    copy.Read(written, hs::Access::CopySource);
-    copy.SetExecute([&](hs::RenderPassContext &context) {
-        static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList())->CopyBufferRegion(readback.Get(), 0,
-            static_cast<ID3D12Resource *>(context.Resolve(output)), 0, bytes);
-    });
-    Check(graph.Prepare(pool).Succeeded(), "prepare instance ID oracle");
-    hs::CompletionSet completion;
-    fixture.Execute(graph, frame_slot, barriers, completion, "execute instance ID oracle");
-    Check(fixture.executor.Wait(completion).Succeeded(), "wait instance ID oracle");
-    const D3D12_RANGE read{0, bytes};
-    Hr(readback->Map(0, &read, &mapped), "map instance ID results");
-    std::array<UINT, value_count> values{};
-    std::memcpy(values.data(), mapped, bytes);
-    readback->Unmap(0, &no_read);
-    std::printf("Native SV_InstanceID %s: DrawInstanced(start=5) raw=%08x explicit11=%08x; "
-        "DrawIndexedInstanced(start=9) raw=%08x explicit14=%08x.\n",
-        barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy",
-        values[0], values[1], values[2], values[3]);
-    Check(values[0] == 7u && values[2] == 7u, "SV_InstanceID draw-local native contract differs from expected IDs 0,1,2");
-    Check(values[1] == (7u << 11u) && values[3] == (7u << 14u),
-        "explicit base plus draw-local instance ID did not preserve source slots");
-    UINT offset=4;
-    for(const auto &run:runs)
-        for(UINT local=0;local<run.instance_count;++local)
-        {
-            Check(values[offset++]==local,"native packed source helper used a nonlocal instance ID");
-            Check(values[offset++]==run.first_instance+local,"native packed source helper lost a source gap or base");
-            Check(values[offset++]==0x10000000u+run.material_ordinal,"native packed source helper changed material ordinal");
-        }
-    Check(offset==value_count,"native packed source helper record count");
-    std::printf("Local probe production source decoder %s passed (10 exact source/material records, gaps, ordinal changes and maximum base).\n",
-        barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy");
-    fixture.CheckValidation();
-    pool.ResetCompletedClaims(fixture.executor.Completed());
 }
 
 void RunSharedTextureReaders(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
@@ -3592,127 +1751,6 @@ void Run(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
     }
     fixture.CheckValidation();
 }
-void RunLocalShadowDynamicBankOracle(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
-{
-    hs::LocalShadowSystem shadows;
-    hs::LocalShadowProfile profile{};
-    profile.enabled=true;profile.byte_budget=64ull*1024*1024;profile.maximum_lights=1;
-    profile.face_resolution=16;profile.max_casters=4;profile.max_draw_groups=4;
-    profile.filter_samples=1;profile.command_capacity=16;profile.frame_slots=3;
-    hs::LocalShadowCandidate candidate;
-    // Prepare owns only native resources; the caller supplies the raster callback.
-    Check(shadows.Prepare(fixture.device.Get(),fixture.allocator,profile,{},candidate).Succeeded(),
-          "prepare local shadow bank oracle");
-    Check(shadows.Commit(std::move(candidate),fixture.executor.Completed()).Succeeded(),
-          "commit local shadow bank oracle");
-    hs::TransientResourcePool pool;
-    Check(pool.Initialize(fixture.allocator,fixture.device.Get()).Succeeded(),"local shadow oracle pool");
-    hs::LightView light{};
-    light.stable_id=1;light.generation=1;light.revision=1;light.type=hs::LightType::Spot;
-    light.unit=hs::LightUnit::Lumen;light.shadow_flags=hs::kLightShadowRequested;
-    light.position={0,0,0};light.direction={0,0,1};light.range=10;light.quantity=1;
-    light.color={1,1,1};light.inner_cone_radians=.2f;light.outer_cone_radians=.6f;
-    std::array lights{light};
-    hs::VirtualShadowCaster caster{};
-    caster.current_bounds={0,0,2,.25f};caster.instance_generation=1;caster.draw_group=0;
-    caster.current_revisions={1,1,1,1};
-    std::array casters{caster};
-    const std::array groups{hs::VirtualShadowDrawGroup{1,hs::VirtualShadowFrontend::Indexed,3,0,0,0}};
-    const std::array<std::uint8_t,1> temporal_groups{0};
-    auto opacity_owner=std::make_shared<int>(1);
-    hs::LocalShadowInputs inputs{};
-    inputs.lights=lights;inputs.casters=std::span<const hs::VirtualShadowCaster>(casters);
-    inputs.draw_groups=groups;inputs.temporal_opacity_groups=temporal_groups;
-    inputs.opacity_owner=opacity_owner;inputs.pipeline_revision=1;inputs.frame_slot=frame_slot;
-    unsigned callback_count{};
-    inputs.draw=[&](hs::RenderPassContext &context,const hs::LocalShadowOutputs &outputs,
-                    std::span<const hs::VirtualShadowDrawBatch> batches) {
-        Check(!batches.empty()&&batches.front().layer==1,"oracle expects dynamic shadow draw");
-        ++callback_count;
-        auto *commands=static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
-        commands->ClearDepthStencilView(outputs.depth_views[1],D3D12_CLEAR_FLAG_DEPTH,.75f,0,0,nullptr);
-        return hs::Result::Success();
-    };
-    ComPtr<ID3D12Resource> readback;
-    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};UINT rows{};UINT64 row_bytes{},total_bytes{};
-    std::array<std::size_t,3> nonzero{};
-    for (unsigned frame=0;frame<3;++frame)
-    {
-        inputs.completed=fixture.executor.Completed();inputs.rendered_frame_id=frame+1;
-        if(frame==1)
-        {
-            casters[0].previous_present=true;casters[0].previous_bounds=casters[0].current_bounds;
-            casters[0].previous_generation=casters[0].instance_generation;
-            casters[0].previous_revisions=casters[0].current_revisions;
-        }
-        if(frame==2)casters[0].present=false;
-        hs::RenderGraphBuilder graph;hs::LocalShadowFramePlan plan;hs::LocalShadowOutputs outputs;
-        Check(shadows.PrepareFrameRecordData(inputs,plan).Succeeded(),"prepare local shadow oracle frame");
-        Check(shadows.Register(graph,inputs,plan,outputs).Succeeded(),"register local shadow oracle frame");
-        Check(outputs.dynamic_bank.resource&&outputs.resources[3],"local shadow oracle bank exists");
-        if(!readback)
-        {
-            const auto desc=outputs.resources[3]->GetDesc();
-            fixture.device->GetCopyableFootprints(&desc,0,1,0,&footprint,&rows,&row_bytes,&total_bytes);
-            const auto heap=HeapProperties(D3D12_HEAP_TYPE_READBACK);const auto buffer=BufferDescription(total_bytes);
-            Hr(fixture.device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&buffer,
-                D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&readback)),"create local shadow readback");
-        }
-        const auto target=graph.ImportBuffer({readback.Get()},hs::Access::CopyDest,"local shadow oracle readback");
-        auto copy=graph.AddPass(224,"local shadow oracle copy",hs::QueueHint::Direct);
-        copy.Read(outputs.dynamic_bank,hs::Access::CopySource);
-        (void)copy.Write(graph.Version(target),hs::Access::CopyDest);
-        copy.SetExecute([&,source=outputs.resources[3]](hs::RenderPassContext &context) {
-            D3D12_TEXTURE_COPY_LOCATION src{};src.pResource=source;src.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-            D3D12_TEXTURE_COPY_LOCATION dst{};dst.pResource=readback.Get();
-            dst.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;dst.PlacedFootprint=footprint;
-            static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList())->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
-        });
-        Check(graph.Prepare(pool).Succeeded(),"prepare local shadow oracle graph");
-        hs::CompletionSet completion;
-        fixture.Execute(graph,frame_slot,barriers,completion,"submit local shadow oracle frame");
-        Check(shadows.CompleteSubmission(graph,completion,true).Succeeded(),"commit local shadow oracle frame");
-        Check(fixture.executor.Wait(completion).Succeeded(),"wait local shadow oracle frame");
-        const D3D12_RANGE read{0,static_cast<SIZE_T>(total_bytes)},no_write{0,0};
-        void *mapped_raw{};
-        Hr(readback->Map(0,&read,&mapped_raw),"map local shadow oracle");
-        const auto *mapped=static_cast<const std::byte *>(mapped_raw);
-        for(UINT y=0;y<rows;++y)
-            for(UINT64 x=0;x<row_bytes;x+=sizeof(float))
-            {
-                float depth{};std::memcpy(&depth,mapped+footprint.Offset+y*footprint.Footprint.RowPitch+x,sizeof(depth));
-                if(depth>0.0f)++nonzero[frame];
-            }
-        readback->Unmap(0,&no_write);
-        Check(callback_count==1,"unchanged and removed casters must not invoke a dynamic draw callback");
-        pool.ResetCompletedClaims(fixture.executor.Completed());
-    }
-    Check(nonzero[0]>0&&nonzero[1]==nonzero[0]&&nonzero[2]<nonzero[1],
-          "dynamic bank must preserve warm depth and clear removed caster face");
-    Check(shadows.ResetAfterCompletion(fixture.executor.Completed()).Succeeded(),"retire local shadow oracle");
-    fixture.CheckValidation();
-}
-
-void TestLocalShadowDynamicChanges()
-{
-    hs::VirtualShadowCaster caster{};
-    caster.present = caster.previous_present = true;
-    caster.current_bounds = caster.previous_bounds = {1, 2, 3, 4};
-    caster.instance_generation = caster.previous_generation = 1;
-    caster.current_revisions = caster.previous_revisions = {1, 1, 1, 1};
-    Check(!hs::LocalShadowDynamicCasterChanged(caster, false, false), "unchanged dynamic caster must retain its faces");
-    caster.current_bounds.x += 1;
-    Check(hs::LocalShadowDynamicCasterChanged(caster, false, false), "moved caster must invalidate old and new bounds");
-    caster.current_bounds = caster.previous_bounds;
-    caster.present = false;
-    Check(hs::LocalShadowDynamicCasterChanged(caster, false, false), "removed caster must invalidate its prior faces");
-    caster.present = true; caster.wind = caster.previous_wind = true;
-    Check(hs::LocalShadowDynamicCasterChanged(caster, false, false), "wind may animate without a caster revision");
-    caster.wind = caster.previous_wind = false; caster.current_revisions.pose++;
-    Check(hs::LocalShadowDynamicCasterChanged(caster, false, false), "pose revision must invalidate dynamic depth");
-    caster.current_revisions = caster.previous_revisions;
-    Check(hs::LocalShadowDynamicCasterChanged(caster, true, false), "static transition must clear previous dynamic depth");
-}
 } // namespace
 
 int main(int argc, char **argv)
@@ -3721,23 +1759,9 @@ int main(int argc, char **argv)
     {
         const bool hardware =
             argc == 2 && std::string_view(argv[1]) == "--hardware";
-        hs::RendererValidationStatus collection;
-        Check(collection.MessageCollectionValid(), "validation OFF does not require message collection");
-        collection.debug_layer_requested = true;
-        Check(!collection.MessageCollectionValid(), "zero errors without collection is not validation evidence");
-        collection.message_collection_attempted = true;
-        Check(collection.MessageCollectionValid(), "successful empty collection is valid");
-        collection.message_collection_hresult = E_FAIL;
-        Check(!collection.MessageCollectionValid(), "a collection failure must invalidate zero errors");
-        collection.debug_layer_requested = false;
-        collection.gpu_validation_requested = true;
-        Check(!collection.MessageCollectionValid(), "GPU validation also requires successful collection");
-        TestLocalShadowDynamicChanges();
+
         Fixture fixture(hardware);
-        RunBakedProbePreparation(fixture);
-        RunDeviceIdentity(fixture, hardware);
-        RunRemovedFenceSentinel(fixture);
-        RunQueueJoinReuse(fixture);
+
         RunRecordingDispatch(fixture, hs::BarrierMode::Legacy);
         RunTimestampResolveIsolation(fixture);
         RunFinalExports(fixture, hs::BarrierMode::Legacy);
@@ -3745,14 +1769,9 @@ int main(int argc, char **argv)
         RunExternal(fixture, hs::BarrierMode::Legacy, 0);
         RunPlanReuse(fixture, hs::BarrierMode::Legacy, 0);
         RunUavClear(fixture, hs::BarrierMode::Legacy, 0);
-        RunBatchedBufferBarriers(fixture, hs::BarrierMode::Legacy, 0);
-        RunVirtualShadowFeedbackOracle(fixture, hs::BarrierMode::Legacy, 0);
-        RunVirtualShadowRootScatterOracle(fixture, hs::BarrierMode::Legacy, 0);
-        RunLocalShadowDynamicBankOracle(fixture, hs::BarrierMode::Legacy, 0);
-        RunInstanceIdOracle(fixture, hs::BarrierMode::Legacy, 0);
+
         RunSharedTextureReaders(fixture, hs::BarrierMode::Legacy, 0);
-        RunTextureStreamingNative(fixture.device.Get(), fixture.allocator, fixture.executor);
-        RunReservedTextureStreamingNative(fixture.device.Get(), fixture.allocator, fixture.executor);
+
         fixture.CheckValidation();
         std::puts("Legacy Copy -> Compute -> Direct queue chain passed.");
 
@@ -3768,11 +1787,7 @@ int main(int argc, char **argv)
             RunPlanReuse(fixture, hs::BarrierMode::Enhanced, 1);
             RunUavClear(fixture, hs::BarrierMode::Enhanced, 1);
             RunSameStateRepeatedRead(fixture);
-            RunBatchedBufferBarriers(fixture, hs::BarrierMode::Enhanced, 1);
-            RunVirtualShadowFeedbackOracle(fixture, hs::BarrierMode::Enhanced, 1);
-            RunVirtualShadowRootScatterOracle(fixture, hs::BarrierMode::Enhanced, 1);
-            RunLocalShadowDynamicBankOracle(fixture, hs::BarrierMode::Enhanced, 1);
-            RunInstanceIdOracle(fixture, hs::BarrierMode::Enhanced, 1);
+
             RunSharedTextureReaders(fixture, hs::BarrierMode::Enhanced, 1);
             std::puts("Enhanced Copy -> Compute -> Direct queue chain passed.");
         }

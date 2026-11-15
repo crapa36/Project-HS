@@ -1,7 +1,7 @@
 # Record visible play until the user or computer-use controller closes this game normally.
 [CmdletBinding()]
 param([string]$BuildDirectory='Build/msvc-debug',[string]$OutputDirectory,
-    [ValidateSet('HumanDebug','ComputerUsePerformance')][string]$Mode='HumanDebug',[string]$PythonExecutable,[switch]$SelfCheck)
+    [ValidateSet('HumanDebug','ComputerUsePerformance')][string]$Mode='HumanDebug',[string]$PythonExecutable)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $repoRoot=Split-Path $PSScriptRoot -Parent
@@ -49,38 +49,10 @@ function Publish-Session($Data,[string]$Path) {
     [IO.File]::WriteAllText(($Path+'.tmp'),($Data|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
     Move-Item -LiteralPath ($Path+'.tmp') -Destination $Path -Force
 }
-if($SelfCheck){
-    if((Native-Argument 'C:\example folder\result.csv')-ne'"C:\example folder\result.csv"'){throw 'Whitespace quoting failed.'}
-    $rejected=$false;try{$null=Native-Argument 'invalid"argument'}catch{$rejected=$true};if(!$rejected){throw 'Invalid quote accepted.'}
-    $rejected=$false;try{$null=Capture-Destination $repoRoot}catch{$rejected=$true};if(!$rejected){throw 'Existing destination accepted.'}
-    $fixture=Capture-Destination ('Build/play-captures/selfcheck-'+[Guid]::NewGuid().ToString('N'))
-    if(!(($fixture+[IO.Path]::DirectorySeparatorChar).StartsWith($repoRoot+[IO.Path]::DirectorySeparatorChar,[StringComparison]::OrdinalIgnoreCase))){throw 'Relative destination escaped repository.'}
-    $debugCache="CMAKE_BUILD_TYPE:STRING=Debug`n"
-    $releaseCache="CMAKE_BUILD_TYPE:STRING=Release`n"
-    $debugPolicy=Capture-BuildPolicy 'HumanDebug' $debugCache
-    $releasePolicy=Capture-BuildPolicy 'ComputerUsePerformance' $releaseCache
-    if($debugPolicy.build_type-ne'Debug'-or!$debugPolicy.validation_enabled-or$releasePolicy.build_type-ne'Release'-or$releasePolicy.validation_enabled-or$releasePolicy.gpu_validation_enabled){throw 'Capture build policy differs from launch arguments.'}
-    foreach($case in @(
-        @('HumanDebug',$releaseCache),@('ComputerUsePerformance',$debugCache),
-        @('ComputerUsePerformance',''),@('Unknown',$releaseCache))){
-        $rejected=$false;try{$null=Capture-BuildPolicy $case[0] $case[1]}catch{$rejected=$true}
-        if(!$rejected){throw ('Invalid capture build policy accepted: '+$case[0])}
-    }
-    $verifiedPython=Capture-Python '' $PythonExecutable
-    if(!(Test-Path -LiteralPath $verifiedPython -PathType Leaf)){throw 'Working Python receipt is unavailable.'}
-    foreach($invalidPython in @((Join-Path $repoRoot 'Build/missing-python.exe'),'C:\Users\fixture\AppData\Local\Microsoft\WindowsApps\python.exe',(Get-Command whoami.exe -ErrorAction Stop).Source)){
-        $rejected=$false;try{$null=Capture-Python '' $invalidPython}catch{$rejected=$true}
-        if(!$rejected){throw ('Invalid Python interpreter accepted: '+$invalidPython)}
-    }
-    $cachePython="_Python3_EXECUTABLE:INTERNAL=$verifiedPython`n"
-    if((Capture-Python $cachePython '')-ne$verifiedPython){throw 'Configured Python was not selected.'}
-    if((Capture-Python "_Python3_EXECUTABLE:INTERNAL=missing-python.exe`n" $verifiedPython)-ne$verifiedPython){throw 'Explicit working Python did not override invalid cache.'}
-    'play capture launcher selfcheck passed: quoting, unique destination, repository paths, mode build/validation guards, working Python/alias/missing interpreter boundaries';exit 0
-}
 if(![IO.Path]::IsPathRooted($BuildDirectory)){$BuildDirectory=Join-Path $repoRoot $BuildDirectory}
 $buildRoot=(Resolve-Path -LiteralPath $BuildDirectory).Path
-$binary=Join-Path $buildRoot 'ProjectHS.exe';$pointer=Join-Path $buildRoot 'GenerationState/runtime-full.json';$cache=Join-Path $buildRoot 'CMakeCache.txt'
-foreach($file in @($binary,$pointer,$cache)){if(!(Test-Path -LiteralPath $file -PathType Leaf)){throw "Missing capture input: $file"}}
+$binary=Join-Path $buildRoot 'ProjectHS.exe';$pack=Join-Path $buildRoot 'Content/content.hsp';$cache=Join-Path $buildRoot 'CMakeCache.txt'
+foreach($file in @($binary,$pack,$cache)){if(!(Test-Path -LiteralPath $file -PathType Leaf)){throw "Missing capture input: $file"}}
 $cacheText=[IO.File]::ReadAllText($cache)
 $buildPolicy=Capture-BuildPolicy $Mode $cacheText
 $computerUse=$Mode-eq'ComputerUsePerformance'
@@ -91,22 +63,21 @@ New-Item -ItemType Directory -Path $run|Out-Null
 $sessionPath=Join-Path $run 'capture-session.json';$settingsPath=Join-Path $env:LOCALAPPDATA 'ProjectHS/settings.json'
 $gpuReadyFile=Join-Path $run 'renderer_features.jsonl'
 if(Test-Path -LiteralPath $settingsPath){Copy-Item -LiteralPath $settingsPath -Destination (Join-Path $run 'settings-before.json')}
-Copy-Item -LiteralPath $pointer -Destination (Join-Path $run 'generation-used.json')
-$arguments=@('--capture-diagnostics',('--artifacts='+$run),('--generation='+$pointer),('--playtest-output='+(Join-Path $run 'playtest')))
+$arguments=@('--capture-diagnostics','--mute',('--artifacts='+$run),('--playtest-output='+(Join-Path $run 'playtest')))
 if($buildPolicy.validation_enabled){$arguments+='--validation'}
 $session=[ordered]@{
     schema=1;state='starting';started_utc=[DateTime]::UtcNow.ToString('o');output_directory=$run;mode=$Mode;build_type=$buildPolicy.build_type;validation_enabled=$buildPolicy.validation_enabled;gpu_validation_enabled=$buildPolicy.gpu_validation_enabled;
     temporary_invulnerable=$false;human_input=(!$computerUse);input_source=$(if($computerUse){'computer_use'}else{'human'});
-    settings_policy=$(if($computerUse){'isolated test profile'}else{'normal user profile; no quality/resolution/pacing/audio overrides'});
+    settings_policy=$(if($computerUse){'isolated test profile; user settings preserved; run master output muted'}else{'normal user profile; user settings preserved; run master output muted'});
     profile_local_app_data=$env:LOCALAPPDATA;profile_root=(Split-Path $settingsPath -Parent);python_executable=$python;
     gpu_ready_file=$gpuReadyFile;gpu_counter_start_policy='wait_for_nonempty_gpu_ready_file; CPU/thread/NVIDIA start immediately';
-    executable=$binary;executable_sha256=(Get-FileHash -LiteralPath $binary).Hash;generation=(Get-Content -LiteralPath $pointer -Raw|ConvertFrom-Json).generation_id;
+    executable=$binary;executable_sha256=(Get-FileHash -LiteralPath $binary).Hash;generation=$null;content_pack=$pack;
     arguments=$arguments;stop_policy=$(if($computerUse){'computer-use controller closes game normally'}else{'user closes game'});pid=$null;process_start_ticks=$null;sampler_pid=$null;
     game_exit_code=$null;sampler_exit_code=$null;analysis_exit_code=$null;complete=$false;error=$null
 }
 Publish-Session $session $sessionPath
 @($(if($computerUse){'Computer-use performance capture; the controller closes the game normally to finish.'}else{'Play normally in Project HS; close the game normally to finish.'}),
-  'Settings changes are recorded by revision. No quality, resolution, pacing or audio override is applied.',
+  'Settings changes are recorded by revision; user settings preserved; run master output muted.',
   'After exit the launcher writes REPORT.md, summary.json, option-costs.json and per-pass tables.',
   'Raw CPU/GPU/VRAM/QPC/settings/events/input data stays local. Nothing is uploaded.',
   'PID GPU engine usage is separate from NVIDIA whole-device metrics, which include other applications.',

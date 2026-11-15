@@ -8,7 +8,6 @@ from itertools import groupby
 import json
 import math
 from pathlib import Path
-import tempfile
 
 _spec = importlib.util.spec_from_file_location("hs_graphics_options", Path(__file__).with_name("analyze-graphics-options.py"))
 graphics = importlib.util.module_from_spec(_spec)
@@ -428,7 +427,7 @@ def analyze(directory):
     settings = {}
     for revision, rows in manifests.items():
         unique = {row["key"]: row for row in rows}
-        if len(rows) != len(unique) or set(unique) not in (graphics.CURRENT_OPTION_KEYS, graphics.OUTLINE_OPTION_KEYS, set(graphics.LEGACY_OPTIONS)) or any(graphics.SETTING_IDS.get(row["key"]) != int(row["setting_id"]) for row in rows):
+        if len(rows) != len(unique) or not graphics.is_supported_manifest(unique) or any(graphics.SETTING_IDS.get(row["key"]) != int(row["setting_id"]) for row in rows):
             settings_valid = False; issues.append(f"Configuration {revision} lacks a complete current or legacy settings catalog with matching IDs")
         settings[revision] = unique
     frame_data, seen_configs = defaultdict(frame_scope), set()
@@ -611,10 +610,10 @@ def analyze(directory):
     if not frame_data["playing"]["frames"]: option_report["errors"].append("No Playing CPU frames; no option cost can be reported")
     for revision, manifest in sorted(settings.items()):
         scope = f"playing_config:{revision}"; total = gpu_counts[scope]
-        if set(manifest) not in (graphics.CURRENT_OPTION_KEYS, graphics.OUTLINE_OPTION_KEYS, set(graphics.LEGACY_OPTIONS)): continue
+        if not graphics.is_supported_manifest(manifest): continue
         values = {name: group_result(data, total) for (group_scope, name), data in groups.items() if group_scope == scope}
         options = []
-        catalog = graphics.LEGACY_OPTIONS if graphics.LEGACY_RT_KEYS & manifest.keys() else {**graphics.OPTIONS, **graphics.OUTLINE_OPTIONS}
+        catalog = graphics.option_catalog(manifest)
         for key, row in sorted(manifest.items(), key=lambda item: int(item[1]["setting_id"])):
             kind, links, note = catalog[key]; status = graphics.option_status(row, manifest)
             measured = [name for name in links if values.get(name, {}).get("gpu_work_ms_per_completed_frame")]
@@ -855,347 +854,13 @@ def write_outputs(directory, result):
     (directory / "REPORT.md").write_text("\n".join(report), encoding="utf-8")
 
 
-def self_test():
-    base = {"measured": "1", "gpu_timings_valid": "1", "clock_calibrated": "1",
-            "qpc_frequency": "1000000", "queue": "0", "pass_name": "pass"}
-    start = 10**18
-    sample = [{**base, "begin_qpc": str(start + a), "end_qpc": str(start + b), "queue": str(q)}
-              for a, b, q in ((1, 11, 0), (1, 11, 0), (6, 16, 1), (20, 25, 1))]
-    union = timestamped_pass_union(sample, "1000000")
-    assert union["complete"] and math.isclose(union["all_queues_ms"], .02)
-    assert math.isclose(union["queues_ms"]["0"], .01) and math.isclose(union["queues_ms"]["1"], .015)
-    bad = sample + [{**base, "clock_calibrated": "0"}, {**base, "begin_qpc": "4", "end_qpc": "3"},
-                    {**base, "qpc_frequency": "10", "begin_qpc": "1", "end_qpc": "2"},
-                    {**base, "measured": "0"}, {**base}]
-    partial = timestamped_pass_union(bad, "1000000")
-    assert not partial["complete"] and partial["included_passes"] == 4 and partial["excluded_passes"] == 5
-    assert len(partial["exclusion_reasons"]) == 5 and math.isclose(partial["all_queues_ms"], .02)
-    assert timestamped_pass_union([{**base, "measured": "0"}], "1000000")["all_queues_ms"] is None
-    cadence = source_cadence_report([(1, 20.0, 1000 / 60), (2, 35.0, 1000 / 60),
-                                     (4, 10.0, 1000 / 60)])
-    assert cadence["p95"] == 35.0 and cadence["exceed"]["target"]["count"] == 2
-    assert cadence["exceed"]["16.67"]["longest_consecutive_source_frames"] == 2
-    # Shared classifier must include native GI preparation as well as SDK passes.
-    # Each GPU pass has one group; linked options repeat it, never add savings.
-    native_gi_passes = ((142, "SceneGeometryDeformation"), (143, "SceneGeometryUpload"),
-                       (259, "BrixelizerUploadPinnedNoise"), (260, "BrixelizerGuides"),
-                       (261, "BrixelizerSdfUpdate"), (262, "BrixelizerNativeGi"),
-                       (263, "BrixelizerMaterialResolve"), (264, "BrixelizerCacheInjectionExport"),
-                       (265, "BrixelizerRetainHistories"), (266, "BrixelizerCacheDirectDiffuseEmission"),
-                       (267, "BrixelizerComposeHDR"))
-    for identity, name in native_gi_passes:
-        row = {"pass_id": identity, "pass_name": name, "queue": 0}
-        assert graphics.pass_group(row) == "gi"
-        assert graphics.pass_group({**row, "queue": 2}) == "gi_copy_transfer"
-    assert "gi" in graphics.OPTIONS["gi_mode"][1]
-    assert "gi" in graphics.LEGACY_OPTIONS["gi_quality"][1]
-    assert graphics.pass_group({"pass_id": 4, "pass_name": "GBuffer+Depth", "queue": 0}) == "surface"
-    with tempfile.TemporaryDirectory() as temp:
-        directory = Path(temp)
-        def write(name, rows):
-            with (directory / name).open("w", encoding="utf-8", newline="") as stream:
-                writer = csv.DictWriter(stream, fieldnames=list(rows[0])); writer.writeheader(); writer.writerows(rows)
-        (directory / "diagnostics.json").write_text('{"complete":true,"io_failed":false}', encoding="utf-8")
-        debug_metadata = '{"build_type":"Debug","validation_enabled":true,"gpu_validation_enabled":false}'
-        (directory / "capture-session.json").write_text(debug_metadata, encoding="utf-8")
-        manifest = [dict(config_revision=revision, setting_id=graphics.SETTING_IDS[key], key=key, requested="true", effective="true", requested_available=-1, native_effective="true", native_reason="")
-                    for revision in (1, 2) for key in graphics.LEGACY_OPTIONS]
-        write("graphics_settings.csv", manifest)
-        old_columns = (
-            "frame,tick,frame_qpc,qpc_frequency,interval_us,adapter_us,render_us,wait_us,streaming_us,scene_prepare_us,ui_us,"
-            "constants_upload_us,graph_build_us,graph_prepare_us,descriptors_us,graph_plan_us,graph_record_us,graph_submit_us,post_submit_us,present_us,diagnostics_us,wrapper_us,"
-            "gpu_frame,gpu_valid,gpu_critical_path_ms,gpu_critical_path_valid,foreground,dynamic_instances,static_instances,session_phase,frame_cap,config_revision,settings_generation,"
-            "pipeline_revision,view_id,output_width,output_height,render_active_width,render_active_height,render_capacity_width,render_capacity_height,diagnostic_frame,renderer_diagnostics_valid,submit_qpc,"
-            "present_begin_qpc,present_end_qpc,renderer_qpc_frequency,memory_budget_available,local_usage_bytes,local_budget_bytes,tracked_live_bytes,tracked_retiring_bytes,texture_physical_bytes,acceleration_structure_bytes,host_staging_bytes,"
-            "direct_batches,compute_batches,copy_batches,cross_queue_waits,record_jobs,transient_bytes_without_aliasing,transient_backing_bytes,validation_enabled,gpu_validation_enabled,frame_slot_wait_begin_qpc,frame_slot_wait_end_qpc"
-        ).split(",")
-        frames = [{**dict.fromkeys(old_columns, 0), **{stage + "_us": 1000 for stage in STAGES}, "frame": i, "config_revision": 1 if i <= 2 else 2,
-                   "session_phase": 1, "foreground": 1 if i <= 2 else 0, "frame_qpc": 1000000 + (i - 1) * 20000, "qpc_frequency": 1000000,
-                   "render_us": 10000, "graph_record_us": 2000, "renderer_diagnostics_valid": 1,
-                   "render_thread_cpu_valid": 0 if i == 3 else 1,
-                   "render_thread_cpu_us": {1: 2000, 2: 0, 3: 0, 4: -1}[i]} for i in (1, 2, 3, 4)]
-        write("performance.csv", frames)
-        gpu = []
-        for identity in (1, 2, 3, 4):
-            for pass_id, name, queue, measured, frequency in ((4, "GBuffer+Depth", 0, 1, 1000000000), (147, "VirtualShadow.SnapshotUpload", 2, 0, 0)):
-                gpu.append(dict(completed_frame=identity, observed_frame=99, fence_completed=1, pass_id=pass_id,
-                    pass_name=name, queue=queue, measured=measured, timestamp_frequency=frequency, nanoseconds=1000000 if measured else 0,
-                    critical_path_valid=1, critical_path_ms=1, cpu_qpc_frequency=1000000,
-                    cpu_record_begin_qpc=1000, cpu_record_end_qpc=3000, cpu_record_valid=1,
-                    cpu_provider_submit_begin_qpc=4000, cpu_provider_submit_end_qpc=4500, cpu_provider_submit_valid=1))
-        write("gpu_live.csv", gpu)
-        usage = directory / "utilization"; usage.mkdir()
-        (usage / "sampling.json").write_text('{"complete":true,"process_id":7,"error":null,"logical_processors":20}', encoding="utf-8")
-        write("utilization/cpu-process.csv", [dict(sample=1, warmup=0, wall_seconds=.02, cpu_seconds=.02,
-              qpc=1020000, qpc_frequency=1000000, logical_processors=20, system_cpu_percent=25,
-              working_set_bytes=1000, private_memory_bytes=2000, handle_count=10, system_busy_core_equivalents=5)])
-        write("utilization/cpu-system.csv", [dict(sample=sample,warmup=warmup,qpc=qpc,qpc_frequency=1000000,
-              instance=name,utilization_percent=value,status=0)
-              for sample,warmup,qpc in ((76,1,980000),(77,0,1000000),(78,0,1020000))
-              for name,value in (("_total",25),("0,0",80),("0,_total",25))])
-        write("utilization/cpu-threads.csv", [dict(sample=1,thread_id=2,cpu_seconds=.02)])
-        gpu_counters = [dict(sample=sample,warmup=warmup,qpc=qpc,qpc_frequency=1000000,pid=pid,target_process=target,status=0,
-              luid="L",phys=0,engine=engine,engine_type="3d",utilization_percent=value)
-              for sample,warmup,qpc in ((76,1,980000),(77,0,1000000),(78,0,1020000))
-              for pid,target,engine,value in ((7,1,0,20),(7,1,1,30),(99,0,0,100))]
-        write("utilization/gpu-engines.csv", gpu_counters)
-        write("utilization/nvidia-whole-gpu.csv", [dict(qpc=1020000,qpc_frequency=1000000,uuid="GPU-A",pci_bus_id="PCI-A",name="fixture",
-              graphics_clock_mhz=1000,memory_used_mib=200,memory_total_mib=1000,temperature_c=50,power_watts=100)])
-        summary, options, gpu_times, cpu_times = analyze(directory)
-        assert summary["capture_complete"] and summary["gpu_frame_count"] == 4
-        assert summary["analysis_status"] == "complete"
-        execution = summary["overall"]["render_thread_cpu_execution"]
-        assert execution["execution_ms"]["count"] == 2 and execution["execution_ms"]["mean"] == 1
-        assert execution["unavailable_frames"] == 2
-        assert summary["playing"]["cpu_stage_wall_ms"]["previous_capture_log"]["mean"] == 1
-        legacy_frames = [{key: value for key, value in row.items()
-                          if key not in ("prepare_render_data_us", "previous_capture_log_us",
-                                         "render_thread_cpu_valid", "render_thread_cpu_us")} for row in frames]
-        for row in legacy_frames: row["constants_upload_us"] = 1000
-        write("performance.csv", legacy_frames)
-        legacy = analyze(directory)[0]
-        assert legacy["playing"]["cpu_stage_wall_ms"]["prepare_render_data"]["mean"] == 1
-        assert not legacy["playing"]["cpu_stage_wall_ms"]["previous_capture_log"]["available"]
-        assert not legacy["overall"]["render_thread_cpu_execution"]["execution_ms"]["available"]
-        assert legacy["overall"]["render_thread_cpu_execution"]["unavailable_frames"] == 4
-        assert legacy["analysis_status"] == "complete"
-        write("performance.csv", frames)
-        current_manifest = [row for row in manifest if row["key"] in graphics.CURRENT_OPTION_KEYS]
-        write("graphics_settings.csv", current_manifest)
-        current = analyze(directory)
-        assert current[0]["analysis_status"] == "complete"
-        assert all(len(c["options"]) == len(graphics.CURRENT_OPTION_KEYS) for c in current[1]["configurations"])
-        wrong_ids = [dict(row, setting_id=53) if row["key"] == "color_grading" else row for row in current_manifest]
-        write("graphics_settings.csv", wrong_ids)
-        assert analyze(directory)[0]["analysis_status"] == "partial"
-        write("graphics_settings.csv", current_manifest)
-        outline_manifest = current_manifest + [dict(config_revision=revision, setting_id=graphics.SETTING_IDS[key],
-            key=key, requested="true", effective="true", requested_available=-1, native_effective="true", native_reason="")
-            for revision in (1, 2) for key in graphics.OUTLINE_OPTIONS]
-        write("graphics_settings.csv", outline_manifest)
-        assert analyze(directory)[0]["analysis_status"] == "complete"
-        write("graphics_settings.csv", outline_manifest[:-1])
-        assert analyze(directory)[0]["analysis_status"] == "partial"
-        write("graphics_settings.csv", current_manifest)
-        write_outputs(directory, current)
-        assert not current[0]["playing"]["cpu_stage_subsets_wall_ms"]
-        assert "ray_geometry_register" not in (directory / "REPORT.md").read_text(encoding="utf-8")
-        assert all(not ({"ray_scene", "shared_ray_compose", "denoising"} & set(o["feature_groups"])) for c in current[1]["configurations"] for o in c["options"])
-        write("graphics_settings.csv", current_manifest[:-1])
-        assert analyze(directory)[0]["analysis_status"] == "partial"
-        write("graphics_settings.csv", manifest)
-        assert all(not data["available"] and data["rejected"] == 0 for data in summary["playing"]["cpu_stage_subsets_wall_ms"].values())
-        assert all(not data["available"] for data in summary["playing"]["cpu_stage_unattributed_wall_ms"].values())
-        extended_frames = [{**row, **{name + "_us": 100 for name in SUBSTAGES}} for row in frames]
-        write("performance.csv", extended_frames)
-        detailed = analyze(directory)
-        assert detailed[0]["capture_complete"] and detailed[0]["analysis_status"] == "complete"
-        assert detailed[0]["playing"]["cpu_stage_wall_ms"] == summary["playing"]["cpu_stage_wall_ms"]
-        assert detailed[0]["playing"]["fps_contiguous_same_phase_config"] == summary["playing"]["fps_contiguous_same_phase_config"]
-        assert detailed[1:] == (options, gpu_times, cpu_times)
-        subsets = detailed[0]["playing"]["cpu_stage_subsets_wall_ms"]
-        assert all(data["count"] == 4 and data["mean"] == .1 and data["parent_stage"] == SUBSTAGES[name] for name, data in subsets.items())
-        residuals = detailed[0]["playing"]["cpu_stage_unattributed_wall_ms"]
-        assert residuals["graph_build"]["mean"] == .7 and residuals["graph_prepare"]["mean"] == .6
-        assert all(config["playing"]["cpu_stage_subsets_wall_ms"]["ray_geometry_register"]["count"] == 2 for config in detailed[0]["configurations"])
-        write_outputs(directory, detailed)
-        invalid_subsets = [{**row, "ray_scene_register_us": "invalid"} for row in extended_frames]
-        write("performance.csv", invalid_subsets)
-        invalid_detail = analyze(directory)[0]
-        assert invalid_detail["playing"]["cpu_stage_subsets_wall_ms"]["ray_scene_register"]["mean"] is None
-        assert invalid_detail["playing"]["cpu_stage_unattributed_wall_ms"]["graph_build"]["mean"] is None
-        assert invalid_detail["analysis_status"] == "partial"
-        present_frames = [{**row, "streamline_actual_present_count": 2,
-                           "streamline_actual_present_count_valid": int(i > 0),
-                           "streamline_actual_present_begin_qpc": 1005000 + (i - 1) * 20000,
-                           "streamline_actual_present_end_qpc": 1005000 + i * 20000,
-                           "streamline_actual_present_qpc_frequency": 1000000}
-                          for i, row in enumerate(extended_frames)]
-        write("performance.csv", present_frames)
-        presentation = analyze(directory)
-        actual = presentation[0]["playing"]["streamline_reported_present"]
-        assert actual["observations"] == 2 and actual["sdk_reported_present_count"] == 4
-        assert math.isclose(actual["sdk_reported_present_fps"], 100)
-        assert math.isclose(presentation[0]["playing"]["fps_contiguous_same_phase_config"]["fps"], 50)
-        assert actual["transition_or_window_observations_excluded"] == 1 and not actual["physical_display_cadence_verified"]
-        assert all(config["playing"]["streamline_reported_present"]["observations"] == 1 for config in presentation[0]["configurations"])
-        assert presentation[1:] == (options, gpu_times, cpu_times)
-        write_outputs(directory, presentation)
-        assert "Playing | 50.000 | 100.000 | 4" in (directory / "REPORT.md").read_text(encoding="utf-8")
-        assert not summary["playing"]["streamline_reported_present"]["available"]
-        # A capability query can shorten the SDK counter window without filling its gap.
-        present_frames[-1].update(streamline_actual_present_count=1, streamline_actual_present_begin_qpc=1055000)
-        write("performance.csv", present_frames)
-        shortened = analyze(directory)[0]["playing"]["streamline_reported_present"]
-        assert shortened["sdk_reported_present_count"] == 3 and math.isclose(shortened["observed_query_interval_seconds"], .03)
-        assert math.isclose(shortened["sdk_reported_present_fps"], 100)
-        present_frames[-1].update(streamline_actual_present_count=0)
-        write("performance.csv", present_frames)
-        zero = analyze(directory)[0]["playing"]["streamline_reported_present"]
-        assert zero["observations"] == 2 and zero["sdk_reported_present_count"] == 2
-        present_frames[-1].update(streamline_actual_present_begin_qpc=1005000)
-        write("performance.csv", present_frames)
-        bad_present = analyze(directory)[0]
-        assert bad_present["analysis_status"] == "partial" and bad_present["playing"]["streamline_reported_present"]["invalid_observations"] == 1
-        write("performance.csv", frames)
-        (directory / "capture-session.json").write_text('{"build_type":"Release","validation_enabled":false,"gpu_validation_enabled":false}', encoding="utf-8")
-        release_result = analyze(directory)
-        assert "Build type: Release; D3D12 validation: disabled; GPU validation: disabled" in release_result[0]["limits"][0]
-        assert "Debug unoptimized" not in release_result[0]["limits"][0]
-        assert release_result[0]["overall"] == summary["overall"] and release_result[0]["playing"] == summary["playing"]
-        assert release_result[1:] == (options, gpu_times, cpu_times)
-        (directory / "capture-session.json").unlink()
-        unknown_result = analyze(directory)[0]
-        assert "Build type: unknown; D3D12 validation: unknown; GPU validation: unknown" in unknown_result["limits"][0]
-        assert "Debug unoptimized" not in unknown_result["limits"][0]
-        assert unknown_result["playing"] == summary["playing"]
-        (directory / "capture-session.json").write_text(debug_metadata, encoding="utf-8")
-        usage = summary["utilization"]
-        assert usage["process_cpu"]["weighted_core_equivalents"] == 1
-        assert usage["process_cpu"]["machine_percent"]["weighted_mean"] == 5
-        assert usage["process_gpu"]["busiest_engine_percent"]["weighted_mean"] == 30
-        assert math.isclose(usage["process_gpu"]["sampled_wall_seconds"], .02)
-        assert usage["system_cpu_percent"]["weighted_mean"] == 25
-        assert usage["logical_cpu_percent"]["0,0"]["mean"] == 80
-        assert usage["nvidia_device_context"][0]["metrics"]["memory_used_mib"]["mean"] == 200
-        assert math.isclose(summary["playing"]["fps_contiguous_same_phase_config"]["fps"], 50)
-        assert summary["playing"]["fps_contiguous_same_phase_config"]["frame_intervals"] == 2
-        assert [row["frames"] for row in summary["foreground"]] == [2,2]
-        assert all(math.isclose(row["fps_contiguous_same_phase_config"]["fps"], 50) for row in summary["foreground"])
-        assert [c["completed_frames"] for c in options["configurations"]] == [2, 2]
-        assert all(len(c["options"]) == len(graphics.LEGACY_OPTIONS) for c in options["configurations"])
-        copy = next(row for row in gpu_times if row["scope"] == "overall" and row["pass_id"] == 147)
-        assert copy["mean_ms"] is None and copy["measured_frames"] == 0
-        record = next(row for row in cpu_times if row["scope"] == "overall" and row["pass_id"] == 4)
-        assert record["record_mean_ms"] == 2 and record["provider_mean_ms"] == .5
-        weighted = [{**gpu_counters[3], "sample":sample, "warmup":warmup, "qpc":qpc, "utilization_percent":value}
-                    for sample,warmup,qpc,value in ((0,1,990000,0),(1,0,1000000,0),(2,0,1010000,20),(3,0,1060000,40))]
-        write("utilization/gpu-engines.csv", weighted)
-        weighted_gpu = analyze(directory)[0]["utilization"]["process_gpu"]
-        assert math.isclose(weighted_gpu["sampled_wall_seconds"], .06)
-        assert math.isclose(weighted_gpu["busiest_engine_percent"]["weighted_mean"], 110 / 3)
-        boundary = [{**row, "utilization_percent": 100 if row["sample"] == 3 else 0} for row in weighted]
-        write("utilization/gpu-engines.csv", boundary)
-        boundary_gpu = analyze(directory)[0]["utilization"]["process_gpu"]
-        assert math.isclose(boundary_gpu["sampled_wall_seconds"], .06)
-        assert boundary_gpu["busiest_engine_percent"]["min"] == 0
-        assert boundary_gpu["busiest_engine_percent"]["max"] == 100
-        assert boundary_gpu["sources"][0]["out_of_range_intervals_excluded"] == 0
-        for invalid in (-1, 100.001, 559.579):
-            invalid_rows = [{**row, "utilization_percent": invalid if row["sample"] == 3 else row["utilization_percent"]}
-                            for row in weighted]
-            invalid_rows.append({**weighted[-1], "engine": 99, "utilization_percent": 70})
-            write("utilization/gpu-engines.csv", invalid_rows)
-            invalid_summary = analyze(directory)[0]
-            invalid_gpu = invalid_summary["utilization"]["process_gpu"]
-            assert math.isclose(invalid_gpu["sampled_wall_seconds"], .01)
-            assert invalid_gpu["busiest_engine_percent"]["weighted_mean"] == 20
-            assert invalid_gpu["sources"][0]["out_of_range_intervals_excluded"] == 1
-            assert any("outside 0..100%" in issue for issue in invalid_summary["issues"])
-        # Matching integer IDs must never attach late PDH initialization to an early CPU sample.
-        write("utilization/gpu-engines.csv", [{**row,"sample":row["sample"]-76,
-              "qpc":row["qpc"]+30000000} for row in gpu_counters])
-        late = analyze(directory)[0]
-        assert late["utilization"]["process_cpu"]["weighted_core_equivalents"] == 1
-        assert not late["utilization"]["process_gpu"]["busiest_engine_percent"]["available"]
-        assert late["utilization"]["process_gpu"]["sampled_wall_seconds"] == 0
-        write("utilization/gpu-engines.csv", gpu_counters)
-        supplement = directory / "utilization-counter-refresh"; supplement.mkdir()
-        (supplement / "pdh-worker.json").write_text('{"complete":true,"reason":"process_exit"}', encoding="utf-8")
-        (supplement / "auxiliary-worker.json").write_text('{"worker_process_id":35672,"target_pid":7}', encoding="utf-8")
-        write("utilization/gpu-engines.csv", [row for row in gpu_counters if row["pid"] == 99])
-        supplementary = [{**row,"sample":row["sample"]-75,"qpc":{76:1020000,77:1040000,78:1060000}[row["sample"]]}
-                         for row in gpu_counters if row["pid"] == 7]
-        write("utilization-counter-refresh/gpu-engines.csv", supplementary)
-        write("utilization-counter-refresh/cpu-system.csv", [dict(sample=sample,warmup=warmup,qpc=qpc,qpc_frequency=1000000,
-              instance="_total",utilization_percent=100,status=0)
-              for sample,warmup,qpc in ((1,1,1020000),(2,0,1040000),(3,0,1060000))])
-        refreshed = analyze(directory)[0]["utilization"]
-        assert refreshed["process_gpu"]["busiest_engine_percent"]["weighted_mean"] == 30
-        assert math.isclose(refreshed["process_gpu"]["sampled_wall_seconds"], .02)
-        assert math.isclose(refreshed["process_gpu"]["initial_target_observation_gap_seconds"], .04)
-        assert refreshed["process_gpu"]["window_coverage_fraction"] < .3
-        assert refreshed["system_cpu_percent"]["weighted_mean"] == 25
-        assert refreshed["process_gpu"]["sources"][0]["accepted_intervals"] == 0
-        assert refreshed["process_gpu"]["sources"][1]["metadata"]["pdh-worker.json"]["complete"]
-        assert refreshed["process_gpu"]["sources"][1]["metadata"]["auxiliary-worker.json"]["worker_process_id"] == 35672
-        write("utilization/gpu-engines.csv", gpu_counters)
-        # An overlapping supplemental interval is not counted twice.
-        write("utilization-counter-refresh/gpu-engines.csv", gpu_counters)
-        overlap = analyze(directory)[0]["utilization"]["process_gpu"]
-        assert math.isclose(overlap["sampled_wall_seconds"], .02)
-        assert overlap["sources"][1]["overlapping_intervals_excluded"] == 1
-        refresh_intervals = list(counter_intervals(iter([dict(sample=sample,warmup=str(warmup),qpc=qpc,qpc_frequency=1000000)
-              for sample,warmup,qpc in ((1,0,1000000),(2,0,1010000),(3,1,1020000),(4,0,1030000),(5,0,1040000))]), None))
-        assert len(refresh_intervals) == 2
-        assert [int(rows[0]["sample"]) for rows, wall in refresh_intervals] == [2,5]
-        assert all(math.isclose(wall, .01) for rows, wall in refresh_intervals)
-        # A CPU interval crossing menu->Playing is excluded; counter IDs do not join CPU IDs.
-        window_frames = [{**row, "session_phase": 1 if int(row["frame"]) in (2,3) else 0} for row in frames]
-        write("performance.csv", window_frames)
-        write("utilization/cpu-process.csv", [dict(sample=sample, warmup=0, wall_seconds=.02, cpu_seconds=cpu,
-              qpc=qpc, qpc_frequency=1000000, logical_processors=20)
-              for sample,qpc,cpu in ((1,1020000,.02),(2,1040000,.04))])
-        write("utilization/nvidia-whole-gpu.csv", [dict(qpc=qpc,qpc_frequency=1000000,uuid="GPU-A",pci_bus_id="PCI-A",name="fixture",gpu_percent=value)
-              for qpc,value in ((1010000,90),(1030000,10))])
-        windowed = analyze(directory)[0]
-        assert math.isclose(windowed["playing_utilization"]["window_seconds"], .02)
-        assert windowed["playing_utilization"]["process_cpu"]["weighted_core_equivalents"] == 2
-        assert math.isclose(windowed["playing_utilization"]["process_cpu"]["sampled_wall_seconds"], .02)
-        assert not windowed["playing_utilization"]["process_gpu"]["busiest_engine_percent"]["available"]
-        assert windowed["playing_utilization"]["nvidia_device_context"][0]["metrics"]["gpu_percent"]["mean"] == 10
-        assert windowed["overall"]["phase_frames"] == {"main_menu":2,"playing":2}
-        assert windowed["playing"]["fps_contiguous_same_phase_config"]["fps"] is None
-        write("performance.csv", frames)
-        write("gpu_live.csv", gpu[:-2])
-        partial = analyze(directory)
-        assert not partial[0]["capture_complete"] and partial[0]["analysis_status"] == "partial"
-        write_outputs(directory, partial)
-        assert (directory / "REPORT.md").exists() and not json_read(directory / "summary.json")["capture_complete"]
-        text = (directory / "REPORT.md").read_text(encoding="utf-8")
-        assert "Per-configuration Playing FPS" in text and "shared work, not isolated option cost" in text
-        assert "NVIDIA whole-device context" in text and "GPU-A" in text
-        assert f"all {len(graphics.LEGACY_OPTIONS)} graphics options" in text and "Amortized ms / completed frame" in text
-        assert text.index("CPU stage wall time (Playing only)") < text.index("CPU stage wall time (overall")
-        for revision in (1,2):
-            section = text.split(f"Config {revision}: all {len(graphics.LEGACY_OPTIONS)} graphics options (Playing)",1)[1]
-            table = section.split("|---|---|---|---|---|---|",1)[1].strip().splitlines()[:len(graphics.LEGACY_OPTIONS)]
-            assert len(table) == len(graphics.LEGACY_OPTIONS) and {line.split("|")[1].strip() for line in table} == set(graphics.LEGACY_OPTIONS)
-            assert all(line.split("|")[-2].strip() == "N/A" for line in table)
-            geometry_row = next(line for line in table if line.startswith("| geometry_quality |"))
-            reconstruction_row = next(line for line in table if line.startswith("| reconstruction_quality |"))
-            if revision == 1: assert "surface: 1.000" in geometry_row and "surface: 1.000" in reconstruction_row
-            assert all(option["isolated_option_ms"] is None for config in options["configurations"] for option in config["options"])
-        write("performance.csv", [frames[0], frames[1], frames[3]])
-        write("gpu_live.csv", [row for row in gpu if row["completed_frame"] != 3])
-        sparse = analyze(directory)[0]
-        assert sparse["cpu_missing_frame_ids"] == 1
-        assert math.isclose(sparse["overall"]["fps_contiguous_same_phase_config"]["fps"], 50)
-        write("performance.csv", [{**row, "session_phase": 0} for row in frames])
-        no_play = analyze(directory)[1]
-        assert no_play["errors"] and all(not c["available"] for c in no_play["configurations"])
-        assert sum(len(rows) for rows in no_play["settings_receipts"].values()) == 2 * len(graphics.LEGACY_OPTIONS)
-        invalid = Stats(); invalid.add(float("nan")); invalid.add(-1)
-        assert invalid.result()["mean"] is None
-        json.dumps(sparse, allow_nan=False)
-        (directory / "diagnostics.json").write_text('{"complete":false,"invalid":NaN}', encoding="utf-8")
-        write("performance.csv", [{"frame":1,"unexpected_column":0}])
-        malformed = analyze(directory)
-        assert not malformed[0]["capture_complete"] and malformed[0]["issues"]
-        write_outputs(directory, malformed)
-        assert json_read(directory / "summary.json")["analysis_status"] == "partial"
-    print("PASS sparse/QPC FPS, config owner join, per-pass CPU timing, unknown Copy N/A, supplemental GPU provenance/overlap/refresh warmup, Playing windows/foreground, missing tail partial outputs, no Playing receipts, actual Debug/Release/unknown build limits, optional CPU graph subsets/residuals, independent Streamline actual-present QPC counts and finite JSON")
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("directory", type=Path, nargs="?")
-    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("directory", type=Path)
     arguments = parser.parse_args()
-    if arguments.self_test: self_test()
-    else:
-        if arguments.directory is None or not arguments.directory.is_dir(): parser.error("an existing capture directory is required")
-        result = analyze(arguments.directory)
-        write_outputs(arguments.directory, result)
-        print(f"{result[0]['analysis_status']}: {arguments.directory / 'REPORT.md'}")
-        if result[0]["analysis_status"] != "complete": raise SystemExit(2)
+    if not arguments.directory.is_dir(): parser.error("an existing capture directory is required")
+    result = analyze(arguments.directory)
+    write_outputs(arguments.directory, result)
+    print(f"{result[0]['analysis_status']}: {arguments.directory / 'REPORT.md'}")
+    if result[0]["analysis_status"] != "complete": raise SystemExit(2)

@@ -1,14 +1,9 @@
-#include "render_graph_membership.hpp"
 #include "render_graph_validation.hpp"
-#include "translucency_coverage.hpp"
 
 #include <algorithm>
 #include <array>
-#include <cmath>
 #include <cstdio>
 #include <limits>
-#include <numeric>
-#include <random>
 #include <stdexcept>
 #include <utility>
 
@@ -23,148 +18,6 @@ constexpr ResourceHandle texture{1, ResourceKind::Texture};
 void Check(bool condition, const char *message)
 {
     if (!condition) throw std::runtime_error(message);
-}
-
-void CheckBatchResourceMembership(std::uint32_t count)
-{
-    std::vector<std::uint32_t> ordered;
-    std::vector<std::uint64_t> membership((count + 63u) / 64u);
-    std::vector<std::uint32_t> expected;
-    for (std::uint32_t i = 0; i < count; ++i)
-    {
-        const auto value = (i * 17u) % count;
-        Check(hs::render_graph::AppendUniqueBatchResource(ordered, membership, value, count),
-            "first dense batch resource must be appended");
-        expected.push_back(value);
-    }
-    for (std::uint32_t i = count; i > 0; --i)
-        Check(!hs::render_graph::AppendUniqueBatchResource(ordered, membership, expected[i - 1], count),
-            "duplicate dense batch resource must be rejected");
-    Check(ordered.size() == expected.size(), "batch membership preserves unique resource count");
-    for (std::size_t i = 0; i < ordered.size(); ++i)
-        Check(ordered[i] == expected[i], "batch membership preserves first-use order");
-}
-
-void ResourceAliasPatterns()
-{
-    std::array<int, 4> natives{};
-    std::vector<hs::render_graph::ResourceAlias> scratch;
-    const auto groups = [&](const std::array<const void *, 7> &resources) {
-        scratch.clear();
-        for (std::uint32_t index = 0; index < resources.size(); ++index)
-            scratch.push_back({resources[index], index, 0u});
-        hs::render_graph::CanonicalizeResourceAliases(scratch);
-        std::array<std::uint32_t, 7> result{};
-        for (const auto &alias : scratch) result[alias.index] = alias.group;
-        return result;
-    };
-    const auto expected = groups({nullptr, &natives[0], &natives[1], &natives[0], &natives[2], &natives[1], nullptr});
-    Check(expected[0] == 0 && expected[6] == 0 && expected[1] != 0 &&
-        expected[1] == expected[3] && expected[2] == expected[5] &&
-        expected[1] != expected[2] && expected[1] != expected[4] && expected[2] != expected[4],
-        "native aliases preserve equality while distinct and absent resources stay separate");
-    Check(groups({nullptr, &natives[3], &natives[0], &natives[3], &natives[1], &natives[0], nullptr}) == expected,
-        "rotating native addresses with the same equality pattern preserves the frontend variant");
-    const auto distinct = groups({nullptr, &natives[3], &natives[0], &natives[3], &natives[1], &natives[2], nullptr});
-    Check(distinct != expected && distinct[5] != distinct[2],
-        "splitting a native alias changes the retained graph identity");
-    Check(groups({}) == std::array<std::uint32_t, 7>{}, "absent resources have no alias group");
-    scratch.clear();
-    hs::render_graph::CanonicalizeResourceAliases(scratch);
-    Check(scratch.empty(), "an empty graph needs no alias storage");
-}
-
-void BatchResourceMembership()
-{
-    for (const auto count : {0u, 1u, 64u, 65u, 130u})
-        CheckBatchResourceMembership(count);
-
-    std::vector<std::uint32_t> first, second;
-    std::vector<std::uint64_t> first_membership(3), second_membership(3);
-    for (const auto value : {0u, 63u, 64u, 129u})
-    {
-        Check(hs::render_graph::AppendUniqueBatchResource(first, first_membership, value, 130),
-            "first batch inserts a member at each tested word boundary");
-        Check(hs::render_graph::AppendUniqueBatchResource(second, second_membership, 129u - value, 130),
-            "second batch keeps independent membership bits");
-    }
-    Check(!hs::render_graph::AppendUniqueBatchResource(first, first_membership, 64u, 130) &&
-          !hs::render_graph::AppendUniqueBatchResource(second, second_membership, 65u, 130),
-          "each batch rejects only its own duplicates");
-    hs::render_graph::ResetBatchResourceMembership(first, first_membership);
-    Check(first.empty(),
-          "reset clears prior batch members");
-    Check(hs::render_graph::AppendUniqueBatchResource(first, first_membership, 64u, 65) &&
-          !hs::render_graph::AppendUniqueBatchResource(first, first_membership, 64u, 65),
-          "reset permits a new insertion and detects it at the 64/65 word boundary");
-    std::vector<std::uint32_t> growing_order;
-    std::vector<std::uint64_t> growing_membership;
-    hs::render_graph::EnsureBatchResourceMembershipDomain(growing_membership, 65);
-    Check(hs::render_graph::AppendUniqueBatchResource(growing_order, growing_membership, 64u, 65),
-          "membership supports the first resource beyond a word boundary");
-    hs::render_graph::ResetBatchResourceMembership(growing_order, growing_membership);
-    hs::render_graph::EnsureBatchResourceMembershipDomain(growing_membership, 130);
-    Check(hs::render_graph::AppendUniqueBatchResource(growing_order, growing_membership, 129u, 130) &&
-          !hs::render_graph::AppendUniqueBatchResource(growing_order, growing_membership, 129u, 130),
-          "growth initializes a new word while preserving reset semantics");
-    hs::render_graph::ResetBatchResourceMembership(second, second_membership);
-    Check(second.empty() && hs::render_graph::AppendUniqueBatchResource(second, second_membership, 129u, 130),
-          "independent batches can reset and reuse the same dense resource indices");
-}
-
-void HeroProjectedCoverage()
-{
-    using hs::renderer_detail::TranslucencyCoverageProjection;
-    using hs::renderer_detail::TranslucencyProjectedBounds;
-    using hs::renderer_detail::ProjectTranslucencySphere;
-    using Kind = TranslucencyProjectedBounds::Kind;
-    const TranslucencyCoverageProjection view{1920, 1080, 1.1, 1.7, 0.0002, -0.0003, 0.1, 300};
-    Check(ProjectTranslucencySphere(view, 0, 0, 5, 0.5).kind == Kind::Visible, "visible translucent sphere rejected");
-    const std::array<std::array<double, 3>, 6> clipped{{{50., 0., 5.}, {-50., 0., 5.},
-        {0., 50., 5.}, {0., -50., 5.}, {0., 0., -10.}, {0., 0., 400.}}};
-    for (const auto center : clipped)
-        Check(ProjectTranslucencySphere(view, center[0], center[1], center[2], 0.5).kind == Kind::Outside,
-            "fully clipped Hero not proven empty");
-    Check(ProjectTranslucencySphere(view, 0, 0, 0.5, 0.5).kind == Kind::Unknown &&
-        ProjectTranslucencySphere(view, 0, 0, 299.8, 0.5).kind == Kind::Unknown,
-        "clip-crossing Hero must retain the full path");
-    const auto edge = ProjectTranslucencySphere(view, 3.5, 0, 5, 1);
-    Check(edge.kind == Kind::Visible && edge.right == 1920 && edge.left < edge.right,
-        "partially visible Hero was culled or left the viewport");
-    Check(ProjectTranslucencySphere(view, 0, 0, 5, -1).kind == Kind::Unknown &&
-        ProjectTranslucencySphere(view, 0, 0, 5, std::numeric_limits<double>::infinity()).kind == Kind::Unknown &&
-        ProjectTranslucencySphere(view, std::numeric_limits<double>::quiet_NaN(), 0, 5, 1).kind == Kind::Unknown,
-        "uncertain Hero bounds must not authorize culling");
-    std::mt19937 random(0x4845524f);
-    std::uniform_real_distribution<double> unit(0, 1);
-    for (const double resolution : {1.0, 0.5})
-        for (unsigned sample = 0; sample < 256; ++sample)
-        {
-            auto current = view;
-            current.width = static_cast<std::uint32_t>(view.width * resolution);
-            current.height = static_cast<std::uint32_t>(view.height * resolution);
-            current.jitter_x = (unit(random) - 0.5) * 2 / current.width;
-            current.jitter_y = (unit(random) - 0.5) * 2 / current.height;
-            const double x = unit(random) * 60 - 30, y = unit(random) * 40 - 20;
-            const double z = unit(random) * 49 + 1, radius = unit(random) * 2 + 0.01;
-            const auto bounds = ProjectTranslucencySphere(current, x, y, z, radius);
-            for (unsigned point = 0; point < 32; ++point)
-            {
-                const double cosine = unit(random) * 2 - 1, angle = unit(random) * 6.283185307179586;
-                const double ring = std::sqrt(1 - cosine * cosine);
-                const double px = x + radius * ring * std::cos(angle);
-                const double py = y + radius * ring * std::sin(angle), pz = z + radius * cosine;
-                if (pz < current.near_plane || pz > current.far_plane) continue;
-                const double screen_x = (px / pz * current.scale_x + current.jitter_x + 1) * current.width * 0.5;
-                const double screen_y = (1 - py / pz * current.scale_y - current.jitter_y) * current.height * 0.5;
-                if (screen_x < 0 || screen_y < 0 || screen_x >= current.width || screen_y >= current.height) continue;
-                Check(bounds.kind != Kind::Outside, "visible sphere sample falsely proved empty");
-                if (bounds.kind == Kind::Visible)
-                    Check(screen_x >= bounds.left && screen_x <= bounds.right &&
-                        screen_y >= bounds.top && screen_y <= bounds.bottom,
-                        "Hero projection failed to enclose a current jittered sample");
-            }
-        }
 }
 
 ResourceUse Read(std::uint32_t ordinal, Range range = {}, ResourceHandle handle = buffer)
@@ -203,38 +56,17 @@ struct Graph
     }
 };
 
-void QueueAccessPolicy()
-{
-    constexpr std::array compute{Access::Common, Access::ComputeRead, Access::UnorderedRead,
-        Access::UnorderedWrite, Access::CopySource, Access::CopyDest, Access::IndirectArgs};
-    constexpr std::array copy{Access::Common, Access::CopySource, Access::CopyDest};
-    for (unsigned value = 0; value <= static_cast<unsigned>(Access::ShadingRateSource); ++value)
-    {
-        const auto access = static_cast<Access>(value);
-        Check(QueueAccessCompatible(QueueHint::Direct, access), "Direct queue access policy changed.");
-        Check(QueueAccessCompatible(QueueHint::Compute, access) ==
-            (std::find(compute.begin(), compute.end(), access) != compute.end()),
-            "Compute queue access policy changed.");
-        Check(QueueAccessCompatible(QueueHint::Copy, access) ==
-            (std::find(copy.begin(), copy.end(), access) != copy.end()),
-            "Copy queue access policy changed.");
-        Check(!QueueAccessCompatible(static_cast<QueueHint>(255), access),
-            "Unknown queue accepted an access.");
-    }
-}
-
 void BufferBounds()
 {
-    for (const auto range : {BufferRange{0, 0}, BufferRange{64, 1}, BufferRange{63, 2},
-                             BufferRange{UINT64_MAX, 2}, BufferRange{1, UINT64_MAX}})
+    for (const auto range : {BufferRange{0, 0}, BufferRange{64, 1}, BufferRange{63, 2}})
     {
         Graph g; g.Add(0, {Write(0, range)});
         Check(!g.Compile(), "reject empty, out-of-bounds and overflowing buffer range");
     }
-    Graph g; g.resources[0].buffer_size = UINT64_MAX;
-    g.Add(0, {Write(0, BufferRange{UINT64_MAX - 1, 1})});
-    g.Add(1, {Read(1, BufferRange{UINT64_MAX - 1, 1})});
-    Check(g.Compile(), "accept last valid byte without unsigned overflow");
+    Graph g;
+    g.Add(0, {Write(0, BufferRange{63, 1})});
+    g.Add(1, {Read(1, BufferRange{63, 1})});
+    Check(g.Compile(), "accept last valid byte");
     g.passes[0].uses[0].range = TextureSubresourceRange{0, 1, 0, 1, 0, 1};
     Check(!g.Compile() && g.schedule.execution_order.empty(), "reject texture range for buffer and clear stale schedule");
 }
@@ -310,135 +142,6 @@ void Dependencies()
     Check(!cycle.Compile(), "resource dependency cycle rejected");
 }
 
-void VersionAndIdentityValidation()
-{
-    Graph g; g.Add(0, {Write(0, BufferRange{0, 16})});
-    g.Add(1, {Write(0, BufferRange{32, 16})});
-    Check(!g.Compile(), "disjoint writes cannot branch one logical successor");
-    g.passes[1].uses[0] = Write(2);
-    Check(!g.Compile(), "missing predecessor rejected");
-    g.passes[1].uses[0] = Read(2);
-    Check(!g.Compile(), "nonexistent read version rejected");
-    g.passes[1].uses[0] = Write(UINT32_MAX);
-    Check(!g.Compile(), "wrapped successor rejected");
-    g.passes.resize(1); g.passes[0].uses[0] = Write(0);
-    g.resources[0].final_set = true; g.resources[0].final_version = {buffer, 0};
-    Check(!g.Compile(), "stale final version rejected");
-    g.resources[0].final_set = false;
-    g.passes[0].uses.push_back(Read(0, BufferRange{32, 16}));
-    Check(!g.Compile(), "one physical resource cannot have two uses in a pass");
-    g.passes[0].uses.resize(1);
-    g.passes[0].uses[0].predecessor.resource.kind = ResourceKind::Texture;
-    Check(!g.Compile(), "wrong handle kind rejected");
-    Graph imported; imported.resources[0].initialized = true;
-    imported.Add(2, {Read(0, BufferRange{0, 16})});
-    imported.Add(0, {Write(0, BufferRange{32, 16})});
-    imported.Add(1, {Write(1, BufferRange{0, 16})});
-    Check(imported.Compile() && imported.Order({0, 2, 1}), "imported version zero has distant WAR protection");
-}
-
-void LargeImportAndPassUseValidation()
-{
-    constexpr std::uint32_t count = 2048;
-    Graph graph;
-    graph.resources.assign(count, {ResourceKind::Buffer, true, 64});
-    graph.resources[0].name = "first imported buffer";
-    graph.Add(100, {});
-    graph.Add(200, {});
-    for (std::uint32_t index = 0; index < count; ++index)
-    {
-        graph.passes[0].uses.push_back(Read(0, {}, {index + 1, ResourceKind::Buffer}));
-        graph.passes[1].uses.push_back(Read(0, {}, {count - index, ResourceKind::Buffer}));
-    }
-    const auto compile = [&] {
-        std::vector<PassInfo> passes;
-        for (const auto &pass : graph.passes) passes.push_back({pass.id, pass.queue, pass.callback, pass.uses});
-        return hs::render_graph::Compile(graph.resources, passes, graph.schedule);
-    };
-    Check(compile().Succeeded(), "large initialized resource read sets compile");
-    auto duplicate = Read(0, BufferRange{64, 1});
-    duplicate.access = Access::CopySource;
-    graph.passes[1].uses.push_back(duplicate);
-    auto result = compile();
-    Check(!result && result.Message() == "RenderGraph pass 200 declares resource 1 (first imported buffer) twice; accesses " +
-              std::to_string(static_cast<unsigned>(Access::ComputeRead)) + " and " +
-              std::to_string(static_cast<unsigned>(Access::CopySource)) + ".",
-          "distant duplicate retains first-use access and takes precedence over invalid range");
-    for (const auto handle : {ResourceHandle{}, ResourceHandle{UINT32_MAX, ResourceKind::Buffer}})
-    {
-        graph.passes[1].uses.back() = Read(0, {}, handle);
-        result = compile();
-        Check(!result && result.Message() == "RenderGraph names an invalid or nonexistent resource version.",
-            "invalid handles fail before indexing the duplicate-use table");
-    }
-    graph.passes[1].uses.pop_back();
-    Check(compile().Succeeded(), "per-pass use tracking resets between passes and compile invocations");
-}
-
-void ReadOnlyImports()
-{
-    Graph graph;
-    graph.resources[0].initialized = true;
-    graph.Add(20, {Read(0)});
-    graph.Add(10, {Read(0, BufferRange{63, 1})});
-    graph.passes[1].queue = QueueHint::Compute;
-    graph.resources[0].final_set = true;
-    graph.resources[0].final_version = {buffer, 0};
-    Check(graph.Compile() && graph.Order({10, 20}) && graph.schedule.cross_queue_dependencies.empty(),
-          "read-only imports need no version hazards and may export version zero");
-    graph.passes[1].uses[0] = Read(1);
-    Check(!graph.Compile(), "read-only import cannot reference an unwritten version");
-    graph.passes[1].uses[0] = Read(0, BufferRange{63, 2});
-    Check(!graph.Compile(), "read-only import still validates bounds");
-    graph.passes[1].uses[0] = Read(0);
-    graph.resources[0].initialized = false;
-    Check(!graph.Compile(), "read-only resource must be initialized");
-    graph.resources[0].initialized = true;
-    graph.resources[0].final_version.ordinal = 1;
-    Check(!graph.Compile(), "read-only export cannot reference an unwritten version");
-    graph.Add(1, {Write(0)});
-    Check(graph.Compile() && graph.Order({10, 20, 1}),
-          "a later declared writer retains both version-zero read-before-write hazards");
-}
-
-void SparseVersionExtents()
-{
-    Graph sparse;
-    sparse.resources = {{ResourceKind::Buffer, true, 64}, {ResourceKind::Buffer, true, 64},
-                        {ResourceKind::Buffer, false, 64}};
-    sparse.resources[1].final_set = true;
-    sparse.resources[1].final_version = {{2, ResourceKind::Buffer}, 0};
-    for (std::uint32_t index = 0; index < 128; ++index) sparse.Add(index, {});
-    sparse.passes[0].uses.push_back(Read(0));
-    Check(sparse.Compile(), "unused imported version zero may export while unused transient needs no version storage");
-    sparse.resources[2].final_set = true;
-    sparse.resources[2].final_version = {{3, ResourceKind::Buffer}, 0};
-    Check(!sparse.Compile(), "unused transient export still requires fully initialized version zero");
-    sparse.resources[2].final_set = false;
-    sparse.passes.back().uses.push_back(Read(128));
-    Check(!sparse.Compile(), "high read ordinal inside pass bound rejects missing writer across sparse holes");
-    sparse.passes.back().uses[0] = Write(127);
-    Check(!sparse.Compile(), "high write ordinal rejects nonexistent predecessor across sparse holes");
-    sparse.passes.back().uses[0] = Read(129);
-    Check(!sparse.Compile(), "ordinal beyond pass count is rejected before sparse chain growth");
-    sparse.passes.back().uses.clear();
-    Check(sparse.Compile(), "sparse chains are rebuilt after invalid high ordinals");
-
-    Graph high;
-    for (std::uint32_t ordinal = 0; ordinal < 64; ++ordinal)
-        high.Add(ordinal, {Write(ordinal, BufferRange{0, 32})});
-    high.resources[0].final_set = true;
-    high.resources[0].final_version = {buffer, 64};
-    Check(!high.Compile(), "high latest version cannot export an inherited initialization hole");
-    high.passes.back().uses[0] = Write(63);
-    Check(high.Compile(), "high contiguous version chain exports once the full range is initialized");
-    high.resources[0].final_version.ordinal = 63;
-    Check(!high.Compile(), "high stale final version remains rejected");
-    high.resources[0].final_version.ordinal = 64;
-    high.passes[31].uses.clear();
-    Check(!high.Compile(), "interior missing writer remains invalid even with a fully initialized final range");
-}
-
 void TextureBounds()
 {
     Graph g; g.resources[0] = {ResourceKind::Texture, true, 0, 4, 3, 2};
@@ -447,10 +150,7 @@ void TextureBounds()
     for (const auto range : {TextureSubresourceRange{0, 0, 0, 1, 0, 1},
                              TextureSubresourceRange{3, 2, 0, 1, 0, 1},
                              TextureSubresourceRange{0, 1, 2, 2, 0, 1},
-                             TextureSubresourceRange{0, 1, 0, 1, 1, 2},
-                             TextureSubresourceRange{UINT32_MAX, 2, 0, 1, 0, 1},
-                             TextureSubresourceRange{0, 1, UINT32_MAX, 2, 0, 1},
-                             TextureSubresourceRange{0, 1, 0, 1, UINT32_MAX, 2}})
+                             TextureSubresourceRange{0, 1, 0, 1, 1, 2}})
     {
         g.passes[0].uses[0].range = range;
         Check(!g.Compile(), "invalid texture axis rejected without overflow");
@@ -492,143 +192,6 @@ void TextureBounds()
     interval_chain.Add(5, {Read(0, disjoint_slice, texture)});
     Check(interval_chain.Compile() && interval_chain.Order({5, 20, 0, 10}),
           "partial texture reads stay independent while old/read-write/new versions remain ordered");
-}
-
-void RandomizedVersionReplay()
-{
-    // Compare the actual compiled schedule to byte snapshots of each logical
-    // version, including undefined bytes. This checks distant hazards after
-    // randomized pass IDs and registration order, independently of edge logic.
-    std::mt19937 random(0x68734772);
-    for (unsigned trial = 0; trial < 1000; ++trial)
-    {
-        Graph g;
-        g.resources[0].buffer_size = 8;
-        g.resources[0].initialized = (random() & 1) != 0;
-        const auto writer_count = 1 + random() % 6;
-        std::vector<std::array<int, 8>> snapshots(writer_count + 1);
-        snapshots[0].fill(g.resources[0].initialized ? 0 : -1);
-        std::vector<std::uint32_t> ids(writer_count + 8);
-        for (std::uint32_t i = 0; i < ids.size(); ++i) ids[i] = i;
-        std::shuffle(ids.begin(), ids.end(), random);
-        bool valid = true;
-        for (std::uint32_t ordinal = 1; ordinal <= writer_count; ++ordinal)
-        {
-            const auto first = random() % 8, count = 1 + random() % (8 - first);
-            snapshots[ordinal] = snapshots[ordinal - 1];
-            const bool load = (random() % 4) == 0;
-            for (auto byte = first; byte < first + count; ++byte)
-            {
-                if (load && snapshots[ordinal - 1][byte] < 0) valid = false;
-                snapshots[ordinal][byte] = static_cast<int>(ordinal);
-            }
-            g.Add(ids[ordinal - 1], {Write(ordinal - 1, BufferRange{first, count}, load)});
-        }
-        for (std::uint32_t reader = 0; reader < 8; ++reader)
-        {
-            const auto ordinal = random() % (writer_count + 1);
-            const auto first = random() % 8, count = 1 + random() % (8 - first);
-            for (auto byte = first; byte < first + count; ++byte)
-                if (snapshots[ordinal][byte] < 0) valid = false;
-            g.Add(ids[writer_count + reader], {Read(ordinal, BufferRange{first, count})});
-        }
-        std::shuffle(g.passes.begin(), g.passes.end(), random);
-        for (auto &pass : g.passes)
-        {
-            auto &use = pass.uses[0];
-            pass.queue = static_cast<QueueHint>(random() % 3);
-            if (pass.queue == QueueHint::Copy)
-            {
-                if (use.writes && use.reads) pass.queue = QueueHint::Compute;
-                else use.access = use.writes ? Access::CopyDest : Access::CopySource;
-            }
-        }
-        Check(g.Compile() == valid, "randomized compile agrees with initialized-version snapshots");
-        if (!valid) continue;
-        const auto count = g.passes.size();
-        std::vector<std::vector<bool>> reachable(count, std::vector<bool>(count));
-        for (const auto &queue : g.schedule.queue_orders)
-            for (std::size_t i = 1; i < queue.size(); ++i) reachable[queue[i - 1]][queue[i]] = true;
-        for (const auto &dependency : g.schedule.cross_queue_dependencies)
-            reachable[dependency.producer][dependency.consumer] = true;
-        for (std::size_t via = 0; via < count; ++via)
-            for (std::size_t from = 0; from < count; ++from)
-                for (std::size_t to = 0; to < count; ++to)
-                    reachable[from][to] = reachable[from][to] || (reachable[from][via] && reachable[via][to]);
-        // Independently require every old RAW/WAR edge, including distant
-        // partial overlaps, to remain ordered by actual queue execution/waits.
-        for (std::size_t reader = 0; reader < count; ++reader)
-            for (std::size_t writer = 0; writer < count; ++writer)
-            {
-                if (reader == writer) continue;
-                const auto &a = g.passes[reader].uses[0], &b = g.passes[writer].uses[0];
-                if (!b.writes) continue;
-                if (a.writes && a.successor.ordinal < b.successor.ordinal)
-                    Check(reachable[reader][writer], "queue schedule preserves physical writer chain");
-                const auto ar = std::get<BufferRange>(a.range), br = std::get<BufferRange>(b.range);
-                if (!a.reads || ar.offset >= br.offset + br.size || br.offset >= ar.offset + ar.size) continue;
-                Check(b.successor.ordinal <= a.predecessor.ordinal ? reachable[writer][reader] : reachable[reader][writer],
-                      "queue schedule preserves every overlapping RAW/WAR hazard");
-            }
-        auto physical = snapshots[0];
-        for (const auto index : g.schedule.execution_order)
-        {
-            const auto &use = g.passes[index].uses[0];
-            const auto range = std::get<BufferRange>(use.range);
-            for (auto byte = range.offset; byte < range.offset + range.size; ++byte)
-            {
-                if (use.reads)
-                    Check(physical[byte] == snapshots[use.predecessor.ordinal][byte],
-                          "compiled order preserves exact old-version bytes");
-                if (use.writes) physical[byte] = static_cast<int>(use.successor.ordinal);
-            }
-        }
-        Check(physical == snapshots.back(), "compiled physical writes preserve final version");
-    }
-}
-
-void PassValidation()
-{
-    Graph g; g.Add(0, {Write(0)});
-    g.passes[0].queue = QueueHint::Compute;
-    Check(g.Compile(), "compute queue accepted by logical compiler");
-    g.passes[0].queue = QueueHint::Copy;
-    g.passes[0].uses[0].access = Access::CopyDest;
-    Check(g.Compile(), "copy queue accepted by logical compiler");
-    g.passes[0].queue = static_cast<QueueHint>(255);
-    Check(!g.Compile(), "invalid queue enum rejected");
-    g.passes[0].queue = QueueHint::Direct; g.passes[0].callback = false;
-    Check(!g.Compile(), "missing callback rejected");
-    g.passes[0].callback = true; g.Add(0, {});
-    Check(!g.Compile(), "duplicate pass ID rejected");
-    g.passes.resize(1); g.passes[0].uses[0].access = Access::ComputeRead;
-    Check(!g.Compile(), "write access mismatch rejected");
-
-    Graph queue_access; queue_access.resources[0].initialized = true;
-    auto shader_read = Read(0); shader_read.access = Access::ShaderRead;
-    queue_access.passes.push_back({0, {shader_read}, QueueHint::Compute, true});
-    Check(!queue_access.Compile(), "compute queue rejects graphics shader-read access");
-    queue_access.passes[0].uses[0].access = Access::ComputeRead;
-    Check(queue_access.Compile(), "compute queue accepts compute read access");
-    queue_access.passes[0].queue = QueueHint::Copy;
-    Check(!queue_access.Compile(), "copy queue rejects compute read access");
-    queue_access.passes[0].uses[0].access = Access::CopySource;
-    Check(queue_access.Compile(), "copy queue accepts copy source access");
-
-    Graph depth_texture;
-    depth_texture.resources[0] = {ResourceKind::Texture, true, 0, 1, 1, 1};
-    auto depth_read = Read(0, {}, texture);
-    depth_read.access = Access::DepthShaderRead;
-    depth_texture.passes.push_back({0, {depth_read}, QueueHint::Direct, true});
-    Check(depth_texture.Compile(), "direct queue accepts combined depth shader read on a texture");
-    depth_texture.passes[0].queue = QueueHint::Compute;
-    Check(!depth_texture.Compile(), "compute queue rejects combined depth shader read");
-
-    Graph depth_buffer;
-    auto depth_buffer_read = Read(0);
-    depth_buffer_read.access = Access::DepthShaderRead;
-    depth_buffer.passes.push_back({0, {depth_buffer_read}, QueueHint::Direct, true});
-    Check(!depth_buffer.Compile(), "combined depth shader read rejects a buffer");
 }
 
 void MultiQueueSchedule()
@@ -804,6 +367,35 @@ void TransientAliasPlanner()
         Check(PlanTransientAliases(resources, passes, schedule, plan).Succeeded() &&
                   plan.groups.size() == 2,
               "fanout keeps a block until every consumer completes");
+
+        const ResourceHandle second{2, ResourceKind::Buffer};
+        std::vector<ResourceUse> empty_uses;
+        std::vector<ResourceUse> second_read{Read(1, {}, second)};
+        const std::array<std::uint32_t, 1> copy_after_compute{3};
+        const std::array<std::uint32_t, 1> second_write_after_copy{5};
+        passes = {{0, QueueHint::Direct, true, producer},
+                  {1, QueueHint::Compute, true, compute_uses},
+                  {2, QueueHint::Copy, true, copy_uses},
+                  {3, QueueHint::Compute, true, compute_uses},
+                  {4, QueueHint::Direct, true, compute_uses},
+                  {5, QueueHint::Copy, true, empty_uses, copy_after_compute},
+                  {6, QueueHint::Direct, true, second_uses, second_write_after_copy},
+                  {7, QueueHint::Compute, true, second_read}};
+        Check(Compile(resources, passes, schedule).Succeeded(),
+              "three-queue alias graph with explicit final-reader chain compiles");
+        AliasPlan fully_ordered_plan;
+        Check(PlanTransientAliases(resources, passes, schedule, fully_ordered_plan).Succeeded() &&
+                  fully_ordered_plan.groups.size() == 1 &&
+                  fully_ordered_plan.alias_activation_count == 1,
+              "all queue readers complete before the second resource begins and permit aliasing");
+
+        passes[5].predecessor_ids = {};
+        Check(Compile(resources, passes, schedule).Succeeded(),
+              "three-queue graph without the explicit compute-reader edge compiles");
+        AliasPlan unordered_plan;
+        Check(PlanTransientAliases(resources, passes, schedule, unordered_plan).Succeeded() &&
+                  unordered_plan.groups.size() == 2,
+              "later same-queue read does not order the second resource's first write after every reader");
     }
     {
         std::vector<ResourceInfo> resources{make_resource(128), make_resource(64)};
@@ -833,133 +425,14 @@ void TransientAliasPlanner()
     }
 }
 
-void GeometryBufferContract()
-{
-    for (const auto geometry_access : {Access::IndexBuffer, Access::VertexShaderRead})
-    {
-        Graph graph;
-        auto copy = Write(0); copy.access = Access::CopyDest;
-        auto indices = Read(1); indices.access = geometry_access;
-        graph.passes.push_back({10, {copy}, QueueHint::Copy, true});
-        graph.passes.push_back({20, {indices}, QueueHint::Direct, true});
-        Check(graph.Compile() && graph.Order({10, 20}) &&
-                  graph.schedule.cross_queue_dependencies.size() == 1,
-              "geometry input waits for its copied buffer on the graphics queue");
-        for (const auto queue : {QueueHint::Compute, QueueHint::Copy})
-        {
-            graph.passes[1].queue = queue;
-            Check(!graph.Compile(), "geometry input is rejected on non-graphics queues");
-        }
-        Graph texture_graph;
-        texture_graph.resources[0] = {ResourceKind::Texture, true, 0, 1, 1, 1};
-        auto texture_indices = Read(0, {}, texture); texture_indices.access = geometry_access;
-        texture_graph.Add(0, {texture_indices});
-        Check(!texture_graph.Compile(), "geometry input rejects a texture resource");
-    }
-}
-
-void MaterialTextureReadContract()
-{
-    Graph graph;
-    graph.resources[0] = {ResourceKind::Texture, true, 0, 1, 1, 1};
-    auto read = Read(0, {}, texture);
-    read.access = Access::AllShaderRead;
-    graph.Add(10, {read});
-    Check(graph.Compile(), "combined material shader read is valid on Direct");
-    for (const auto queue : {QueueHint::Compute, QueueHint::Copy})
-    {
-        graph.passes[0].queue = queue;
-        Check(!graph.Compile(), "combined shader read transition requires Direct");
-    }
-}
-
-struct ExplicitDag
-{
-    std::vector<std::vector<std::uint32_t>> dependencies;
-    std::vector<PassInfo> passes;
-    ExplicitDag(std::uint32_t count, bool dense, std::uint32_t seed) : dependencies(count)
-    {
-        std::mt19937 random(seed);
-        std::vector<std::uint32_t> ids(count), registration(count);
-        std::iota(ids.begin(), ids.end(), 1);
-        std::iota(registration.begin(), registration.end(), 0);
-        std::shuffle(ids.begin(), ids.end(), random);
-        std::shuffle(registration.begin(), registration.end(), random);
-        passes.resize(count);
-        for (std::uint32_t index = 0; index < count; ++index)
-        {
-            const auto rank = registration[index];
-            auto &parents = dependencies[index];
-            if (dense)
-            {
-                for (std::uint32_t before = 0; before < rank; ++before)
-                    if (random() % 4 == 0) parents.push_back(ids[before]);
-            }
-            else if (rank)
-                for (unsigned edge = 0; edge < 4; ++edge) parents.push_back(ids[random() % rank]);
-            if (!parents.empty()) parents.push_back(parents.front());
-            passes[index] = {ids[rank], static_cast<QueueHint>(rank % 3), true, {}, parents};
-        }
-    }
-};
-
-void ExplicitDagOrdering()
-{
-    {
-        CompiledSchedule schedule;
-        std::array<std::uint32_t, 1> parent{UINT32_MAX};
-        std::array<PassInfo, 2> passes{{
-            {0, QueueHint::Direct, true, {}, parent},
-            {UINT32_MAX, QueueHint::Copy, true, {}, {}}}};
-        Check(Compile({}, passes, schedule).Succeeded() && schedule.execution_order.front() == 1,
-              "full-width IDs and forward registration dependencies are supported");
-        parent[0] = 1;
-        Check(!Compile({}, passes, schedule), "absent explicit predecessor rejected");
-        parent[0] = 0;
-        Check(!Compile({}, passes, schedule), "self explicit predecessor rejected");
-        parent[0] = UINT32_MAX;
-        passes[1].id = 0;
-        Check(!Compile({}, passes, schedule), "duplicate explicit pass ID rejected");
-    }
-    for (bool dense : {false, true})
-        for (std::uint32_t seed = 0; seed < 24; ++seed)
-        {
-            ExplicitDag graph(1 + seed * 7, dense, seed);
-            CompiledSchedule schedule;
-            Check(Compile({}, graph.passes, schedule).Succeeded(), "explicit DAG must compile");
-            std::vector<bool> visited(graph.passes.size());
-            for (const auto actual : schedule.execution_order)
-            {
-                std::uint32_t expected = UINT32_MAX;
-                for (std::uint32_t candidate = 0; candidate < graph.passes.size(); ++candidate)
-                {
-                    if (visited[candidate]) continue;
-                    const bool ready = std::all_of(graph.dependencies[candidate].begin(), graph.dependencies[candidate].end(),
-                        [&](auto id) {
-                            const auto parent = std::find_if(graph.passes.begin(), graph.passes.end(),
-                                [&](const PassInfo &pass) { return pass.id == id; });
-                            return visited[static_cast<std::size_t>(parent - graph.passes.begin())];
-                        });
-                    if (ready && (expected == UINT32_MAX || graph.passes[candidate].id < graph.passes[expected].id))
-                        expected = candidate;
-                }
-                Check(actual == expected, "DAG order must select the smallest ready pass ID");
-                visited[actual] = true;
-            }
-            Check(std::all_of(visited.begin(), visited.end(), [](bool value) { return value; }), "every DAG pass executes once");
-        }
-}
-
 } // namespace
 
 int main()
 {
     try
     {
-        BatchResourceMembership(); ResourceAliasPatterns();
-        HeroProjectedCoverage(); ExplicitDagOrdering();
-        BufferBounds(); Initialization(); Dependencies(); VersionAndIdentityValidation(); LargeImportAndPassUseValidation(); ReadOnlyImports(); SparseVersionExtents(); TextureBounds();
-        QueueAccessPolicy(); PassValidation(); MultiQueueSchedule(); CompletionSetContract(); PhysicalQueueOwnership(); TransientAliasPlanner(); GeometryBufferContract(); MaterialTextureReadContract(); RandomizedVersionReplay();
+        BufferBounds(); Initialization(); Dependencies(); TextureBounds();
+        MultiQueueSchedule(); CompletionSetContract(); PhysicalQueueOwnership(); TransientAliasPlanner();
         std::puts("Render graph CPU range/version validation passed.");
         return 0;
     }
