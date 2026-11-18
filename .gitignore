@@ -11,7 +11,6 @@
 /.desloppify/
 /.repowise/
 /.repowise-workspace/
-/build/
 /out/
 /Output/
 /Artifacts/
@@ -23,8 +22,6 @@
 /Library/
 /Cooked/
 /Generated/
-/GeneratedAudio/*
-!/GeneratedAudio/full_generation_plan.json
 __pycache__/
 *.py[cod]
 /tools/audio/.venv-*/
@@ -52,6 +49,12 @@ __pycache__/
 result.json
 timeline.csv
 events.ndjson
+/adapter.txt
+/dred_config.json
+/ContentSource/Models/Characters/Elin/Elin_preview.png
+/ContentSource/Models/Characters/Elin/validation/
+/ContentSource/Models/Environment/GroundDetail/**/preview/
+/ContentSource/Models/Environment/MeadowProps/**/preview/
 *.log
 *.dmp
 *.tmp
@@ -70,5 +73,4 @@ Desktop.ini
 *.blend[0-9]
 
 /.codex
-/.planning
 /.codex-remote-attachments
