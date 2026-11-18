@@ -1,7 +1,6 @@
 # Record visible play until the user or computer-use controller closes this game normally.
 [CmdletBinding()]
-param([string]$BuildDirectory='Build/msvc-debug',[string]$OutputDirectory,
-    [ValidateSet('HumanDebug','ComputerUsePerformance')][string]$Mode='HumanDebug',[string]$PythonExecutable)
+param([string]$BuildDirectory='Build/msvc-debug',[string]$OutputDirectory,[string]$PythonExecutable)
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $repoRoot=Split-Path $PSScriptRoot -Parent
@@ -10,25 +9,11 @@ function Native-Argument([string]$Value) {
     '"'+$Value+'"'
 }
 function Capture-Destination([string]$Value) {
-    if([string]::IsNullOrWhiteSpace($Value)){$Value=Join-Path $repoRoot ('Build/play-captures/'+[DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))}
+    if([string]::IsNullOrWhiteSpace($Value)){$Value=Join-Path $buildRoot ('Artifacts/play-captures/'+[DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'))}
     if(![IO.Path]::IsPathRooted($Value)){$Value=Join-Path $repoRoot $Value}
     $Value=[IO.Path]::GetFullPath($Value)
     if(Test-Path -LiteralPath $Value){throw 'Capture directory exists; recordings are never overwritten.'}
     $Value
-}
-function Capture-BuildPolicy([string]$CaptureMode,[string]$CacheText) {
-    if($CacheText-notmatch'(?m)^CMAKE_BUILD_TYPE:[^=]+=(Debug|Release)\r?$'){throw 'Capture requires an explicit Debug or Release build.'}
-    $buildType=$matches[1]
-    switch($CaptureMode){
-        'HumanDebug' {
-            if($buildType-ne'Debug'){throw 'HumanDebug requires Debug.'}
-        }
-        'ComputerUsePerformance' {
-            if($buildType-ne'Release'){throw 'ComputerUsePerformance requires Release.'}
-        }
-        default {throw 'Unknown capture mode.'}
-    }
-    [pscustomobject]@{build_type=$buildType;validation_enabled=($CaptureMode-eq'HumanDebug');gpu_validation_enabled=$false}
 }
 function Capture-Python([string]$CacheText,[string]$ExplicitExecutable) {
     $candidates=@()
@@ -51,47 +36,35 @@ function Publish-Session($Data,[string]$Path) {
 }
 if(![IO.Path]::IsPathRooted($BuildDirectory)){$BuildDirectory=Join-Path $repoRoot $BuildDirectory}
 $buildRoot=(Resolve-Path -LiteralPath $BuildDirectory).Path
-$binary=Join-Path $buildRoot 'ProjectHS.exe';$pack=Join-Path $buildRoot 'Content/content.hsp';$cache=Join-Path $buildRoot 'CMakeCache.txt'
+$binary=Join-Path $buildRoot 'bin/ProjectHS.exe'
+$pack=Join-Path $buildRoot 'bin/Content/content.hsp'
+$cache=Join-Path $buildRoot 'CMakeCache.txt'
 foreach($file in @($binary,$pack,$cache)){if(!(Test-Path -LiteralPath $file -PathType Leaf)){throw "Missing capture input: $file"}}
 $cacheText=[IO.File]::ReadAllText($cache)
-$buildPolicy=Capture-BuildPolicy $Mode $cacheText
-$computerUse=$Mode-eq'ComputerUsePerformance'
+if ($cacheText -notmatch '(?m)^CMAKE_BUILD_TYPE:[^=]+=Debug\r?$') { throw 'Play recording requires a Debug build with capture diagnostics.' }
 $python=Capture-Python $cacheText $PythonExecutable
 $windowsPowerShell=(Get-Command powershell.exe -ErrorAction Stop).Source
 $run=Capture-Destination $OutputDirectory
 New-Item -ItemType Directory -Path $run|Out-Null
-$sessionPath=Join-Path $run 'capture-session.json';$settingsPath=Join-Path $env:LOCALAPPDATA 'ProjectHS/settings.json'
-$gpuReadyFile=Join-Path $run 'renderer_features.jsonl'
-if(Test-Path -LiteralPath $settingsPath){Copy-Item -LiteralPath $settingsPath -Destination (Join-Path $run 'settings-before.json')}
-$arguments=@('--capture-diagnostics','--mute',('--artifacts='+$run),('--playtest-output='+(Join-Path $run 'playtest')))
-if($buildPolicy.validation_enabled){$arguments+='--validation'}
+$sessionPath=Join-Path $run 'capture-session.json'
+$gpuReadyFile=Join-Path $run 'diagnostics.json'
+$arguments=@('--capture-diagnostics','--validation','--mute',('--artifacts='+$run),('--playtest-output='+(Join-Path $run 'playtest')))
 $session=[ordered]@{
-    schema=1;state='starting';started_utc=[DateTime]::UtcNow.ToString('o');output_directory=$run;mode=$Mode;build_type=$buildPolicy.build_type;validation_enabled=$buildPolicy.validation_enabled;gpu_validation_enabled=$buildPolicy.gpu_validation_enabled;
-    temporary_invulnerable=$false;human_input=(!$computerUse);input_source=$(if($computerUse){'computer_use'}else{'human'});
-    settings_policy=$(if($computerUse){'isolated test profile; user settings preserved; run master output muted'}else{'normal user profile; user settings preserved; run master output muted'});
-    profile_local_app_data=$env:LOCALAPPDATA;profile_root=(Split-Path $settingsPath -Parent);python_executable=$python;
-    gpu_ready_file=$gpuReadyFile;gpu_counter_start_policy='wait_for_nonempty_gpu_ready_file; CPU/thread/NVIDIA start immediately';
-    executable=$binary;executable_sha256=(Get-FileHash -LiteralPath $binary).Hash;generation=$null;content_pack=$pack;
-    arguments=$arguments;stop_policy=$(if($computerUse){'computer-use controller closes game normally'}else{'user closes game'});pid=$null;process_start_ticks=$null;sampler_pid=$null;
+    schema=1;state='starting';started_utc=[DateTime]::UtcNow.ToString('o');output_directory=$run;build_type='Debug';validation_enabled=$true;gpu_validation_enabled=$false;
+    executable=$binary;executable_sha256=(Get-FileHash -LiteralPath $binary).Hash;content_pack=$pack;
+    arguments=$arguments;pid=$null;process_start_ticks=$null;sampler_pid=$null;
     game_exit_code=$null;sampler_exit_code=$null;analysis_exit_code=$null;complete=$false;error=$null
 }
 Publish-Session $session $sessionPath
-@($(if($computerUse){'Computer-use performance capture; the controller closes the game normally to finish.'}else{'Play normally in Project HS; close the game normally to finish.'}),
-  'Settings changes are recorded by revision; user settings preserved; run master output muted.',
-  'After exit the launcher writes REPORT.md, summary.json, option-costs.json and per-pass tables.',
-  'Raw CPU/GPU/VRAM/QPC/settings/events/input data stays local. Nothing is uploaded.',
-  'PID GPU engine usage is separate from NVIDIA whole-device metrics, which include other applications.',
-  'PDH GPU/System counters wait for renderer initialization; CPU/thread/NVIDIA sampling starts immediately.',
-  ($buildPolicy.build_type+' build; D3D12 validation='+$buildPolicy.validation_enabled+'; GPU validation='+$buildPolicy.gpu_validation_enabled+'. Measurement overhead is included. Unsupported counters/timestamps remain unavailable.'))|Set-Content -LiteralPath (Join-Path $run 'README.txt') -Encoding UTF8
 $game=$null;$sampler=$null
 try{
-    $game=Start-Process -FilePath $binary -WorkingDirectory $repoRoot -WindowStyle Normal -ArgumentList ($arguments|ForEach-Object{Native-Argument $_}) -RedirectStandardOutput (Join-Path $run 'stdout.log') -RedirectStandardError (Join-Path $run 'stderr.log') -PassThru
+    $game=Start-Process -FilePath $binary -WorkingDirectory $repoRoot -WindowStyle Normal -ArgumentList ($arguments|ForEach-Object{Native-Argument $_}) -RedirectStandardError (Join-Path $run 'stderr.log') -PassThru
     $null=$game.Handle
     $session.pid=$game.Id;$session.process_start_ticks=$game.StartTime.ToUniversalTime().Ticks
     $samplerArguments=@('-NoProfile','-ExecutionPolicy','Bypass','-File',(Native-Argument (Join-Path $PSScriptRoot 'sample-performance-utilization.ps1')),'-ProcessId',$game.Id,'-ProcessStartTicks',$session.process_start_ticks,'-MaxSeconds','0','-OutputDirectory',(Native-Argument (Join-Path $run 'utilization')))
     $samplerArguments+=@('-GpuReadyFile',(Native-Argument $gpuReadyFile))
     if($null-ne(Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue)){$samplerArguments+='-NvidiaSmi'}
-    $sampler=Start-Process -FilePath $windowsPowerShell -WindowStyle Hidden -ArgumentList $samplerArguments -WorkingDirectory $repoRoot -RedirectStandardOutput (Join-Path $run 'sampler-stdout.log') -RedirectStandardError (Join-Path $run 'sampler-stderr.log') -PassThru
+    $sampler=Start-Process -FilePath $windowsPowerShell -WindowStyle Hidden -ArgumentList $samplerArguments -WorkingDirectory $repoRoot -RedirectStandardError (Join-Path $run 'sampler-stderr.log') -PassThru
     $null=$sampler.Handle
     $session.sampler_pid=$sampler.Id;$session.state='recording';Publish-Session $session $sessionPath
     Write-Output ('Recording game PID '+$game.Id+' until exit. Capture: '+$run)
@@ -104,14 +77,13 @@ try{
     }
     $game.WaitForExit();$session.game_exit_code=$game.ExitCode;$session.state='finalizing';Publish-Session $session $sessionPath
     $sampler.WaitForExit();$session.sampler_exit_code=$sampler.ExitCode
-    if(Test-Path -LiteralPath $settingsPath){Copy-Item -LiteralPath $settingsPath -Destination (Join-Path $run 'settings-after.json')}
-    $analysis=Start-Process -FilePath $python -WindowStyle Hidden -WorkingDirectory $repoRoot -ArgumentList @('-B',(Native-Argument (Join-Path $PSScriptRoot 'analyze-play-capture.py')),(Native-Argument $run)) -RedirectStandardOutput (Join-Path $run 'analysis-stdout.log') -RedirectStandardError (Join-Path $run 'analysis-stderr.log') -PassThru
+    $analysis=Start-Process -FilePath $python -WindowStyle Hidden -WorkingDirectory $repoRoot -ArgumentList @('-B',(Native-Argument (Join-Path $PSScriptRoot 'analyze-play-capture.py')),(Native-Argument $run)) -RedirectStandardError (Join-Path $run 'analysis-stderr.log') -PassThru
     $null=$analysis.Handle;$analysis.WaitForExit();$session.analysis_exit_code=$analysis.ExitCode
     $diagnostics=$null
     if(Test-Path -LiteralPath (Join-Path $run 'diagnostics.json')){$diagnostics=Get-Content -LiteralPath (Join-Path $run 'diagnostics.json') -Raw|ConvertFrom-Json}
     $sampling=$null
     if(Test-Path -LiteralPath (Join-Path $run 'utilization/sampling.json')){$sampling=Get-Content -LiteralPath (Join-Path $run 'utilization/sampling.json') -Raw|ConvertFrom-Json}
-    $session.complete=$null-eq$session.error-and$session.game_exit_code-eq0-and$session.sampler_exit_code-eq0-and$session.analysis_exit_code-eq0-and$null-ne$diagnostics-and$diagnostics.complete-and$null-ne$sampling-and$sampling.complete-and$null-eq$sampling.error
+    $session.complete=$null-eq$session.error-and$session.game_exit_code-eq0-and$session.sampler_exit_code-eq0-and$session.analysis_exit_code-eq0-and$null-ne$diagnostics-and$diagnostics.complete-and$null-ne$sampling-and$sampling.complete-and!$sampling.PSObject.Properties['error']
     $session.state=if($session.complete){'complete'}else{'incomplete'};$session['finished_utc']=[DateTime]::UtcNow.ToString('o')
     Publish-Session $session $sessionPath
     Write-Output ('Capture '+$session.state+': '+(Join-Path $run 'REPORT.md'))

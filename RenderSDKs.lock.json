@@ -61,8 +61,7 @@
       "documents": [
         "Microsoft.Direct3D.D3D12.nuspec"
       ],
-      "redistribution": "Prerelease Microsoft DirectX license has distribution and time-sensitive restrictions; this optional package supports local Windows development only, and is not established redistributable.",
-      "bootstrap_executed": true
+      "redistribution": "Prerelease Microsoft DirectX license has distribution and time-sensitive restrictions; this optional package supports local Windows development only, and is not established redistributable."
     },
     "xess": {
       "release": "3.0.2",
@@ -71,7 +70,7 @@
       "archive_uri": "https://github.com/intel/xess/releases/download/v3.0.2/XeSS_SDK_3.0.2.zip",
       "archive_sha256": "88b8a373f30e33f3558a77a93e634f11b8132fc3047ea1a8edeead32b8471990",
       "archive_sha256_origin": "https://github.com/intel/xess/releases/expanded_assets/v3.0.2",
-      "archive_sha256_verification": "publisher digest matched by the cached release archive and bootstrap receipt",
+      "archive_sha256_verification": "publisher digest matched the pinned release archive",
       "abi_document": "https://github.com/intel/xess/blob/8fe81bdbbaf00b3c1b733fd0d830c333dc84e6f0/doc/xess_sr_developer_guide_english.md",
       "platform": "windows-x64",
       "minimum_shader_model": "6.4",
@@ -84,11 +83,7 @@
         "inc/xell/xell.h",
         "inc/xell/xell_d3d12.h"
       ],
-      "libraries": [
-        "lib/libxess.lib",
-        "lib/libxess_fg.lib",
-        "lib/libxell.lib"
-      ],
+      "libraries": [],
       "runtime": [
         "bin/libxess.dll",
         "bin/libxess_fg.dll",
@@ -97,13 +92,8 @@
       "notices": [
         "LICENSE.txt"
       ],
-      "documents": [
-        "doc/xess_sr_developer_guide_english.md",
-        "doc/xess_fg_developer_guide_english.md",
-        "doc/xell_developer_guide_english.md"
-      ],
-      "deployment_prerequisite": "Microsoft Visual C++ Redistributable 14.40.33810 or later",
-      "bootstrap_executed": true
+      "documents": [],
+      "deployment_prerequisite": "Microsoft Visual C++ Redistributable 14.40.33810 or later"
     },
     "streamline": {
       "release": "2.14.1",
@@ -151,13 +141,7 @@
         "bin/x64/nvngx_dlss.license.txt",
         "bin/x64/reflex.license.txt"
       ],
-      "documents": [
-        "docs/ProgrammingGuide.md",
-        "docs/ProgrammingGuideManualHooking.md",
-        "docs/ProgrammingGuideDLSS_G.md",
-        "docs/ProgrammingGuideReflex.md"
-      ],
-      "bootstrap_executed": true
+      "documents": []
     },
     "fsr": {
       "release": "2.3.0",
@@ -271,8 +255,7 @@
           "blob_sha1": "602687f7203f04c11083dbe3cf6befe848d7868a",
           "sha256": "52066379fd629080ed5c9a2821627cd7a3b972e6592565c7f3fa54a95404bac0"
         }
-      ],
-      "bootstrap_executed": true
+      ]
     }
   }
 }

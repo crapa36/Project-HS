@@ -9,10 +9,23 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/ContentSource/
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
-      - name: Verify CPU contracts without runtime or content SDKs
+      - name: Configure CPU contracts without runtime or content SDKs
         shell: pwsh
-        run: ./Tools/cmake.ps1 --workflow --preset verify-core
+        run: ./Tools/cmake.ps1 --preset msvc-core
+      - name: Build CPU contracts
+        shell: pwsh
+        run: ./Tools/cmake.ps1 --build --preset msvc-core
+      - name: Test CPU contracts
+        shell: pwsh
+        run: |
+          $cmake = ./Tools/bootstrap_cmake.ps1 -PrintPath
+          & (Join-Path (Split-Path $cmake) 'ctest.exe') --preset msvc-core --no-tests=error --output-on-failure
       - name: Retain full failure details
         if: failure()
         shell: pwsh
@@ -22,6 +35,11 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/ContentSource/
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
       # Compile the production libraries without requiring the proprietary FBX
       # cooker or a GPU. This supplements, and does not replace, native verify.
@@ -30,4 +48,4 @@ jobs:
         run: ./Tools/cmake.ps1 --preset msvc-debug -DHS_BUILD_CONTENT_TOOLS=OFF
       - name: Compile runtime and renderer
         shell: pwsh
-        run: ./Tools/cmake.ps1 --build Build/msvc-debug --target hs_runtime hs_renderer_d3d12 --parallel 2
+        run: ./Tools/cmake.ps1 --build Build/msvc-debug --target hs_runtime hs_renderer_d3d12 --parallel 4

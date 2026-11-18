@@ -267,7 +267,6 @@ def utilization(directory, bounds, issues):
     try: metadata = json_read(directory / "sampling.json")
     except (OSError, ValueError, KeyError, TypeError) as error:
         issues.append(f"Utilization metadata unavailable: {error}"); return output
-    output["sampling_metadata"] = metadata
     if metadata.get("complete") is False or metadata.get("error"):
         issues.append("Utilization sampler reports incomplete/error; valid samples remain usable")
     pid = int(metadata.get("process_id", 0))
@@ -320,12 +319,11 @@ def utilization(directory, bounds, issues):
     for path in source_paths:
         source = {"directory": str(path.resolve()), "supplemental": path != directory,
                   "sampled_wall_seconds": 0.0, "accepted_intervals": 0, "overlapping_intervals_excluded": 0,
-                  "out_of_range_intervals_excluded": 0, "metadata": {}}
+                  "out_of_range_intervals_excluded": 0}
         for filename in ("pdh-worker.json", "sampling.json", "auxiliary-worker.json"):
             if (path / filename).exists():
                 try:
-                    source["metadata"][filename] = json_read(path / filename)
-                    status = source["metadata"][filename]
+                    status = json_read(path / filename)
                     if filename == "pdh-worker.json" and (status.get("complete") is False or status.get("error") or status.get("counter_errors_total", 0)):
                         issues.append(f"GPU segment {path.name} worker partial/counter errors: complete={status.get('complete')}, reason={status.get('reason')}, counter_errors={status.get('counter_errors_total', 0)}; invalid/warmup intervals excluded")
                 except (OSError, ValueError, KeyError, TypeError) as error: issues.append(f"GPU segment {path.name} metadata unavailable: {error}")
@@ -535,9 +533,11 @@ def analyze(directory):
     source_cadence = defaultdict(list)
     gpu_rows = gpu_frames = missing_cpu = incomplete = invalid_queries = 0
     last_gpu = 0
+    gpu_requested = diagnostics.get("gpu_timing_requested", True)
     try:
         cursor = CpuFrameCursor(directory / "performance.csv")
-        for identity, iterator in groupby(csv_rows(directory / "gpu_live.csv"), lambda row: int(row["completed_frame"])):
+        stream = csv_rows(directory / "gpu_live.csv") if gpu_requested else ()
+        for identity, iterator in groupby(stream, lambda row: int(row["completed_frame"])):
             if identity <= last_gpu: raise ValueError("Completed GPU frame groups are not unique/increasing")
             last_gpu = identity; rows = list(iterator); gpu_rows += len(rows)
             owner = cursor.find(identity)
@@ -603,7 +603,8 @@ def analyze(directory):
     except (OSError, ValueError, KeyError, TypeError) as error:
         gpu_analysis_valid = False; issues.append(f"GPU frame analysis partial/unavailable: {error}")
     if invalid_queries: issues.append(f"{invalid_queries} completed GPU frames contain invalid query samples; independent per-pass validity retained")
-    gpu_coverage = cpu_analysis_valid and gpu_analysis_valid and bool(count) and not cpu_gaps and gpu_frames == count and last_gpu == last_id and not missing_cpu and not incomplete
+    cpu_coverage = cpu_analysis_valid and bool(count) and not cpu_gaps
+    gpu_coverage = not gpu_requested or (cpu_coverage and gpu_analysis_valid and gpu_frames == count and last_gpu == last_id and not missing_cpu and not incomplete)
     if not gpu_coverage: issues.append(f"GPU tail/frame coverage incomplete: {gpu_frames}/{count} own CPU frames, last GPU {last_gpu}, last CPU {last_id}, unmatched {missing_cpu}, incomplete {incomplete}")
     option_report = {"schema": 2, "scope": "Playing frames only; running mean/min/max, no percentile claim", "configurations": [],
                      "settings_receipts": {str(revision): rows for revision, rows in manifests.items()}, "errors": []}
@@ -648,7 +649,7 @@ def analyze(directory):
         if (directory / name).exists():
             try: provenance[name] = json_read(directory / name)
             except (OSError, ValueError, KeyError, TypeError) as error: issues.append(f"Capture provenance {name} unavailable: {error}")
-    capture_complete = diagnostics.get("complete") is True and not diagnostics.get("io_failed") and gpu_coverage and settings_valid and not invalid_intervals
+    capture_complete = diagnostics.get("complete") is True and not diagnostics.get("io_failed") and cpu_coverage and gpu_coverage and settings_valid and not invalid_intervals
     summary = {"schema": 1, "source": str(directory.resolve()), "capture_complete": capture_complete,
         "analysis_status": "complete" if capture_complete and not issues else "partial", "issues": list(dict.fromkeys(issues)),
         "diagnostics": diagnostics, "capture_provenance": provenance, "cpu_frame_count": count, "gpu_frame_count": gpu_frames, "gpu_pass_rows": gpu_rows,

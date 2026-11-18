@@ -46,8 +46,7 @@ function Gpu-Summary($Rows, [int]$TargetId, [string]$PreferredLuid = '') {
     [pscustomobject]@{luid=$selectedLuid;
         process_percent=$(if ($null -ne $target) {$target.percent} else {$null}); whole_same_adapter_percent=$whole}
 }
-function Counter-ErrorKind($Record, [string]$InvalidSampleMessage, [bool]$TargetExited, [string]$MoreDataMessage = '') {
-    if ($TargetExited) { return 'process_exit' }
+function Counter-ErrorKind($Record, [string]$InvalidSampleMessage, [string]$MoreDataMessage = '') {
     if ($Record.FullyQualifiedErrorId -like 'CounterApiError*' -and $Record.Exception.Message -eq $InvalidSampleMessage) { return 'invalid_sample' }
     if ($Record.FullyQualifiedErrorId -like 'CounterApiError*' -and $MoreDataMessage -and $Record.Exception.Message.Trim() -eq $MoreDataMessage.Trim()) { return 'retry_more_data' }
     return 'unexpected_error'
@@ -79,56 +78,32 @@ function Local-CounterName([string]$English) {
     return $English
 }
 function Record-Issue([string]$Component, [string]$Kind, [string]$Message) {
-    ++$script:issueCount
     $entry = [pscustomobject]@{utc=[DateTime]::UtcNow.ToString('o');qpc=[Diagnostics.Stopwatch]::GetTimestamp();component=$Component;kind=$Kind;message=$Message}
     $writers['sampling-errors'].WriteLine(($entry | ConvertTo-Json -Compress))
     $writers['sampling-errors'].Flush()
-    # Keep complete streamed records on disk and only a bounded tail in memory/metadata.
-    if ($entry.message.Length -gt 4096) { $entry.message=$entry.message.Substring(0,4096) + ' [truncated in metadata]' }
-    $recentIssues.Enqueue($entry)
-    while ($recentIssues.Count -gt 32) { $null=$recentIssues.Dequeue() }
 }
 function Write-SamplingMetadata([bool]$Complete) {
-    $nvidia = $null
-    if (Test-Path -LiteralPath $nvidiaStatusPath) {
-        try { $nvidia=Read-SharedJson $nvidiaStatusPath } catch {}
+    $metadata = [ordered]@{complete=$Complete;process_id=$ProcessId}
+    if ($null -ne $failure) { $metadata.error=$failure }
+    if ($CounterWorker) {
+        $metadata.counter_worker_process_id=$PID
+        if ($counterErrorCount -gt 0) { $metadata.counter_errors_total=$counterErrorCount }
     }
-    $pdh=$null
-    if (!$CounterWorker -and (Test-Path -LiteralPath $pdhStatusPath)) {
-        try { $pdh=Read-SharedJson $pdhStatusPath } catch {}
+    if (!$Complete -or $null -ne $failure -or ($CounterWorker -and $counterErrorCount -gt 0)) {
+        $metadata.reason=$reason
     }
-    if ($null -ne $pdh) {
-        $pdhRetries=$pdh.pdh_query_retries;$invalidSampleErrors=$pdh.invalid_sample_errors;$counterErrorCount=$pdh.counter_errors_total
-        $firstCounterQpc=$pdh.first_counter_qpc
-        if ($null -ne $pdh.PSObject.Properties['gpu_ready_wait_state']) {
-            $gpuReadyWaitState=$pdh.gpu_ready_wait_state;$gpuReadyObservedQpc=$pdh.gpu_ready_observed_qpc
+    if (!$CounterWorker -and $NvidiaSmi) {
+        $nvidia = $null
+        if (Test-Path -LiteralPath $nvidiaStatusPath) {
+            try { $nvidia=Read-SharedJson $nvidiaStatusPath } catch {}
         }
-        if ($null -ne $pdh.PSObject.Properties['pdh_query_refreshes']) {
-            $pdhRefreshes=$pdh.pdh_query_refreshes;$pdhRefreshMissing=$pdh.pdh_refresh_missing_target;$pdhRefreshPeriodic=$pdh.pdh_refresh_periodic
+        $nvidiaSummary = $null
+        if ($null -ne $nvidia) {
+            $nvidiaSummary = [ordered]@{complete=$nvidia.complete}
+            if ($null -ne $nvidia.PSObject.Properties['error'] -and $null -ne $nvidia.error) { $nvidiaSummary.error=$nvidia.error }
         }
-        foreach ($luid in $pdh.observed_target_luids) { if ($targetLuids.Count -lt 64) { $null=$targetLuids.Add([string]$luid) } }
+        $metadata.nvidia_worker=$nvidiaSummary
     }
-    $metadata = [ordered]@{schema=3;complete=$Complete;process_id=$ProcessId;process_start_utc=$targetStartTime.ToString('o');
-        start_utc=$startUtc.ToString('o');end_utc=[DateTime]::UtcNow.ToString('o');start_qpc=$startQpc;
-        end_qpc=[Diagnostics.Stopwatch]::GetTimestamp();qpc_frequency=$qpcFrequency;logical_processors=$logicalProcessors;
-        samples=$sample;reason=$reason;error=$failure;max_seconds=$MaxSeconds;unlimited=($MaxSeconds -eq 0);
-        pdh_query_retries=$pdhRetries;invalid_sample_errors=$invalidSampleErrors;counter_errors_total=$counterErrorCount;pdh_query_refreshes=$pdhRefreshes;pdh_refresh_missing_target=$pdhRefreshMissing;pdh_refresh_periodic=$pdhRefreshPeriodic;
-        pdh_refresh_policy='reopen after two missing-target samples or 60 seconds; first sample of every query is warmup; sample IDs remain monotonic';
-        issues_total=$issueCount;recent_issues=@($recentIssues);issues_stream=$(if ($CounterWorker) {'pdh-errors.jsonl'} else {'sampling-errors.jsonl'});
-        pdh_worker=$pdh;pdh_worker_stopped_by_owner=$pdhStoppedByOwner;counter_worker_process_id=$(if ($CounterWorker) {$PID} else {$pdhWorkerId});
-        counter_initialization_pending=($null -eq $firstCounterQpc);first_counter_qpc=$firstCounterQpc;
-        counter_initialization_latency_seconds=$(if ($null -ne $firstCounterQpc) {($firstCounterQpc-$startQpc)/$qpcFrequency} else {$null});
-        counter_time='raw GPU/System UTC is Get-Counter.Timestamp; QPC is worker receipt time before parsing/writing';
-        counter_join='GPU/System raw sample IDs are worker-local; CPU counter_sample/counter_qpc identifies newly received summaries; blanks mean unavailable';
-        gpu_ready_file=$(if ($GpuReadyFile) {$GpuReadyFile} else {$null});
-        pdh_start_policy=$(if ($NoGpuCounters) {'immediate_gpu_counters_disabled'} elseif ($GpuReadyFile) {'wait_for_nonempty_gpu_ready_file'} else {'immediate'});
-        gpu_ready_wait_state=$gpuReadyWaitState;gpu_ready_observed_qpc=$gpuReadyObservedQpc;
-        first_gpu_sample_is_warmup=$true;gpu_counters_enabled=(!$NoGpuCounters);gpu_adapter_preference=$AdapterLuid;
-        observed_target_luids=@($targetLuids);adapter_selection='explicit AdapterLuid, otherwise busiest valid target-PID engine';
-        cpu_denominator='process CPU seconds / QPC wall seconds; machine percent divides by logical processors';
-        system_cpu='PDH Processor Information percent per logical processor and _Total; raw status retained';
-        gpu_summary='busiest PID engine; whole-device sums all PIDs within each physical engine then takes busiest on target LUID; includes other applications';
-        nvidia_requested=[bool]$NvidiaSmi;nvidia_worker=$nvidia;nvidia_scope='whole physical devices, all applications; UUID/PCI identity is independent from Windows LUID'}
     $path=if ($CounterWorker) {$pdhStatusPath} else {Join-Path $outputRoot 'sampling.json'}
     Write-AtomicJson $metadata $path
 }
@@ -165,7 +140,7 @@ function Finish-CounterWorker($Worker, [string]$StatusPath) {
             $receipt = Read-SharedJson $StatusPath
             if (!$receipt.complete -or $receipt.counter_worker_process_id -ne $Worker.Id) {
                 $errorMessage = 'Owned PDH worker exited without its final completion receipt.'
-            } elseif ($null -ne $receipt.error) {
+            } elseif ($null -ne $receipt.PSObject.Properties['error'] -and $null -ne $receipt.error) {
                 $errorMessage = 'Owned PDH worker reported an error; inspect pdh-worker.json and pdh-errors.jsonl.'
             }
         } catch {
@@ -187,7 +162,7 @@ function Write-AtomicJson($Data, [string]$Path) {
     [IO.File]::WriteAllText($temporary,($Data | ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($false))
     for ($attempt=0;$attempt -lt 5;++$attempt) {
         try {
-            if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary,$Path,($Path+'.previous')) } else { [IO.File]::Move($temporary,$Path) }
+            if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary,$Path,[System.Management.Automation.Language.NullString]::Value) } else { [IO.File]::Move($temporary,$Path) }
             return
         } catch [IO.IOException] {
             if ($attempt -eq 4) { throw }
@@ -276,9 +251,8 @@ function Invoke-OwnerSampler {
         if ($NoGpuCounters) { $workerArguments+='-NoGpuCounters' }
         if ($GpuReadyFile) { $workerArguments+=@('-GpuReadyFile',('"'+$GpuReadyFile+'"')) }
         if ($AdapterLuid) { $workerArguments+=@('-AdapterLuid',$AdapterLuid) }
-        $pdhWorker=Start-Process -FilePath $shell -WindowStyle Hidden -ArgumentList $workerArguments -PassThru -RedirectStandardOutput (Join-Path $outputRoot 'pdh-worker-stdout.log') -RedirectStandardError (Join-Path $outputRoot 'pdh-worker-stderr.log')
+        $pdhWorker=Start-Process -FilePath $shell -WindowStyle Hidden -ArgumentList $workerArguments -PassThru -RedirectStandardError (Join-Path $outputRoot 'pdh-worker-stderr.log')
         $null=$pdhWorker.Handle
-        $pdhWorkerId=$pdhWorker.Id
         Write-SamplingMetadata $false
         $lastCounterSample=0
         $nextTick=$startQpc+$qpcFrequency
@@ -398,27 +372,17 @@ $nvidiaJob = $null
 $sample = 0
 $reason = 'running'
 $failure = $null
-$recentIssues = [Collections.Generic.Queue[object]]::new()
-$targetLuids = [Collections.Generic.HashSet[string]]::new()
-$issueCount = 0
 $counterErrorCount = 0
 $nvidiaStatusPath = Join-Path $outputRoot 'nvidia-worker.json'
 $nvidiaStopPath = Join-Path $outputRoot '.nvidia-stop'
 $nvidiaChildPath = Join-Path $outputRoot '.nvidia-child.json'
 if (Test-Path -LiteralPath $nvidiaStopPath) { Remove-Item -LiteralPath $nvidiaStopPath }
-$invalidSampleErrors = 0
 $pdhStatusPath=Join-Path $outputRoot 'pdh-worker.json'
 $pdhLatestPath=Join-Path $outputRoot 'pdh-latest.json'
 $pdhStopPath=Join-Path $outputRoot '.pdh-stop'
 $pdhStoppedByOwner=$false
-$pdhWorkerId=$null
 $pdhRetries=0
-$pdhRefreshes=0
-$pdhRefreshMissing=0
-$pdhRefreshPeriodic=0
-$firstCounterQpc=$null
 $gpuReadyWaitState=if ($CounterWorker) {'not_checked'} else {'worker_pending'}
-$gpuReadyObservedQpc=$null
 if (!$CounterWorker) {
     if (Test-Path -LiteralPath $pdhStopPath) { Remove-Item -LiteralPath $pdhStopPath }
     Invoke-OwnerSampler
@@ -462,7 +426,6 @@ try {
         $readyQpc=[Diagnostics.Stopwatch]::GetTimestamp()
         $gpuReadyWaitState=Gpu-CounterStartState $GpuReadyFile (!$NoGpuCounters) (Target-Alive $targetProcess $targetStartTime.Ticks) ([IO.File]::Exists($pdhStopPath)) (($readyQpc-$startQpc)/$qpcFrequency) $MaxSeconds
         if ($gpuReadyWaitState -eq 'ready') {
-            if (!$NoGpuCounters -and $GpuReadyFile) { $gpuReadyObservedQpc=$readyQpc }
             Write-SamplingMetadata $false
             break
         }
@@ -482,23 +445,20 @@ try {
     Write-SamplingMetadata $false
     try {
     Get-Counter -Counter $counterPaths -SampleInterval 1 -Continuous -ErrorAction Continue 2>&1 | ForEach-Object {
-        $targetProcess.Refresh()
+        if (!(Target-Alive $targetProcess $targetStartTime.Ticks)) { $reason = 'process_exit'; throw [OperationCanceledException]::new($reason) }
+        if ([IO.File]::Exists($pdhStopPath)) { $reason='owner_stop';throw [OperationCanceledException]::new($reason) }
+        $qpc = [Diagnostics.Stopwatch]::GetTimestamp()
+        if (Duration-Reached (($qpc - $startQpc) / $qpcFrequency) $MaxSeconds) { $reason = 'max_seconds'; throw [OperationCanceledException]::new($reason) }
         if ($_ -is [Management.Automation.ErrorRecord]) {
             $counterRecord = $_
             ++$counterErrorCount
             Record-Issue 'pdh' $_.FullyQualifiedErrorId $_.Exception.Message
-            switch (Counter-ErrorKind $counterRecord $invalidSampleMessage $targetProcess.HasExited $moreDataMessage) {
-                'process_exit' { $reason='process_exit'; throw [OperationCanceledException]::new($reason) }
-                'invalid_sample' { ++$invalidSampleErrors; return }
+            switch (Counter-ErrorKind $counterRecord $invalidSampleMessage $moreDataMessage) {
+                'invalid_sample' { return }
                 'retry_more_data' { $retryPdh=$true; throw [InvalidOperationException]::new('Reopen PDH query after enumeration buffer growth.') }
                 default { throw $counterRecord }
             }
         }
-        if (!(Target-Alive $targetProcess $targetStartTime.Ticks)) { $reason = 'process_exit'; throw [OperationCanceledException]::new($reason) }
-        if ([IO.File]::Exists($pdhStopPath)) { $reason='owner_stop';throw [OperationCanceledException]::new($reason) }
-        if ($targetProcess.StartTime.ToUniversalTime() -ne $targetStartTime) { throw 'Target PID identity changed.' }
-        $qpc = [Diagnostics.Stopwatch]::GetTimestamp()
-        if (Duration-Reached (($qpc - $startQpc) / $qpcFrequency) $MaxSeconds) { $reason = 'max_seconds'; throw [OperationCanceledException]::new($reason) }
         ++$sample
         ++$querySamples
         $utc = $_.Timestamp.ToUniversalTime().ToString('o')
@@ -512,7 +472,6 @@ try {
         $targetObserved=$false
         foreach ($row in $rows) {
             if ($row.pid -eq $ProcessId) { $targetObserved=$true }
-            if ($row.pid -eq $ProcessId -and $targetLuids.Count -lt 64) { $null=$targetLuids.Add($row.luid) }
             $writers['gpu-engines'].WriteLine((@($sample,$utc,$qpc,$qpcFrequency,$warmup,$row.pid,$row.luid,$row.phys,$row.engine,$row.type,$row.percent.ToString('R',$culture),$row.status,[int]($row.pid -eq $ProcessId)) -join ','))
         }
         $systemPercent=$null
@@ -527,7 +486,6 @@ try {
         $gpu = Gpu-Summary $rows $ProcessId $AdapterLuid
         $processGpu = if ($null -ne $gpu.process_percent) {$gpu.process_percent.ToString('R',$culture)} else {''}
         $wholeGpu = if ($null -ne $gpu.whole_same_adapter_percent) {$gpu.whole_same_adapter_percent.ToString('R',$culture)} else {''}
-        if ($null -eq $firstCounterQpc) { $firstCounterQpc=$qpc }
         Write-AtomicJson ([ordered]@{sample=$sample;utc=$utc;qpc=$qpc;qpc_frequency=$qpcFrequency;warmup=$warmup;
             luid=$gpu.luid;process_percent=$gpu.process_percent;whole_same_adapter_percent=$gpu.whole_same_adapter_percent;
             system_percent=$systemPercent}) $pdhLatestPath
@@ -535,8 +493,6 @@ try {
         if ($sample -eq 1 -or $sample % 10 -eq 0) { Write-SamplingMetadata $false }
         if (Counter-QueryRefresh (!$NoGpuCounters) $targetObserved $querySamples (($qpc-$queryStartQpc)/$qpcFrequency)) {
             $refreshPdh=$true
-            ++$pdhRefreshes
-            if (!$targetObserved) { ++$pdhRefreshMissing } else { ++$pdhRefreshPeriodic }
             Write-SamplingMetadata $false
             throw [InvalidOperationException]::new('Refresh PDH wildcard instances.')
         }

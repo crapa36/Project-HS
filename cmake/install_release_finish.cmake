@@ -19,8 +19,11 @@ hs_release_verify_copy("${_hs_release_source_pack}" "${_hs_release_stage}/Conten
 include("${CMAKE_CURRENT_LIST_DIR}/pe_shipping_image.cmake")
 hs_pe_read_shipping_image("${_hs_release_stage}/ProjectHS.exe" _hs_expected_header _hs_expected_size)
 file(READ "${_hs_release_stage}/Content/content.hsp" _hs_staged_header HEX LIMIT 64)
-file(SIZE "${_hs_release_stage}/Content/content.hsp" _hs_staged_size)
-if(NOT _hs_staged_header STREQUAL _hs_expected_header OR NOT _hs_staged_size EQUAL _hs_expected_size)
+# Read across the expected EOF; Windows CMake file(SIZE) may truncate above 4 GiB.
+math(EXPR _hs_expected_last_byte "${_hs_expected_size} - 1")
+file(READ "${_hs_release_stage}/Content/content.hsp" _hs_staged_tail HEX OFFSET ${_hs_expected_last_byte} LIMIT 2)
+string(LENGTH "${_hs_staged_tail}" _hs_staged_tail_length)
+if(NOT _hs_staged_header STREQUAL _hs_expected_header OR NOT _hs_staged_tail_length EQUAL 2)
     message(FATAL_ERROR "Staged Release executable/content pair differs from the linked image; stage retained at ${_hs_release_stage}")
 endif()
 

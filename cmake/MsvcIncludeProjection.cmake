@@ -60,11 +60,13 @@ string(APPEND compiler_code
     " RESULT_VARIABLE compiler_result OUTPUT_VARIABLE compiler_stdout ERROR_VARIABLE compiler_stderr ENCODING ANSI)")
 cmake_language(EVAL CODE "${compiler_code}")
 if(NOT compiler_result STREQUAL "0")
+    file(REMOVE "${dependency_file}")
     message("${compiler_stdout}${compiler_stderr}")
     message(FATAL_ERROR "Compiler failed with exit ${compiler_result}")
 endif()
 
 file(READ "${dependency_file}" dependency_json)
+file(REMOVE "${dependency_file}")
 string(JSON include_count LENGTH "${dependency_json}" Data Includes)
 set(dependency_lines)
 if(include_count GREATER 0)

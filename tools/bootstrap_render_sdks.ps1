@@ -114,14 +114,6 @@ function Invoke-GitComponentsBootstrap {
             New-Item -ItemType Directory -Force -Path (Split-Path $file.target -Parent) | Out-Null
             Move-Item -LiteralPath (Assert-SdkPath $file.source) -Destination (Assert-SdkPath $file.target)
         }
-        $receipt = [ordered]@{
-            schema_version = 1; sdk = $Sdk; release = $entry.release; commit = $entry.commit;
-            distribution_kind = 'git_components'; component_origin = $origin;
-            verified_utc = [DateTime]::UtcNow.ToString('o');
-            components = @($components | Select-Object path, sha256, blob_sha1)
-        }
-        $receipt | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (
-            Assert-SdkPath (Join-Path $versionRoot 'bootstrap-receipt.json')) -Encoding UTF8
         return $versionRoot
     }
     finally {
@@ -244,14 +236,6 @@ function Invoke-SdkBootstrap {
             }
             Move-Item -LiteralPath (Assert-SdkPath $partialRoot) -Destination $versionRoot
         }
-        $receipt = [ordered]@{
-            schema_version = 1; sdk = $Sdk; release = $entry.release; commit = $entry.commit;
-            archive_uri = $entry.archive_uri; archive_sha256 = $archiveDigest;
-            verified_utc = [DateTime]::UtcNow.ToString('o');
-            components = @($components | Select-Object path, sha256)
-        }
-        $receiptPath = Assert-SdkPath (Join-Path $versionRoot 'bootstrap-receipt.json')
-        $receipt | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $receiptPath -Encoding UTF8
         return $versionRoot
     }
     finally {

@@ -31,6 +31,14 @@ input-snapshot and publication helpers; ActionKey includes the actual producer
 executable identity, so mesh-only implementation changes do not invalidate texture
 recipes through a shared executable.
 
+Character geometry/animation and texture encoding likewise use their existing
+separate producer executables. Both consume authenticated source snapshots and
+share FBX material ordering. The geometry producer publishes character/geometry/
+animation packages; the texture producer owns DDS and renderer texture packages.
+Geometry-only code is not linked into the texture producer, and texture actions
+do not depend on geometry Action results. Product IDs and runtime bindings stay
+independent of which producer publishes them.
+
 CombatSim consumes Gameplay's scoped public tick view for targeting. Its combat and
 progression loops do not depend on Presentation or construct render snapshots.
 
@@ -72,9 +80,11 @@ failure publication keeps the first error and its fixed-size message.
   codecs are bounded static leaves: `hs_render_data_package` depends on Core and
   RenderData values; material and texture leaves depend on the package leaf.
   `hs_render_data` aggregates these leaves with the remaining runtime codecs.
-  The material compiler and material shader producer link the material leaf, while
-  the texture package producer links the texture leaf, preserving their existing
-  Core, asset pipeline, DirectXTex/DXC, JSON, and bcrypt requirements.
+  The material package and shader producers share the content-only parser for
+  v7 material graphs. Both use the typed closure prepared by the material
+  compiler. The JSON schemas describe authoring inputs. Cooker dependencies track
+  the executable parser and the actual material and shader sources.
+  The texture package producer links the texture leaf.
 - RenderData's `hs_terrain_surface` codec leaf links `hs_render_data` and only its
   actual consumers; terrain codec edits do not relink unrelated content producers.
 - `hs_runtime_contracts` is a header usage-requirements target for native-free
@@ -134,14 +144,26 @@ Content remains fixed for the lifetime of a running game. Offline content edits
 take effect at the next launch. Build-cache and snapshot ownership do not define
 native allocation, queue-completion or file-backing lifetimes.
 
-Renderer catalogue semantics are admitted once by the RenderData decoder or the
-loose development-catalogue factory. Their metadata is immutable and retained by
-an owning handle; native initialization/resident preparation checks that the bound
-views and actual pack size still match that owner. Raw tool inputs use the same
-semantic validator from the existing RenderData-owned `hs_renderer_catalog_io` leaf;
-RendererD3D12 links that leaf without acquiring Runtime or content-tool dependencies.
-Actual file reads still verify bytes, ranges and digests before
-decode/upload; payload and GPU lifetime admission remain separate.
+Offline selections directly read and overwrite `Generations/current/<scope>.json`.
+They reference the existing immutable `Products`
+cache directly instead of copying payloads into per-generation directories.
+Selected readers retain ProductSet leases, so replacing a selection neither
+changes their backing nor permits its repair or deletion until the last reader
+releases it. Product-cache cleanup retains current action/selection references
+and actual readers; there is no generation history, pin or rollback store.
+
+The content linker validates the renderer catalogue before encoding its table.
+The shipping reader verifies the table digest, and the decoder checks wire lengths
+and bulk ranges against the opened pack. The loose development-catalogue factory
+and raw tool inputs use the same RenderData validator as the linker. Native
+initialization checks the bound views and pack size against their immutable owner.
+Both VFX input ranges are verified against the executable's digests in a pack or
+the selected products' digests in a development run.
+Actual reads retain extent, output bounds and exact-I/O checks before decode/upload.
+Fixed shipping-pack renderer payloads use build-time digests and the pinned image
+identity without runtime rehashing; same-length payload corruption is consequently
+not detected by these reads. Loose development products still verify full/range
+digests. Payload admission and GPU lifetime remain separate.
 
 
 Presentation projects stable GameDomain contracts. It does not execute rules or reach into Gameplay implementation state.
@@ -262,6 +284,10 @@ readback. The runtime adapter admits the baked package, uploads, publishes and
 retires its read-only resources. Both consume a shared static scene/material
 revision contract and the same common native rendering code. Saved dynamic-GI
 settings migrate to Probe at the settings read boundary.
+Baked probe capture extents do not expand the main view's virtual-shadow depth
+interval. Only actual camera surfaces, transmission and volume queries supply
+those receivers; offline capture owns its separate static directional shadow.
+The runtime adapter does not retain another CPU copy of the reflection records.
 Capture bindings and native leases are compiled only into the offline baker.
 The shared graph layout keeps an opaque owner with the same representation in
 both compositions; only the baker allocates its capture payload. The sampled
@@ -277,8 +303,17 @@ waits for its upload producer; retirement waits for every reader.
 Shader product maps retain the canonical named path and digest. Feedback selection
 chooses a physical variant at read/bind without overwriting those identities.
 Loose and packed reads use the same selection, while bake compatibility uses the
-canonical products. Admitted reads retain their integrity proof rather than
-rehashing the same shader bytes in each consumer.
+canonical products. Packed renderer reads do not rehash shader payloads; loose
+development reads keep their digest checks. Neither changes the producer's
+identity or the pack/header compatibility contract.
+
+`lighting/producer` DXIL products carry their payload only in offline Generations;
+the fixed game image keeps their authenticated source revisions. Diagnostic actions
+belong only to the explicit development snapshot, so the game image and its source
+revisions omit them. The existing development Experiment reads diagnostic DXIL from
+an explicit `--generation` snapshot. Runtime uses the compiled pack for
+normal gameplay and pass timing, including its ordinary texture-feedback variants.
+The shared `render/shader/fullscreen_vs.dxil` remains a runtime payload.
 
 Terrain surface production belongs to the offline `hs_terrain_surface_bake` tool.
 It uses the selected world's actual section transforms and seed, and records the
@@ -286,6 +321,8 @@ material/texture/geometry inputs used by the existing page evaluator. TSF1 metad
 retains ordered section records and a source identity; each section's three planes
 use an ordinary TexturePackage, keeping the existing package size limits. Runtime
 admits matching pages, uploads them, publishes and retires their native resources.
+Only the game renderer builds the frame-slot publication code. The baker and game
+share the section transform and source identity used to match baked pages.
 Registered planes retain their admitted tile layout for that pinned generation;
 scene changes compare against it without rereading the archive or source identity.
 Missing, incompatible or unaffordable pages select the original terrain evaluator;
@@ -318,8 +355,9 @@ prefix and scatter share variant decoding with material resolve through a small
 include; classification-only edits do not invalidate authored material shaders.
 Adaptive GTAO is produced by its own runtime shader family while preserving the
 `render/shader/adaptive_gtao_cs.dxil` product. Its include closure tracks the shared
-AO implementation, independently of the BSDF-preintegrate and Hero-work actions;
-the base ambient-occlusion runtime family remains unchanged.
+AO implementation. The material surface passes own the character and layered
+translucency programs. The lighting baker produces the coated GGX lookup table
+in a separate action shared by the game and the offline probe bake.
 The ProjectHS app selects Visibility by default; experiments and native tools keep
 their explicit renderer configuration. Visibility's typed texture stores are
 required by the backend's existing Direct3D feature level 12.0 baseline.
@@ -354,12 +392,17 @@ The base Runtime target does not force that image's
 full cook into unrelated consumers. Runtime integration tests use their selected
 Generation; shipping content tests retain image and pack ownership checks.
 Single-config Release can build with HS_BUILD_CONTENT_TOOLS=OFF using an existing
-Shipping/content.generated.cpp and Content/content.hsp in the build directory.
+`Actions/shipping/content.generated.cpp` and `bin/Content/content.hsp` in the build directory.
 This path has no content-producer or Generation-verification dependency. Missing
 files fail configuration; Runtime still verifies that their identities match.
 DXC, ImGui and a loose font binary are not required for this runtime-only build;
 native renderer dependencies and the font license remain required.
-The linker atomically replaces Content/content.hsp before updating its generated
+Optional SDK headers and build flags belong to their consuming renderer sources.
+The SDK lock supplies the DLLs and notices for both local deployment and installation.
+The Intel adapters deploy the selected SR, FG and XeLL DLLs. FG requires XeLL.
+DirectSR preview files are local to the build. DirectStorage DLLs are ordinary
+file dependencies so a missing runtime can be restored without relinking the renderer.
+The linker atomically replaces bin/Content/content.hsp before updating its generated
 compile input. These two files are not a transaction: Runtime rejects an interrupted
 pair by matching the compiled 64-byte header and file extent. An already opened
 owner retains its original file. The Release installer reads that same compiled
@@ -376,8 +419,7 @@ The linker's content image ID hashes a versioned value manifest, ordered typed
 tables and actual pack ranges/payload digests. Canonical scalars are little endian
 u32 (including narrow integers/bools) or u64, floats retain their IEEE bits, and
 strings/sequences have u64 lengths. Object padding, generated C++ formatting and
-producer executables are excluded. ActionKey still includes producer identity;
-Shipping/content.receipt.json records that provenance separately. HSCONT01 format2,
+producer executables are excluded. HSCONT01 format2,
 13-table header layout and exact executable/pack matching remain unchanged.
 Regenerate the pair together when adopting the new content ID algorithm; existing
 runtime-only prebuilt configurations still require their exact matched pair.
@@ -391,12 +433,10 @@ chunk digests cover contiguous preload runs and independent transition tracks;
 only successful verified reads publish ready PCM. Only
 transition tracks use asynchronous preparation and completion-safe eviction.
 Developer JSON/WAV loading is isolated in hs_runtime_audio_io and excluded from
-Release Runtime. VFX uses the existing record types through VfxProgramView and
-VfxImage spans; PreparedContent retains decoded shipping metadata and its backing. Developer
-VfxImageData owns mutable vectors and the shared decoder/static-policy preparation
-in hs_vfx_image_io, backed by the CPU-only hs_vfx_program_io format reader.
-Developer Catalog file loading is hs_runtime_vfx_io. These decoders are absent
-from the Release Runtime link, and IO libraries build only when consumed.
+Release Runtime. Both development and shipping startup retain decoded VFX tables
+in PreparedContent. VfxCatalog borrows those tables through VfxImage spans.
+hs_vfx_image_io prepares the shared data using the CPU-only hs_vfx_program_io
+format reader.
 Runtime retains each adapted VFX event payload once in a stable-order
 ActiveEffectStore; profile lists and entity-surface captures hold private row
 references. Profile consumers borrow indexed views; attached ground/light/decal/
@@ -584,15 +624,22 @@ file publication and Generation selection. When content tools are enabled, the
 dedicated Apps target `hs_static_shadow_bake` publishes the native bake through
 AssetPipeline. Its producer identity follows RendererD3D12 implementation changes;
 unrelated render-test host edits do not invalidate the archive. Runtime frame
-composition is excluded from the offline baker; shared bootstrap, capture,
-resource and teardown changes remain producer dependencies.
+composition is excluded from the offline baker. Feature pass registration,
+post-processing subgraphs, cluster frame registration, visibility, LOD,
+layered translucency pass recording and material sampler feedback belong to the game renderer.
+The development game renderer also owns Dear ImGui and its Win32 and D3D12 backends. The bakers
+share device bootstrap, capture, resource and teardown code, including
+translucency target storage and canonical descriptor initialization.
 The render test host links the runtime renderer for its GPU lifetime fixtures.
 The explicit hs_render_static_shadow_candidate target uses a shadow-free input
 Generation; its output is composed into runtime-full after the shadow-free input.
 Gameplay projection and the baker share Presentation's fixed environment-sun direction. Ordinary runtime shadow
 sampling supports an optional complete coarse-page archive in the existing VSM
 static D32 bank. Fine pages still raster/cache at their original precision;
-dynamic depth remains separate until tap-wise reverse-Z composition. RenderData
+fine dynamic pages seed their existing clear draw from the static bank, then
+reverse-Z raster combines current casters into that same bank before publication.
+Fine sampling reads the combined bank; fixed-root fallback still composes its
+separate static/dynamic depths per tap. RenderData
 owns the index and lossless page codec (private pinned meshoptimizer dependency).
 The renderer owns bounded coarse staging and GPU seeding, while Apps own atomic
 publication. Incompatible sun/grid/layout or material/pipeline contracts use
@@ -632,7 +679,11 @@ descriptors. Table indices are deployment-local; stable save/replay IDs are unch
 Range offsets, sizes, formats and digests participate in the deployment identity.
 Core exposes the identity of the opened file without interpreting pack headers.
 Renderer validates its packed directory once and reads individual ranges through
-the retained bounded owner. Texture descriptors supply admitted subresource ranges;
+the retained bounded owner. Environment and material fallback textures read the
+uploaded mip suffix of each packed array slice. Texture streaming borrows the
+subresource layout from the renderer's immutable catalogue. Loose development
+textures retain their whole-product admission before fallback upload.
+Texture descriptors supply admitted subresource ranges;
 geometry descriptors supply the seven GPU chunks, submeshes and ground support.
 Material descriptors supply defaults, surface/domain policies and typed program/
 texture references. These tables reuse the original product identities and payload
@@ -645,8 +696,7 @@ read directly into the existing upload vector in their cooked transposed order.
 ContentLinker emits these renderer descriptors into bounded binary shipping tables;
 the matching payload ranges are stored in `Content/content.hsp`. Runtime opens the
 pack only after its extent and compiled 64-byte header match, then passes the same
-bounded owner to renderer resource readers. Producer provenance remains in the
-shipping receipt and ActionKey; it is separate from the shipping content identity.
+bounded owner to renderer resource readers.
 
 Environment materials have one canonical product per authored material, independent
 of geometry LOD. Geometry metadata products contain a checked material dependency
@@ -685,6 +735,9 @@ Candidate scans share one current resource-shape snapshot. Flat reusable alias
 scratch labels the first occurrence rather than retaining native addresses or
 allocating a hash node per resource. Cold registration refreshes that snapshot
 after provider preparation; native certification and binding remain authoritative.
+Directional/local shadow candidates compare the existing prepared plan's shape;
+they do not synthesize execution inputs or draw callbacks. Actual registration
+checks the live input snapshot, import versions and slot completion before binding.
 
 Physical import identity and placed-resource overlap are checked against current
 native bindings before logical compilation, including retained-plan hits. The
@@ -808,7 +861,9 @@ graph execution, before fallible service completion. Per-view display samples an
 history accept after successful graph/service submissions, before Present. A later
 Present failure preserves them; a partial/pre-commit failure does not advance the
 display-clock record.
-Capture callers use `Capture(request)` with a view ID. Legacy format-specific
+The development renderer owns image capture and tool views. The terrain,
+shadow and probe bakers use their dedicated bake APIs. Image capture callers
+use `Capture(request)` with a view ID. Legacy format-specific
 capture helpers are private, so callers cannot bypass submitted-frame ownership
 checks. Shared geometry/visibility diagnostics require a retained submission
 belonging to the requested view.
@@ -823,9 +878,8 @@ Runtime is the composition root, so it may know the concrete systems it runs. Cr
 
 Runtime loads saved settings once and applies explicit command-line overrides
 before creating the window. Apps parse arguments once and do not load profiles.
-SaveStore writes SettingsDocument and ProfileData; SettingsData is only an
-effective simulation/UI/audio projection. Legacy settings are migrated inside
-the reader, without a separate public legacy persistence API.
+SaveStore reads and writes schema 2 for SettingsDocument and ProfileData.
+SettingsData carries the effective values for simulation, UI and audio.
 Smoke uses process graphics defaults and explicit overrides.
 Experiments can supply a typed graphics preset through the same startup rules;
 explicit process fields then override that preset without persisting it.
@@ -850,6 +904,10 @@ normal startup still checks the compiled content identity against its opened pac
 
 DirectXTex serves content production and development HDR capture. The Release
 renderer neither links it nor requires it in a runtime-only configuration.
+Runtime and native tools share the existing shipping-image reader through the
+native-free `hs_shipping_image_io` static leaf. The `hs_runtime` library does not
+depend on generated shipping-image content or cooking; applications that consume
+the compiled pack link its existing `hs_shipping_content` manifest separately.
 
 Jobs submission acts through a creator-bound TaskGroup and returns admission
 success. TaskGroup owns cancellation and joining; task labels, per-task numeric
@@ -903,6 +961,10 @@ The Apps-owned `hs_asset_pipeline` static library compiles the shared Action
 implementation once. Producers remain separate executables, so a producer-specific
 change does not invalidate unrelated recipes. Each process hashes its own executable;
 there is no intermediate recipe manifest or post-link preparation target.
+Content build targets consume Action result files directly. To rebuild a single
+material or texture, pass its build-relative `Actions/.../result.json` to
+`cmake --build ... --target`. A development Generation publishes the sorted
+products of its selected Action results and their upstream dependencies.
 Action receipt snapshots pin their ProductSet with the existing OS file-lock
 contract. Upstream path values share that owner until consumption ends; publishing
 another action cannot release another reader's pin. GC and repair respect the
@@ -910,21 +972,26 @@ stable per-set lease anchor. A short shared mutation lock covers receipt/pin and
 selected-pointer/manifest acquisition; immutable installed snapshots require no
 new lock-file writes.
 Material and runtime DXC compilation consume hashed private source/include
-snapshots; generated includes are owned by that producer stage. Saved runtime
-shader input closures permit cache hits without dependency-scanner processes.
+snapshots; generated includes are owned by that producer stage. Runtime shader
+families discover includes once per source and target profile. Saved input
+closures permit cache hits without dependency-scanner processes. Particle
+simulation owns its compute entry point and collision code. Particle drawing
+shares the frame constants and particle bindings with it.
 Environment producers derive consumed paths from frozen metadata and hash the
 captured bytes they cook. Shader process waits share bounded termination handling;
 uncertain process exit preserves its stage instead of racing cleanup.
 
 CharacterContent imports one CharacterIR and directly emits final character
-metadata, LOD0 geometry, named animation and DDS products. Normal builds do not
+metadata, geometry LODs and named animation packages. Heavy character product
+cooking is one offline library; Debug optimization is confined there, while FBX
+admission, Runtime, renderer and tests remain checked Debug. Normal builds do not
 exchange native meshbin or material JSON sidecars through a second producer.
 FBX, animations, sibling FBM textures and monster PBR inputs are copied into the
 producer's private stage and checked against the input digests before native
 import/texture decoding. Those consumers use only the staged paths.
-ContentLinker reads exact character/material/texture snapshots, retains checked
-bytes while validating their bindings, and reuses the prepared metadata. Explicit
-CharacterInterchange compatibility export remains a separate developer leaf.
+ContentLinker authenticates each cooked texture before compiling its descriptor from
+the package directory and stored mip metadata. The same bytes go into the pack.
+Character and material bindings use their checked snapshots.
 
 The low-level configuration is:
 
@@ -945,7 +1012,9 @@ Debug and Release executable builds prepare the same fixed pack incrementally
 through `hs_shipping_image`, then link its small generated manifest. Runtime
 installation copies that pack in both configurations. Ordinary builds do not
 copy a runtime Generation; `hs_content_generation` is an explicit offline/native
-fixture snapshot target. Runtime-only library builds do not need that snapshot.
+fixture snapshot target. Native rendering fixtures read the official compiled
+image through the shipping-image IO leaf and manifest; they do not require that
+offline snapshot. Runtime-only library builds do not need the snapshot.
 
 `cmake --workflow --preset verify-core` builds and runs the selected CPU
 contracts, including simulation determinism, input admission and graph ranges.

@@ -216,7 +216,8 @@ def analyze(directory, warmup=10, tick_start=0, tick_end=None):
             selected.add(frame)
     costs, critical, counts, names, coverage = defaultdict(list), defaultdict(list), defaultdict(int), defaultdict(set), defaultdict(lambda: [0, 0])
     rejected, missing, last_frame = 0, 0, 0
-    for frame, rows in groupby(read_csv(directory / "gpu_live.csv"), lambda r: int(r["completed_frame"])):
+    gpu_rows = read_csv(directory / "gpu_live.csv") if diagnostics.get("gpu_timing_requested", True) else ()
+    for frame, rows in groupby(gpu_rows, lambda r: int(r["completed_frame"])):
         if frame <= last_frame: raise ValueError("GPU frame groups must be unique and increasing")
         last_frame = frame
         rows = list(rows)

@@ -77,7 +77,8 @@ Release는 개발 전용 코드 분리·조건부 컴파일·빌드 의존성 �
 
 For localized changes, prefer the relevant build/test target before broader workflows.
 
-Keep only indispensable checks for save-data preservation, authoritative gameplay,
+During engine development, omit test fixtures for save-file damage, backup
+recovery and unpublished save formats. Keep only indispensable checks for authoritative gameplay,
 input/event loss or duplication, memory bounds, and actual asynchronous resource
 lifetime. Remove cosmetic, getter/setter, source-spelling, duplicate and one-off
 tests together with their exclusive helpers, APIs and build dependencies. Add no
