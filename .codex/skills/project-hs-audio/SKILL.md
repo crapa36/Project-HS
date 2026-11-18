@@ -38,7 +38,7 @@ Pass forbidden timbres as `negative_prompt` where supported, but do not treat a 
 Write generated candidates under:
 
 ```text
-GeneratedAudio/<cue-id>/vNN.wav
+Build/audio/<cue-id>/vNN.wav
 ```
 
 with a same-stem JSON sidecar.

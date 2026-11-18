@@ -14,14 +14,14 @@ Seven environment props authored for the bright meadow directive, version **v003
 | barrel_broken | 3324 | 1344 | 692 | 0.65 |
 | cart_broken | 12356 | 3068 | 1580 | 2.00 |
 
-Counts are from `verification/runtime_mesh_validation.json`. Radius values are conservative generation assertions, not measured maximum extents. The cart wheel-centre track is **1.64 m**.
+Radius values are conservative generation assertions, not measured maximum extents. The cart wheel-centre track is **1.64 m**.
 
 - `meadow_props_v003.blend`: editable source, all 21 meshes and the preview assembly; relevant texture images packed.
 - `meadow_props_v003.glb`: seven LOD0 meshes and embedded materials/textures. This is an asset bundle, not a placed gameplay scene.
 - `FBX/<asset>.fbx`: one file per asset, containing its three LOD meshes.
 - `runtime_records.json`: 21 engine mesh records, consumed by the explicit registration stage.
-- `preview_v003/`: blockout, overall LOD views, front/rear/top views.
-- `verification/`: geometry, runtime vertex checks, export round-trip and registration provenance.
+- `Build/art/MeadowProps/preview/`: blockout, overall LOD views, front/rear/top views.
+- `verification/export_roundtrip.json`: binds the FBX round-trip result to the registration input.
 
 Blender **5.2.2 LTS** reopening and FBX round-trip checks passed for all 21 meshes; the GLB reimport contained seven matching LOD0 meshes. Parent-agent image review accepted the revised structure and wood variation. **AAA final visual acceptance, actual engine appearance, collision/placement behaviour and performance are not established by these checks.** Engine validation is a separate integration task.
 
@@ -60,9 +60,9 @@ Each plank receives deterministic seed-based UV cropping/offset and optional 180
 Use the actual installed Blender executable. Run stages separately so the blockout and final images can be inspected before proceeding:
 
 ```powershell
-$repo = 'C:/Users/crapa/.codex/worktrees/cpu-gpu-utilization/Project-HS'
+$repo = (Resolve-Path .).Path
 & $blender --background --factory-startup --python "$repo/tools/art/create_meadow_props_blender.py" -- --root $repo --stage geometry
-# Open preview_v003/blockout.png and inspect the source before finish.
+# Open Build/art/MeadowProps/preview/blockout.png and inspect the source before finish.
 & $blender --background --factory-startup --python "$repo/tools/art/create_meadow_props_blender.py" -- --root $repo --stage finish
 & $blender --background --factory-startup --python "$repo/tools/art/create_meadow_props_blender.py" -- --root $repo --stage verify
 & $blender --background --factory-startup --python "$repo/tools/art/create_meadow_props_blender.py" -- --root $repo --stage register
@@ -72,10 +72,4 @@ The script imports existing helpers without running their stage entry point. `fi
 
 `geometry` creates a separate scene and refuses conflicting asset names rather than deleting unrelated objects. It asserts radius limits. `finish` writes the 21-record interchange file and validates topology/UV/tangent contracts. `verify` reopens the source, checks FBX dimensions and triangle counts, imports GLB and binds its success record to the SHA256 of `runtime_records.json`.
 
-`register` requires that matching successful verification and exactly the 21 expected names. It upserts by name into `ContentSource/Models/Environment/environment_meshes.json`, preserves unrelated records and their order, saves a content-hash-named original backup, then uses a temporary file and atomic replacement. The registration manifest records script/input/output hashes and preserved-record hashes. A fixture check verified upsert, unchanged unrelated records, byte-identical repeated registration and refusal of stale verification. Registration alone does not build, cook or validate the game.
-
-## Large generated files and version control
-
-`verification/environment_meshes_before_578e81bd6ed78cdb.json` is a **100,408,352-byte** safety copy of the pre-registration environment registry. Keep it available for local recovery; it is not a new authoritative source and should not be added as another ordinary Git-tracked JSON copy. `runtime_records.json` is a **44,599,516-byte** generated interchange file duplicating the newly registered mesh values; its retention/tracking should follow the project's asset policy rather than being staged automatically. `.blend1` files are automatic Blender backups and the repository already ignores them.
-
-The script, this README, source/verification manifests and intended final assets are the meaningful handoff. No cleanup or Git tracking change was performed while writing this note; old source versions and recovery data remain preserved.
+`register` requires that matching successful verification and exactly the 21 expected names. It upserts by name into `ContentSource/Models/Environment/environment_meshes.json`, preserves unrelated records and their order, saves a content-hash-named original backup, then uses a temporary file and atomic replacement.

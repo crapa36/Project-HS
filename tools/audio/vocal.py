@@ -100,7 +100,7 @@ def _load_model():
 
 
 def generate(*, event: str = "groan", count: int = 1, seed: int = 0,
-             reference_voice: Path | None = None, output_dir: Path = Path("GeneratedAudio")) -> list[Path]:
+             reference_voice: Path | None = None, output_dir: Path | None = None) -> list[Path]:
     if event not in EVENTS:
         raise ValueError(f"event must be one of: {', '.join(EVENTS)}; spoken text is not allowed")
     if count < 1:
@@ -119,6 +119,8 @@ def generate(*, event: str = "groan", count: int = 1, seed: int = 0,
     sample_rate = int(sample_rate)
     results: list[Path] = []
     event_tag = f"[{event}]"
+    if output_dir is None:
+        output_dir = Path(__file__).resolve().parents[2] / "Build" / "audio" / ("audio.vocal." + event.replace(" ", "_"))
     folder = Path(output_dir)
     cue_id = folder.name
     for offset in range(count):
@@ -158,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     gen.add_argument("--count", type=int, default=1)
     gen.add_argument("--seed", type=int, default=0)
     gen.add_argument("--reference-voice", type=Path)
-    gen.add_argument("--output-dir", type=Path, default=Path("GeneratedAudio"))
+    gen.add_argument("--output-dir", type=Path)
     args = parser.parse_args(argv)
     if args.command == "generate":
         generate(event=args.event, count=args.count, seed=args.seed,

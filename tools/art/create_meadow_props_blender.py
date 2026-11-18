@@ -27,8 +27,11 @@ try:
 finally:
     sys.argv = saved_argv
 OUT = ROOT / 'ContentSource/Models/Environment/MeadowProps'
-for directory in ('', 'preview_v003', 'verification', 'FBX'):
-    (OUT / directory).mkdir(parents=True, exist_ok=True)
+WORK = ROOT / "Build/art/MeadowProps"
+if __name__ == "__main__":
+    (WORK / "preview").mkdir(parents=True, exist_ok=True)
+    (OUT / "verification").mkdir(parents=True, exist_ok=True)
+    (OUT / "FBX").mkdir(parents=True, exist_ok=True)
 NAMES = ('shrub_low', 'stump_roots', 'crate_intact', 'crate_broken', 'barrel_intact', 'barrel_broken', 'cart_broken')
 RADII = (1.0, 1.3, .75, .75, .65, .65, 2.0)
 SCENE = 'HS_Meadow_Props_v003'
@@ -263,7 +266,6 @@ def geometry():
     previews=bpy.data.collections.new(PREVIEWS);scene.collection.children.link(previews)
     clay=bpy.data.materials.new('MAT-meadow-props-clay');clay.diffuse_color=(.32,.30,.23,1)
     builders=(shrub,stump,lambda l:crate(l),lambda l:crate(l,True),lambda l:barrel(l),lambda l:barrel(l,True),cart)
-    manifest=[]
     for name,radius,build in zip(NAMES,RADII,builders):
         for lod in range(3):
             b=build(lod)
@@ -274,15 +276,13 @@ def geometry():
             ob=b.object(name+('' if lod==0 else '_lod'+str(lod)),assets)
             ob.data.materials.append(clay);ob.hide_render=True;ob.hide_set(True)
             ob['hs_planar_radius_m']=radius;ob['hs_seed']=712;ob['hs_static_prop']=True
-            manifest.append({'name':ob.name,'planar_radius_m':actual,'triangles':sum(len(p.vertices)-2 for p in ob.data.polygons)})
     for i,name in enumerate(NAMES):
         src=bpy.data.objects[name];ob=src.copy();ob.data=src.data;ob.name='PREVIEW-'+name;previews.objects.link(ob)
         ob.hide_render=False;ob.hide_set(False);ob.location=((i%3-1)*2.5,(i//3-1)*2.4,0);ob['hs_base']=name
     g.setup_render(scene);g.camera(scene,(8,-12,10),(0,0,.3),10)
-    (OUT/'verification/geometry.json').write_text(json.dumps(manifest,indent=2))
     bpy.ops.wm.save_as_mainfile(filepath=str(OUT/'meadow_props_blockout_v003.blend'))
-    g.render(scene,OUT/'preview_v003/blockout.png',1400,1100)
-    print('MEADOW_PROPS_GEOMETRY_READY',len(manifest))
+    g.render(scene,WORK/'preview/blockout.png',1400,1100)
+    print('MEADOW_PROPS_GEOMETRY_READY')
 
 
 def finish():
@@ -293,7 +293,6 @@ def finish():
     g.NAMES=NAMES
     records,stats=g.runtime_records()
     (OUT/'runtime_records.json').write_text(json.dumps({'meshes':records},separators=(',',':')))
-    (OUT/'verification/runtime_mesh_validation.json').write_text(json.dumps({'complete':True,'meshes':stats,'cart_wheel_track_m':1.64,'material':'ground_detail','seed':712},indent=2))
     for ob in objects():ob.hide_set(False)
     for name in NAMES:
         bpy.ops.object.select_all(action='DESELECT')
@@ -309,18 +308,18 @@ def finish():
         export_yup=True,use_active_scene=True,export_normals=True,export_tangents=True,export_materials='EXPORT')
     for ob in objects():ob.hide_set(True)
     previews=bpy.data.collections[PREVIEWS]
-    g.camera(scene,(8,-12,10),(0,0,.3),10);g.render(scene,OUT/'preview_v003/all_assets.png',1600,1200)
+    g.camera(scene,(8,-12,10),(0,0,.3),10);g.render(scene,WORK/'preview/all_assets.png',1600,1200)
     for ob in previews.objects:ob.hide_render=True
     for name in NAMES:
         ob=bpy.data.objects['PREVIEW-'+name];old=ob.location.copy();ob.location=(0,0,0);ob.hide_render=False
         size=4.4 if name=='cart_broken' else 2.7 if name=='stump_roots' else 2.0
         for label,location in (('front',(2,-3,1.7)),('rear',(-2,3,1.8)),('top',(0,-.01,5))):
-            g.camera(scene,location,(0,0,.4),size);g.render(scene,OUT/'preview_v003'/(name+'_'+label+'.png'),800,800)
+            g.camera(scene,location,(0,0,.4),size);g.render(scene,WORK/'preview'/(name+'_'+label+'.png'),800,800)
         ob.hide_render=True;ob.location=old
     for ob in previews.objects:ob.hide_render=False
     for lod in (1,2):
         for ob in previews.objects:ob.data=bpy.data.objects[ob['hs_base']+'_lod'+str(lod)].data
-        g.camera(scene,(8,-12,10),(0,0,.3),10);g.render(scene,OUT/'preview_v003'/('all_assets_lod'+str(lod)+'.png'),1200,900)
+        g.camera(scene,(8,-12,10),(0,0,.3),10);g.render(scene,WORK/'preview'/('all_assets_lod'+str(lod)+'.png'),1200,900)
     for ob in previews.objects:ob.data=bpy.data.objects[ob['hs_base']].data
     for image in bpy.data.images:
         if image.source=='FILE' and 'ground_detail' in image.name:image.pack()
@@ -377,18 +376,12 @@ def register():
     assert len({m['name'] for m in result})==len(result)
     encoded=json.dumps(document,separators=(',',':'),ensure_ascii=False).encode('utf-8')
     assert json.loads(encoded)['meshes']==result
-    backup_root=ROOT/'Build/asset-authoring-backups/meadow-props'
+    backup_root=WORK/'backups'
     backup_root.mkdir(parents=True,exist_ok=True)
     backup=backup_root/(f"environment_meshes_before_{hashlib.sha256(original).hexdigest()[:16]}.json")
     if not backup.exists():backup.write_bytes(original)
     temporary=target.with_suffix('.json.meadow.tmp')
     temporary.write_bytes(encoded);temporary.replace(target)
-    manifest={'complete':True,'source_script_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-        'runtime_records_sha256':hashlib.sha256(raw_records).hexdigest(),'environment_before_sha256':hashlib.sha256(original).hexdigest(),
-        'environment_after_sha256':hashlib.sha256(encoded).hexdigest(),'preserved_record_count':len(untouched),
-        'preserved_records_sha256':hashlib.sha256(json.dumps(untouched,separators=(',',':'),ensure_ascii=False).encode()).hexdigest(),
-        'mesh_names':sorted(expected),'original_backup':str(backup.relative_to(ROOT))}
-    (OUT/'verification/registration_manifest.json').write_text(json.dumps(manifest,indent=2))
     print('MEADOW_PROPS_REGISTERED',len(records),'meshes;',len(untouched),'unrelated records preserved')
 
 

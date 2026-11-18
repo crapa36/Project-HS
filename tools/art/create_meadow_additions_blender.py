@@ -13,7 +13,10 @@ parser.add_argument('--stage',choices=('geometry','finish','verify'),required=Tr
 args=parser.parse_args(sys.argv[sys.argv.index('--')+1:]);ROOT=args.root.resolve()
 OUT=ROOT/'ContentSource/Models/Environment/MeadowProps/v004'
 TEX=ROOT/'ContentSource/Textures/Environment/textures'
-for directory in ('','preview','verification','FBX','FBXTextures'):(OUT/directory).mkdir(parents=True,exist_ok=True)
+WORK = ROOT / "Build/art/MeadowAdditions"
+(WORK / "preview").mkdir(parents=True, exist_ok=True)
+(OUT / "FBX").mkdir(parents=True, exist_ok=True)
+(OUT / "FBXTextures").mkdir(exist_ok=True)
 NAMES=('fence_broken','fence_splitrail','sack_tied','fallen_log','rock_mossy')
 EXISTING=('crate_intact','crate_broken','barrel_intact','barrel_broken','cart_broken')
 RADII=(1.35,1.40,.50,1.75,1.05)
@@ -246,7 +249,6 @@ def preview_group(names):
 
 def geometry():
     assert not bpy.data.scenes.get(SCENE),'Inspect existing owned scene before regeneration'
-    bpy.ops.wm.save_as_mainfile(filepath=str(OUT/'prebuild_checkpoint_v004.blend'))
     scene=bpy.data.scenes.new(SCENE);bpy.context.window.scene=scene;scene.unit_settings.system='METRIC'
     assets=bpy.data.collections.new(ASSETS);scene.collection.children.link(assets);previews=bpy.data.collections.new(PREVIEWS);scene.collection.children.link(previews)
     clay=bpy.data.materials.new('MAT-additions-clay');clay.diffuse_color=(.35,.32,.24,1)
@@ -266,8 +268,7 @@ def geometry():
         src=bpy.data.objects[name];ob=src.copy();ob.data=src.data;ob.name='PREVIEW-'+name;previews.objects.link(ob);ob.hide_render=False;ob.hide_set(False);ob['hs_base']=name
         local=index%5;ob.location=((local%3-1)*3.2,(local//3-.5)*2.7,0)
     g.setup_render(scene);scene.cycles.samples=16;preview_group(NAMES);g.camera(scene,(7,-10,8),(0,0,.3),10.5)
-    (OUT/'verification/geometry.json').write_text(json.dumps(manifest,indent=2))
-    bpy.ops.wm.save_as_mainfile(filepath=str(OUT/'meadow_props_blockout_v004.blend'));g.render(scene,OUT/'preview/blockout.png',1200,900)
+    bpy.ops.wm.save_as_mainfile(filepath=str(OUT/'meadow_props_blockout_v004.blend'));g.render(scene,WORK/'preview/blockout.png',1200,900)
     print('V004_GEOMETRY_READY',json.dumps({r['name']:r['triangles'] for r in manifest}))
 
 
@@ -293,25 +294,23 @@ def finish():
         scene=bpy.data.scenes[SCENE];bpy.context.window_manager.windows[0].scene=scene;atlas();new=material();old=g.material()
         for names,mat,layer,file in [(NAMES,new,1,'runtime_records.json'),(EXISTING,old,0,'optimized_existing_runtime_records.json')]:
             for ob in objects(names):ob.data.materials.clear();ob.data.materials.append(mat)
-            g.NAMES=names;records,stats=g.runtime_records()
+            g.NAMES=names;records,_=g.runtime_records()
             for record in records:
                 for vertex in record['vertices']:vertex[12]=layer
-            for item in stats:item['texture_layer']=layer;item['renderer_material_ordinal']=15
             path=OUT/file;temporary=path.with_suffix('.json.tmp');temporary.write_text(json.dumps({'meshes':records},separators=(',',':')));temporary.replace(path)
-            (OUT/'verification'/('new_runtime_validation.json' if layer else 'optimized_existing_runtime_validation.json')).write_text(json.dumps({'complete':True,'meshes':stats,'array_layer':layer,'source_sha256':hashlib.sha256((OUT/file).read_bytes()).hexdigest()},indent=2))
         export_set(NAMES,'meadow_additions_v004.glb');export_set(EXISTING,'optimized_existing_v004.glb')
         for image in bpy.data.images:
             if image.source=='FILE' and ('ground_detail' in image.name or 'meadow_additions' in image.name):image.pack()
-        preview_group(NAMES);g.camera(scene,(7,-10,8),(0,0,.3),10.5);g.render(scene,OUT/'preview/all_assets.png',1600,1100)
+        preview_group(NAMES);g.camera(scene,(7,-10,8),(0,0,.3),10.5);g.render(scene,WORK/'preview/all_assets.png',1600,1100)
         for name in NAMES:
             preview_group(())
             ob=bpy.data.objects['PREVIEW-'+name];oldpos=ob.location.copy();ob.location=(0,0,0);ob.hide_render=False
             bounds=ob.dimensions;scale=max(bounds.x,bounds.y,bounds.z)*1.6
             target=(0,0,bounds.z*.45)
             for label,location in [('front',(3,-4,2.8)),('rear',(-3,4,2.5))]:
-                g.camera(scene,location,target,scale);g.render(scene,OUT/'preview'/(name+'_'+label+'.png'),640,640)
+                g.camera(scene,location,target,scale);g.render(scene,WORK/'preview'/(name+'_'+label+'.png'),640,640)
             ob.location=oldpos
-        preview_group(EXISTING);g.camera(scene,(7,-10,8),(0,0,.3),9.0);g.render(scene,OUT/'preview/optimized_existing.png',1400,1000)
+        preview_group(EXISTING);g.camera(scene,(7,-10,8),(0,0,.3),9.0);g.render(scene,WORK/'preview/optimized_existing.png',1400,1000)
         preview_group(NAMES);g.camera(scene,(7,-10,8),(0,0,.3),10.5)
         bpy.ops.wm.save_as_mainfile(filepath=str(OUT/'meadow_additions_v004.blend'))
         print('V004_FINISH_READY')
@@ -342,7 +341,6 @@ def verify():
             records=json.loads((OUT/filename).read_text())['meshes'];assert len(records)==15
             for m in records:
                 assert len(m['indices'])%3==0 and max(m['indices'])<len(m['vertices']);assert all(len(v)==13 and v[12]==layer for v in m['vertices'])
-        (OUT/'verification/export_roundtrip.json').write_text(json.dumps({'complete':True,'blender_version':bpy.app.version_string,'fbx_meshes':report,'glb_files':2,'glb_meshes':10,'runtime_records_per_set':15,'registry_modified':False},indent=2))
         print('V004_ROUNDTRIP_PASS',len(report),'FBX meshes + 2 GLBs')
 
 

@@ -1,6 +1,6 @@
 {
   "id": "ground_detail",
-  "version": 6,
+  "version": 7,
   "domain": "surface",
   "shading_model": "metallic_roughness",
   "parameters": [

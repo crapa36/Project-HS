@@ -24,11 +24,12 @@ SOURCE = ROOT / "ContentSource/Models/Environment/GroundDetail"
 OUT = SOURCE if OPT.revision == "v001" else SOURCE / OPT.revision
 PACK = ROOT / "ContentSource/Textures/Environment"
 TEX = PACK / "textures"
-OUT.mkdir(parents=True, exist_ok=True)
-(OUT / "preview").mkdir(exist_ok=True)
-(OUT / "verification").mkdir(exist_ok=True)
-(OUT / "FBX").mkdir(exist_ok=True)
-(OUT / "FBXTextures").mkdir(exist_ok=True)
+WORK = ROOT / "Build/art/GroundDetail" / OPT.revision
+if __name__ == "__main__":
+    (WORK / "preview").mkdir(parents=True, exist_ok=True)
+    (OUT / "verification").mkdir(parents=True, exist_ok=True)
+    (OUT / "FBX").mkdir(parents=True, exist_ok=True)
+    (OUT / "FBXTextures").mkdir(exist_ok=True)
 NAMES = ("flower_daisy", "flower_buttercup", "flower_violet", "clover_patch",
          "ground_leaves", "twig_cluster", "fence_short")
 TILES = ("leaf_green", "clover", "daisy", "buttercup", "violet_upper", "violet_lower",
@@ -598,7 +599,7 @@ def geometry():
         ob.hide_render=False;ob.hide_set(False);ob.location=loc;ob["hs_base"]=name
     setup_render(scene);camera(scene,(3,-4.5,4),(0,0,.13),3.5)
     bpy.ops.wm.save_as_mainfile(filepath=str(OUT/("ground_detail_blockout_"+OPT.revision+".blend")))
-    render(scene,OUT/"preview"/"blockout.png",1200,900)
+    render(scene,WORK/"preview"/"blockout.png",1200,900)
     print("GROUND_DETAIL_GEOMETRY_READY",json.dumps({n:len(bpy.data.objects[n].data.polygons) for n in NAMES}))
 
 
@@ -639,7 +640,7 @@ def runtime_records():
     return records,stats
 
 
-def register(records,stats):
+def register(records):
     records=[index_mesh(record) for record in records]
     path=ROOT/"ContentSource/Models/Environment/environment_meshes.json"
     document=json.loads(path.read_text(encoding="utf-8"))
@@ -647,7 +648,6 @@ def register(records,stats):
     assert len(owned)==len(records), "Duplicate authored mesh names"
     base=[x for x in document["meshes"] if x["name"] not in owned]
     assert len(base)>=42 and len(document)==2
-    before=hashlib.sha256(json.dumps(base,separators=(",",":"),ensure_ascii=False).encode()).hexdigest()
     replacements={v["name"]:v for v in records}
     merged=[replacements.pop(x["name"],x) for x in document["meshes"]]
     merged.extend(replacements.values())
@@ -675,9 +675,6 @@ def register(records,stats):
         doc["opaque_mesh"]["materials"]=previous+[addition];p.write_text(json.dumps(doc,indent=2)+"\n",encoding="utf-8")
         p=PACK/"baked_materials.json";doc=json.loads(p.read_text(encoding="utf-8"))
         doc["ground_detail"]=[addition["textures"]];p.write_text(json.dumps(doc,indent=2)+"\n",encoding="utf-8")
-    (OUT/"verification"/"runtime_mesh_validation.json").write_text(json.dumps({"complete":True,"baseline_mesh_count":len(base),"baseline_mesh_values_sha256":before,
-        "unowned_mesh_values_preserved":True,"total_meshes":len(merged),"new_meshes":stats,"coordinate_transform":"Blender Z-up -> engine Y-up: (x,z,-y), proper rotation determinant +1",
-        "uv_tangent_contract":"Flip V into PNG coordinates before calc_tangents; rotate tangent with position/normal and preserve recalculated bitangent sign"},indent=2),encoding="utf-8")
 
 
 def exports():
@@ -715,28 +712,28 @@ def finish():
         for ob in bpy.data.collections["COL-ground-detail-assets"].objects:
             ob.data.materials.clear();ob.data.materials.append(m)
         records,stats=runtime_records()
-        (OUT/"runtime_records.json").write_text(json.dumps({"meshes":records,"stats":stats},separators=(",",":")),encoding="utf-8")
+        (OUT/"runtime_records.json").write_text(json.dumps({"meshes":records},separators=(",",":")),encoding="utf-8")
         exports()
         # Packed engineering source keeps all map inputs portable; FBX uses relative external PNGs.
         for im in bpy.data.images:
             if im.source=="FILE" and "ground_detail" in im.name:im.pack()
         camera(scene,(3,-4.5,4),(0,0,.13),3.5)
         bpy.ops.wm.save_as_mainfile(filepath=str(OUT/("ground_detail_"+OPT.revision+".blend")))
-        render(scene,OUT/"preview"/"all_assets.png",1600,1200)
+        render(scene,WORK/"preview"/"all_assets.png",1600,1200)
         previews=bpy.data.collections["COL-ground-detail-preview"]
         for ob in previews.objects:ob.hide_render=True
         for name in NAMES:
             ob=bpy.data.objects["PREVIEW-"+name];old=ob.location.copy();ob.location=(0,0,0);ob.hide_render=False
             scale=2.15 if name=="fence_short" else .95 if name.startswith("flower") else .82
             camera(scene,(1.2,-1.6,1.3 if name!="fence_short" else 1.0),(0,0,.32 if name=="fence_short" else .20 if name.startswith("flower") else .10),scale)
-            render(scene,OUT/"preview"/(name+"_close.png"),800,800)
+            render(scene,WORK/"preview"/(name+"_close.png"),800,800)
             camera(scene,(1.2,-1.6,1.7),(0,0,.18),2.7 if name=="fence_short" else 1.9)
-            render(scene,OUT/"preview"/(name+"_game_scale.png"),400,400)
+            render(scene,WORK/"preview"/(name+"_game_scale.png"),400,400)
             ob.hide_render=True;ob.location=old
         for ob in previews.objects:ob.hide_render=False
         for lod in (1,2):
             set_preview_lod(lod);camera(scene,(3,-4.5,4),(0,0,.13),3.5)
-            render(scene,OUT/"preview"/("all_assets_lod"+str(lod)+".png"),1200,900)
+            render(scene,WORK/"preview"/("all_assets_lod"+str(lod)+".png"),1200,900)
         set_preview_lod(0);camera(scene,(3,-4.5,4),(0,0,.13),3.5)
         bpy.ops.wm.save_as_mainfile(filepath=str(OUT/("ground_detail_"+OPT.revision+".blend")))
         print("GROUND_DETAIL_FINISH_READY",json.dumps({x["name"]:x["triangles"] for x in stats}))
@@ -773,7 +770,7 @@ def verify():
             key=next(k for k in NAMES if ob.name==k or ob.name.startswith(k+"."))
             assert len(ob.data.loop_triangles)==source[key]
             assert ob.data.uv_layers.active and len(ob.data.materials)==1
-        (OUT/"verification"/"export_roundtrip.json").write_text(json.dumps({"complete":True,"blender_version":bpy.app.version_string,
+        (OUT/"verification/export_roundtrip.json").write_text(json.dumps({"complete":True,"blender_version":bpy.app.version_string,
             "runtime_records_sha256":hashlib.sha256((OUT/"runtime_records.json").read_bytes()).hexdigest(),
             "fbx_roundtrip":report,"glb_roundtrip":{"meshes":7,"embedded_maps":True,"triangles_match":True},"actual_visual_review":"See preview images; human/agent image review is separate from structural checks."},indent=2),encoding="utf-8")
         print("GROUND_DETAIL_ROUNDTRIP_PASS",len(report),"FBX files + GLB; 21 LOD meshes.")
@@ -785,7 +782,7 @@ def register_verified():
     assert report["complete"] and hashlib.sha256(encoded).hexdigest()==report["runtime_records_sha256"], "Runtime records changed after export verification"
     data=json.loads(encoded)
     owned={n+s for n in NAMES[:4] for s in ("","_lod1","_lod2")} if OPT.revision == "v002" else {m["name"] for m in data["meshes"]}
-    register([m for m in data["meshes"] if m["name"] in owned], [m for m in data["stats"] if m["name"] in owned])
+    register([m for m in data["meshes"] if m["name"] in owned])
     print("GROUND_DETAIL_REGISTERED",len(owned),"verified meshes")
 
 

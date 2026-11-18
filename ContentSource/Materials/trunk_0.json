@@ -1,6 +1,6 @@
 {
   "id": "trunk_0",
-  "version": 6,
+  "version": 7,
   "domain": "surface",
   "shading_model": "metallic_roughness",
   "parameters": [

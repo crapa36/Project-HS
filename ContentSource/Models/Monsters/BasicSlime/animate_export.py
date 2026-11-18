@@ -60,6 +60,8 @@ cam.location=(.75,-1.8,1.05); aim(cam,(0,0,.20)); data.type='ORTHO'; data.ortho_
 scene.render.engine='CYCLES'; scene.cycles.samples=32
 scene.render.resolution_x=800; scene.render.resolution_y=800; scene.render.resolution_percentage=100
 scene.view_settings.view_transform='Standard'
-scene.render.image_settings.file_format='PNG'; scene.render.filepath=str(BASE/'preview.png')
+preview = BASE.parents[3] / 'Build/art/BasicSlime'
+preview.mkdir(parents=True, exist_ok=True)
+scene.render.image_settings.file_format='PNG'; scene.render.filepath=str(preview/'preview.png')
 bpy.ops.wm.save_as_mainfile(filepath=str(BASE/'BasicSlime.blend'))
 print(json.dumps({'exports':[str(BASE/'BasicSlime.fbx')]+[str(ANIMS/(n+'.fbx')) for n in clips],'blend':bpy.data.filepath}))

@@ -346,7 +346,6 @@ def export():
             scene['actions']={name:action.name for name,(action,_) in actions.items()}
             rig.animation_data.action=actions['Idle'][0];scene.frame_start=1;scene.frame_end=121;scene.frame_set(1)
         reports.append({'variant':variant,'vertices':len(obj.data.vertices),'triangles':sum(len(p.vertices)-2 for p in obj.data.polygons),'bounds':list(obj.dimensions),'rig_controls':len(rig.data.bones)})
-    (BASE/'asset_report.json').write_text(json.dumps(reports,indent=2)+'\n',encoding='utf-8')
     bpy.ops.wm.save_as_mainfile(filepath=str(BASE/'SlimeFamily.blend'))
     print(json.dumps(reports))
 
@@ -374,6 +373,8 @@ def studio():
     scene.render.engine='CYCLES';scene.cycles.samples=48
     scene.render.resolution_x=1500;scene.render.resolution_y=750;scene.render.resolution_percentage=100
     scene.view_settings.view_transform='AgX';scene.render.image_settings.file_format='PNG'
-    scene.render.filepath=str(BASE/'family_preview.png')
+    preview = BASE.parents[3] / 'Build/art/SlimeFamily'
+    preview.mkdir(parents=True, exist_ok=True)
+    scene.render.filepath=str(preview/'family_preview.png')
     bpy.ops.wm.save_as_mainfile(filepath=str(BASE/'SlimeFamily.blend'))
     bpy.ops.render.render(write_still=True)

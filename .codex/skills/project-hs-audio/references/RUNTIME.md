@@ -48,8 +48,8 @@ Default: `[groan]`.
 Example:
 
 ```powershell
-tools\audio\.venv-vocal\Scripts\python.exe tools/audio/vocal.py generate --event groan --count 3 --seed 41 --output-dir GeneratedAudio\audio.vocal.groan
-tools\audio\.venv-vocal\Scripts\python.exe tools/audio/finalize.py GeneratedAudio\audio.vocal.groan\v01.wav GeneratedAudio\audio.vocal.groan\v01.wav --kind vocal-sfx
+tools\audio\.venv-vocal\Scripts\python.exe tools/audio/vocal.py generate --event groan --count 3 --seed 41 --output-dir Build\audio\audio.vocal.groan
+tools\audio\.venv-vocal\Scripts\python.exe tools/audio/finalize.py Build\audio\audio.vocal.groan\v01.wav Build\audio\audio.vocal.groan\v01.wav --kind vocal-sfx
 ```
 
 A reference voice is optional because the pinned snapshot contains built-in conditions.

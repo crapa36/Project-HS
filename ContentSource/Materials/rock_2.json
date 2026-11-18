@@ -1,6 +1,6 @@
 {
   "id": "rock_2",
-  "version": 6,
+  "version": 7,
   "domain": "surface",
   "shading_model": "metallic_roughness",
   "parameters": [
