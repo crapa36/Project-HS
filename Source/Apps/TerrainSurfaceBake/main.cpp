@@ -15,7 +15,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -82,7 +81,7 @@ struct TerrainBc7Encoder
             std::to_string(desc.Revision) + "." + std::to_string(static_cast<std::uint64_t>(driver.QuadPart));
     }
 
-    std::vector<std::byte> Compress(std::span<const std::byte> payload) const
+    DirectX::ScratchImage Compress(std::span<const rd::TextureSubresourceView> subresources) const
     {
         constexpr std::size_t edge = rd::kTerrainSurfacePageEdge, slices = 3, mips = rd::kTerrainSurfacePageMips;
         DirectX::TexMetadata metadata{};
@@ -91,22 +90,13 @@ struct TerrainBc7Encoder
         metadata.format = DXGI_FORMAT_R8G8B8A8_UNORM;
         metadata.dimension = DirectX::TEX_DIMENSION_TEXTURE2D;
         std::array<DirectX::Image, slices * mips> input{};
-        std::size_t offset{};
-        for (std::size_t slice = 0; slice < slices; ++slice)
-            for (std::size_t mip = 0; mip < mips; ++mip)
-            {
-                const auto width = std::max<std::size_t>(1, edge >> mip);
-                const auto row = width * 4;
-                const auto size = row * width;
-                Require(offset <= payload.size() && size <= payload.size() - offset,
-                    "Invalid terrain RGBA8 subresource payload");
-                auto &image = input[slice * mips + mip];
-                image.width = width; image.height = width; image.format = metadata.format;
-                image.rowPitch = row; image.slicePitch = size;
-                image.pixels = reinterpret_cast<std::uint8_t *>(const_cast<std::byte *>(payload.data() + offset));
-                offset += size;
-            }
-        Require(offset == payload.size(), "Terrain RGBA8 payload has trailing bytes");
+        Require(subresources.size() == input.size(), "Unexpected terrain readback subresource count");
+        for (std::size_t i = 0; i < input.size(); ++i)
+        {
+            const auto &source = subresources[i];
+            input[i] = {source.width, source.height, metadata.format, source.row_pitch, source.slice_pitch,
+                reinterpret_cast<std::uint8_t *>(const_cast<std::byte *>(source.bytes.data()))};
+        }
         DirectX::ScratchImage compressed;
         const auto result = device
             ? DirectX::Compress(device.Get(), input.data(), input.size(), metadata,
@@ -114,31 +104,7 @@ struct TerrainBc7Encoder
             : DirectX::Compress(input.data(), input.size(), metadata,
                 DXGI_FORMAT_BC7_UNORM, DirectX::TEX_COMPRESS_PARALLEL, 0.5f, compressed);
         Require(SUCCEEDED(result), "Terrain BC7 compression failed");
-        std::vector<std::byte> output;
-        std::size_t encoded_bytes{};
-        for (std::size_t mip = 0; mip < mips; ++mip)
-        {
-            const auto width = std::max<std::size_t>(1, edge >> mip);
-            const auto blocks = (width + 3) / 4;
-            encoded_bytes += blocks * blocks * 16 * slices;
-        }
-        output.reserve(encoded_bytes);
-        for (std::size_t slice = 0; slice < slices; ++slice)
-            for (std::size_t mip = 0; mip < mips; ++mip)
-            {
-                const auto *image = compressed.GetImage(mip, slice, 0);
-                const auto width = std::max<std::size_t>(1, edge >> mip);
-                const auto blocks = (width + 3) / 4;
-                const auto row = blocks * 16;
-                Require(image && image->rowPitch >= row && image->slicePitch >= image->rowPitch * blocks,
-                    "Invalid terrain BC7 subresource layout");
-                for (std::size_t y = 0; y < blocks; ++y)
-                {
-                    const auto *begin = reinterpret_cast<const std::byte *>(image->pixels + y * image->rowPitch);
-                    output.insert(output.end(), begin, begin + row);
-                }
-            }
-        return output;
+        return compressed;
     }
 };
 
@@ -166,13 +132,8 @@ bool Current(const fs::path &build, const ap::ActionSpec &spec)
                 if (metadata.section_products[i * 3 + plane] != id ||
                     snapshot.ProductMetadata(id).value("dependencies", std::vector<std::string>{}) != dependencies)
                     return false;
-                const auto plane_bytes = snapshot.ReadProductBytes(id, ignored);
-                const auto plane_package = rd::ReadTexturePackage(
-                    std::as_bytes(std::span(plane_bytes.data(), plane_bytes.size())), hs::MakeAssetId(id));
-                const auto &shape = plane_package.description;
-                if (shape.width != metadata.description.width || shape.height != metadata.description.height ||
-                    shape.mip_count != metadata.description.mip_count || shape.format != metadata.description.format ||
-                    shape.array_size != 1 || plane_package.subresources.size() != shape.mip_count) return false;
+                fs::path path;
+                snapshot.ReadProduct(id, ignored, path);
             }
         }
         dependencies = metadata.section_products;
@@ -185,32 +146,32 @@ bool Current(const fs::path &build, const ap::ActionSpec &spec)
 
 int main(int argc, char **argv)
 {
-    fs::path source, build, pointer;
+    fs::path build, pointer;
+    bool gpu_validation = false;
     try
     {
         std::set<std::string> seen;
         for (int i = 1; i < argc; ++i)
         {
             std::string_view argument(argv[i]);
-            if (argument == "--produce-terrain-surface") continue;
+            if (argument == "--gpu-validation") { gpu_validation = true; continue; }
             const auto separator = argument.find('=');
             const auto name = argument.substr(0, separator);
-            Require(name == "--source-root" || name == "--build-root" || name == "--generation-pointer" ||
-                name == "--generation", "Unknown terrain surface argument: " + std::string(name));
-            const std::string key = name == "--generation" ? "--generation-pointer" : std::string(name);
+            Require(name == "--build-root" || name == "--generation",
+                "Unknown terrain surface argument: " + std::string(name));
+            const std::string key(name);
             Require(seen.emplace(key).second, "Duplicate terrain surface argument: " + key);
             std::string_view value;
             if (separator != std::string_view::npos) value = argument.substr(separator + 1);
             else { Require(i + 1 < argc, "Missing argument value: " + key); value = argv[++i]; }
             Require(!value.empty(), "Empty terrain surface argument: " + key);
-            if (name == "--source-root") source = value;
-            else if (name == "--build-root") build = value;
+            if (name == "--build-root") build = value;
             else pointer = value;
         }
-        Require(source.is_absolute() && build.is_absolute() && pointer.is_absolute(),
-            "Terrain surface producer requires absolute source/build/generation-pointer paths");
-        ap::RequireDirectory(source); ap::RequireDirectory(build);
-        source = fs::canonical(source); build = fs::canonical(build);
+        Require(build.is_absolute() && pointer.is_absolute(),
+            "Terrain surface producer requires absolute build and generation paths");
+        ap::RequireDirectory(build);
+        build = fs::canonical(build);
         hs::SelectedGeneration generation;
         Require(hs::LoadSelectedGeneration(pointer, generation));
         for (const auto &[id, unused] : generation.product_paths)
@@ -226,8 +187,7 @@ int main(int argc, char **argv)
         std::set<std::string> visited;
         std::vector<std::string> pending{
             "game-data/simulation-rules", "render/material/terrain.rpkg", "render/meadow_ground.rpkg",
-            "terrain/producer/bake_color_cs.dxil", "terrain/producer/bake_base_cs.dxil",
-            "terrain/producer/bake_weight_cs.dxil", "terrain/producer/mip_cs.dxil"};
+            "terrain/producer/bake_cs.dxil", "terrain/producer/mip_cs.dxil"};
         while (!pending.empty())
         {
             auto id = std::move(pending.back()); pending.pop_back();
@@ -251,17 +211,21 @@ int main(int argc, char **argv)
         std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
         if (Current(build, spec))
         {
-            ap::TouchActionResult(build / "Actions" / kNamespace / "result.json");
             return 0;
         }
 
         const auto scene = hs::app::WorldTransportScene(generation, kGameplaySeed);
         Require(scene && !scene->instances.empty(), "Terrain bake world scene is empty");
-        const auto stage = ap::CreateStage(build / "Actions" / kNamespace);
+        const auto action_directory = build / "Actions" / kNamespace;
+        const auto stage = ap::CreateStage(action_directory);
         try
         {
             hs::RendererConfig config;
             config.width = 320; config.height = 180;
+            if (gpu_validation)
+                config.artifact_directory = action_directory;
+            config.gpu_validation = gpu_validation;
+            config.validation = gpu_validation;
 #ifndef NDEBUG
             config.validation = true;
 #endif
@@ -270,66 +234,53 @@ int main(int argc, char **argv)
             config.foliage_quality = hs::GraphicsQuality::Ultra;
             config.texture_quality = hs::GraphicsQuality::Ultra;
             config.geometry_quality = hs::GraphicsQuality::Ultra;
-            config.content_generation_id = generation.id;
-            config.content_generation_lease = std::make_shared<const hs::SelectedGeneration>(generation);
-            config.product_paths = generation.product_paths;
-            config.product_digests = generation.product_digests;
+            config.content_generation_id = std::move(generation.id);
+            config.product_paths = std::move(generation.product_paths);
+            config.product_digests = std::move(generation.product_digests);
+            config.content_generation_lease = std::make_shared<const hs::SelectedGeneration>(std::move(generation));
 
-            std::vector<rd::TerrainSurfaceSection> sections;
             std::vector<std::string> section_ids, dependencies;
-            std::vector<bool> written;
             std::vector<ap::Product> products;
             std::vector<std::byte> metadata;
+            const auto write_product = [&](std::string logical_id, std::string filename,
+                                           std::span<const std::byte> bytes,
+                                           std::vector<std::string> product_dependencies) {
+                ap::WriteBytes(stage / filename, bytes);
+                return ap::Product{std::move(logical_id), std::move(filename), ap::Sha256Bytes(bytes),
+                                   bytes.size(), std::move(product_dependencies)};
+            };
             rd::TextureDescription description{};
-            bool begun = false;
-            Require(hs::D3D12Renderer::BakeTerrainSurfacePages(config, scene,
+            Require(hs::D3D12Renderer::BakeTerrainSurfacePages(std::move(config), scene,
                 [&](std::span<const rd::TerrainSurfaceSection> incoming, rd::TextureDescription global,
                     std::array<std::byte, 32> identity) {
-                    Require(!begun && !incoming.empty() && incoming.size() <= UINT32_MAX / 3 &&
-                        global.width == rd::kTerrainSurfacePageEdge && global.height == rd::kTerrainSurfacePageEdge &&
-                        global.mip_count == rd::kTerrainSurfacePageMips &&
-                        global.format == rd::kTextureFormatRgba8 && global.array_size == incoming.size() * 3,
-                        "Native terrain surface description is invalid");
-                    sections.assign(incoming.begin(), incoming.end());
                     description = global;
                     description.format = rd::kTextureFormatBc7;
-                    written.resize(sections.size());
-                    for (std::size_t i = 0; i < sections.size(); ++i)
+                    for (std::size_t i = 0; i < incoming.size(); ++i)
                         for (std::size_t plane = 0; plane < 3; ++plane) section_ids.push_back(SectionId(i, plane));
                     metadata = rd::BuildTerrainSurfacePackage(
-                        hs::MakeAssetId(kMetadata), section_ids, sections, description, identity);
-                    begun = true;
+                        hs::MakeAssetId(kMetadata), section_ids, incoming, description, identity);
                     return hs::Result::Success();
                 },
-                [&](std::uint32_t index, std::span<const std::byte> payload) {
-                    Require(begun && index < sections.size() && !written[index], "Unexpected terrain section callback");
+                [&](std::uint32_t index, std::span<const rd::TextureSubresourceView> subresources) {
                     auto local = description; local.array_size = 1;
-                    const auto compressed = encoder.Compress(payload);
-                    Require(compressed.size() % 3 == 0, "Invalid terrain BC7 plane payload size");
-                    const auto plane_bytes = compressed.size() / 3;
+                    const auto compressed = encoder.Compress(subresources);
+                    // DirectXTex stores tightly packed 2D array slices in slice/mip order.
+                    const auto bytes = std::as_bytes(std::span(compressed.GetPixels(), compressed.GetPixelsSize()));
+                    Require(bytes.size() % 3 == 0, "Invalid terrain BC7 plane payload size");
+                    const auto plane_bytes = bytes.size() / 3;
                     for (std::size_t plane = 0; plane < 3; ++plane)
                     {
                         const auto &id = section_ids[size_t(index) * 3 + plane];
-                        const auto plane_payload = std::span(compressed).subspan(plane * plane_bytes, plane_bytes);
+                        const auto plane_payload = bytes.subspan(plane * plane_bytes, plane_bytes);
                         const auto package = rd::BuildTexturePackage(hs::MakeAssetId(id), dependencies, local, plane_payload);
                         const auto filename = SectionFile(index, plane);
-                        const auto path = stage / filename;
-                        ap::WriteBytes(path, package);
-                        auto product = ap::HashProduct(id, filename, path);
-                        product.dependencies = dependencies;
-                        products.push_back(std::move(product));
+                        products.push_back(write_product(id, filename, package, dependencies));
                     }
-                    written[index] = true;
                     return hs::Result::Success();
                 }));
-            Require(begun && std::ranges::all_of(written, [](bool value) { return value; }),
-                "Native terrain bake did not complete every section");
-            const auto metadata_path = stage / kMetadataFile;
-            ap::WriteBytes(metadata_path, metadata);
-            auto product = ap::HashProduct(std::string(kMetadata), std::string(kMetadataFile), metadata_path);
-            product.dependencies = section_ids;
-            std::ranges::sort(product.dependencies);
-            products.push_back(std::move(product));
+            std::ranges::sort(section_ids);
+            products.push_back(write_product(std::string(kMetadata), std::string(kMetadataFile), metadata,
+                                             std::move(section_ids)));
             ap::Publish(build, spec, stage, std::move(products));
         }
         catch (...) { ap::RemoveStageAfterFailure(stage); throw; }

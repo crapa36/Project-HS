@@ -288,22 +288,12 @@ void IndexVertices(std::span<const rd::ExpandedVertex> source,
             "invalid expanded geometry input");
     rd::ValidateExpandedVertices(source);
     static_assert(std::is_trivially_copyable_v<rd::ExpandedVertex>);
-    static_assert(sizeof(rd::ExpandedVertex) <= 256);
-    const auto &first = source.front();
     constexpr auto stride = sizeof(rd::ExpandedVertex);
-    // Streams compare every field, excluding C++ padding; serialization remains portable.
-    const std::array<meshopt_Stream, 8> streams{{
-        {first.position.data(), 3 * sizeof(float), stride},
-        {first.normal.data(), 3 * sizeof(float), stride},
-        {first.bone_indices.data(), 4 * sizeof(std::uint16_t), stride},
-        {first.bone_weights.data(), 4 * sizeof(float), stride},
-        {first.uv.data(), 2 * sizeof(float), stride},
-        {first.tangent.data(), 4 * sizeof(float), stride},
-        {&first.material_index, sizeof(first.material_index), stride},
-        {&first.optical_component_id, sizeof(first.optical_component_id), stride}}};
+    static_assert(stride == rd::kExpandedVertexStride);
+    // The fields fill this stride, so binary comparison includes every field without padding.
     std::vector<unsigned> remap(source.size());
-    const auto count = meshopt_generateVertexRemapMulti(remap.data(), nullptr, source.size(),
-        source.size(), streams.data(), streams.size());
+    const auto count = meshopt_generateVertexRemap(remap.data(), nullptr, source.size(),
+        source.data(), source.size(), stride);
     vertices.resize(count); indices.resize(source.size());
     meshopt_remapVertexBuffer(vertices.data(), source.data(), source.size(), stride, remap.data());
     meshopt_remapIndexBuffer(indices.data(), nullptr, source.size(), remap.data());

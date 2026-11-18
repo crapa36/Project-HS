@@ -1,12 +1,11 @@
 #include "audio_catalog.hpp"
-#include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/core/cooked_format.hpp>
-#include <hs/core/process_info.hpp>
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <array>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <unordered_set>
 namespace hs {
@@ -174,47 +173,6 @@ namespace audio_detail {
 }
 
 }
-Result AudioEngine::Initialize(const SettingsData &settings)
-{
-    SelectedGeneration generation;
-    if (auto loaded = LoadSelectedGeneration(
-            CurrentExecutableDirectory() / "GenerationState/runtime-full.json",
-            generation); !loaded)
-        return loaded;
-    const auto initialized = Initialize(settings, generation.product_paths);
-    if (initialized)
-        RetainGeneration(std::make_shared<const SelectedGeneration>(std::move(generation)));
-    return initialized;
-}
-
-Result AudioEngine::Initialize(const SettingsData &settings,
-                               const std::filesystem::path &audio_directory)
-{
-    return InitializeResolved(settings, [&](std::string_view logical_id,
-                                            std::filesystem::path &path) {
-        path = audio_directory / std::string(logical_id.substr(6));
-        return Result::Success();
-    });
-}
-
-Result AudioEngine::Initialize(
-    const SettingsData &settings,
-    const std::unordered_map<std::string, std::filesystem::path> &product_paths)
-{
-    return InitializeResolved(settings, [&](std::string_view logical_id,
-                                            std::filesystem::path &path) {
-        const auto found = product_paths.find(std::string(logical_id));
-        if (found == product_paths.end())
-            return Result::Failure(ErrorCode::TaskFailed, "audio",
-                                   "audio product missing: " + std::string(logical_id));
-        if (!found->second.is_absolute())
-            return Result::Failure(ErrorCode::InvalidArgument, "audio",
-                                   "audio product path is not absolute: " + std::string(logical_id));
-        path = found->second;
-        return Result::Success();
-    });
-}
-
 static Result PrepareResolved(const std::function<Result(std::string_view, std::filesystem::path &)> &resolve_path,
                               std::shared_ptr<PreparedAudio> &output)
 {
@@ -331,10 +289,4 @@ Result PrepareAudio(const std::unordered_map<std::string, std::filesystem::path>
     }, output);
 }
 
-Result AudioEngine::InitializeResolved(const SettingsData &settings, const ResolveAudioPath &resolve_path)
-{
-    std::shared_ptr<PreparedAudio> prepared;
-    if (auto result = PrepareResolved(resolve_path, prepared); !result) return result;
-    return Initialize(settings, std::move(prepared), {});
-}
 }

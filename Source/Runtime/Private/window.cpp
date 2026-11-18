@@ -390,7 +390,7 @@ Result Window::SetBorderless(bool borderless)
                                std::format("SetWindowLongPtrW failed: {}", GetLastError()));
     if (!SetWindowPos(window_, nullptr, target.left, target.top,
                       target.right - target.left, target.bottom - target.top,
-                      SWP_FRAMECHANGED | SWP_NOOWNERZORDER))
+                      SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING))
     {
         const auto apply_error = GetLastError();
         SetLastError(ERROR_SUCCESS);
@@ -400,7 +400,7 @@ Result Window::SetBorderless(bool borderless)
             window_, nullptr, previous_rect.left, previous_rect.top,
             previous_rect.right - previous_rect.left,
             previous_rect.bottom - previous_rect.top,
-            SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+            SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
         if (style_error != ERROR_SUCCESS || !restored_position)
             return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                                    std::format("SetWindowPos failed: {}; window rollback failed: {} / {}",
@@ -491,7 +491,7 @@ Result Window::ApplyDisplayPlacement(const GraphicsDisplayId &output, bool borde
         const auto style_error = restored_style == 0 ? GetLastError() : ERROR_SUCCESS;
         const auto restored = SetWindowPos(window_, nullptr, previous_rect.left, previous_rect.top,
             previous_rect.right - previous_rect.left, previous_rect.bottom - previous_rect.top,
-            SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE);
+            SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING);
         if (style_error != ERROR_SUCCESS || !restored)
             return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
                 std::format("Display placement failed: {}; rollback failed: {} / {}",
@@ -500,7 +500,7 @@ Result Window::ApplyDisplayPlacement(const GraphicsDisplayId &output, bool borde
                                std::format("Display placement failed: {}", apply_error));
     };
     if (!SetWindowPos(window_, nullptr, target.left, target.top, target.right - target.left,
-            target.bottom - target.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE))
+            target.bottom - target.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING))
         return rollback(GetLastError());
     if (dpi_error_) return rollback(dpi_error_);
     // Moving across monitors can change the HWND DPI. Recalculate the frame at
@@ -510,7 +510,7 @@ Result Window::ApplyDisplayPlacement(const GraphicsDisplayId &output, bool borde
     {
         if (!windowed_rect(target_dpi, target)) return rollback(GetLastError());
         if (!SetWindowPos(window_, nullptr, target.left, target.top, target.right - target.left,
-                target.bottom - target.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE))
+                target.bottom - target.top, SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING))
             return rollback(GetLastError());
         if (dpi_error_) return rollback(dpi_error_);
     }
@@ -612,7 +612,7 @@ LRESULT Window::HandleMessage(HWND window, UINT message, WPARAM wparam, LPARAM l
             return 0;
         }
         if (!SetWindowPos(window, nullptr, target.left, target.top, static_cast<int>(width),
-                static_cast<int>(height), SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED))
+                static_cast<int>(height), SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_NOSENDCHANGING))
         {
             dpi_error_ = GetLastError();
             if (!dpi_error_) dpi_error_ = ERROR_GEN_FAILURE;

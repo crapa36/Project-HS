@@ -7,8 +7,6 @@
 namespace hs::runtime_detail
 {
 // The image must be immutable and prepared by the loader; event and owner inputs remain mutable.
-std::vector<VfxDecalInput> BuildVfxTypedDecalCommands(const VfxImage &image,
- VfxEventView events, std::span<const VfxPersistentInput> persistent, double current_tick);
 void AppendVfxTypedDecalCommands(const VfxImage &image, VfxEventView events,
  std::span<const VfxPersistentInput> persistent, double current_tick,
  std::vector<VfxDecalInput> &result);

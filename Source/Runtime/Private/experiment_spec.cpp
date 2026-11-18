@@ -185,9 +185,9 @@ void ValidateConfigOverrides(const Json &value)
 
     if (value.contains("graphics_preset"))
     {
-        const auto preset = String(value.at("graphics_preset"), "config_overrides.graphics_preset");
-        if (preset != "low" && preset != "medium" && preset != "high" && preset != "ultra")
-            Invalid("config_overrides.graphics_preset", "must be low, medium, high, or ultra");
+        const auto preset = ParseGraphicsEnumToken<GraphicsPreset>(
+            String(value.at("graphics_preset"), "config_overrides.graphics_preset"));
+        if (!preset) Invalid("config_overrides.graphics_preset", "must be low, medium, high, ultra, or custom");
     }
 
     if (value.contains("pom_quality"))
@@ -258,30 +258,6 @@ void ValidateConfigOverrides(const Json &value)
 [[nodiscard]] Json ToJson(const ExperimentValue &value)
 {
     return std::visit([](const auto &item) { return Json(item); }, value);
-}
-
-[[nodiscard]] std::uint64_t FileHash(const std::filesystem::path &path)
-{
-    std::ifstream stream(path, std::ios::binary);
-    if (!stream)
-    {
-        return 0;
-    }
-    constexpr std::uint64_t offset = 14695981039346656037ull;
-    constexpr std::uint64_t prime = 1099511628211ull;
-    std::uint64_t hash = offset;
-    std::array<char, 16 * 1024> bytes{};
-    while (stream)
-    {
-        stream.read(bytes.data(), bytes.size());
-        const auto count = stream.gcount();
-        for (std::streamsize index = 0; index < count; ++index)
-        {
-            hash ^= static_cast<unsigned char>(bytes[static_cast<std::size_t>(index)]);
-            hash *= prime;
-        }
-    }
-    return hash;
 }
 
 [[nodiscard]] bool Compare(const Json &actual, const ExperimentAssertion &assertion)
@@ -373,7 +349,6 @@ Result LoadExperimentSpec(const std::filesystem::path &path, ExperimentSpec &spe
         {
             Invalid("schema_version", "must be 1");
         }
-        parsed.schema_version = static_cast<std::uint32_t>(schema);
         parsed.scenario_id = String(root.at("scenario_id"), "scenario_id");
         if (!IsSafeKey(parsed.scenario_id) || parsed.scenario_id == "." ||
             parsed.scenario_id == "..")
@@ -389,16 +364,7 @@ Result LoadExperimentSpec(const std::filesystem::path &path, ExperimentSpec &spe
             Invalid("build_hash/content_hash", "must be exactly 16 hexadecimal characters");
         }
 
-        auto &overrides = root.at("config_overrides");
-        for (const auto &[old_name, new_name] : std::array{
-                 std::pair{"capture_hero_work", "capture_translucency_diagnostics"},
-                 std::pair{"capture_hero_work_mode", "capture_translucency_diagnostics_mode"}})
-        {
-            if (!overrides.contains(old_name)) continue;
-            if (overrides.contains(new_name)) Invalid("config_overrides", "old and new diagnostic names cannot both be specified");
-            overrides[new_name] = overrides.at(old_name);
-            overrides.erase(old_name);
-        }
+        const auto &overrides = root.at("config_overrides");
         ValidateConfigOverrides(overrides);
         parsed.config_overrides_json = overrides.dump();
 
@@ -493,36 +459,27 @@ Result LoadExperimentSpec(const std::filesystem::path &path, ExperimentSpec &spe
             {
                 Invalid(std::format("probes[{}]", index), "duplicate probe");
             }
-            parsed.probes.push_back(std::move(probe));
         }
 
         const auto &captures = root.at("captures");
-        if (!captures.is_array())
+        if (!captures.is_array() || captures.size() > 1)
         {
-            Invalid("captures", "must be an array");
+            Invalid("captures", "expected zero or one final-frame capture");
         }
-        std::unordered_set<std::string> capture_paths;
-        for (std::size_t index = 0; index < captures.size(); ++index)
+        if (!captures.empty())
         {
-            const auto path_prefix = std::format("captures[{}]", index);
-            const auto &capture = captures[index];
+            const auto &capture = captures.front();
             constexpr std::array capture_fields{"tick", "path"};
-            CheckKeys(capture, path_prefix, capture_fields, capture_fields);
-            ExperimentCapture item;
-            item.tick = Unsigned(capture.at("tick"), path_prefix + ".tick");
-            item.path = String(capture.at("path"), path_prefix + ".path");
-            const std::filesystem::path relative(item.path);
-            if (item.tick > parsed.termination.maximum_tick || relative.empty() ||
-                relative.is_absolute() || relative.has_parent_path() ||
+            CheckKeys(capture, "captures[0]", capture_fields, capture_fields);
+            if (Unsigned(capture.at("tick"), "captures[0].tick") != parsed.termination.maximum_tick)
+                Invalid("captures[0].tick", "only termination.maximum_tick can be captured");
+            parsed.final_capture_path = String(capture.at("path"), "captures[0].path");
+            const std::filesystem::path relative(parsed.final_capture_path);
+            if (relative.empty() || relative.has_root_path() || relative.has_parent_path() ||
                 relative.extension() != ".png")
             {
-                Invalid(path_prefix, "capture must be a basename PNG within maximum_tick");
+                Invalid("captures[0].path", "expected a PNG basename");
             }
-            if (!capture_paths.insert(item.path).second)
-            {
-                Invalid(path_prefix + ".path", "duplicate capture path");
-            }
-            parsed.captures.push_back(std::move(item));
         }
 
         const auto &assertions = root.at("assertions");
@@ -595,75 +552,6 @@ Result LoadExperimentSpec(const std::filesystem::path &path, ExperimentSpec &spe
     }
 }
 
-Result SaveExperimentSpec(const std::filesystem::path &path, const ExperimentSpec &spec)
-{
-    try
-    {
-        Json root;
-        root["schema_version"] = spec.schema_version;
-        root["scenario_id"] = spec.scenario_id;
-        root["seed"] = spec.seed;
-        root["mode"] = ToString(spec.mode);
-        root["build_hash"] = spec.build_hash;
-        root["content_hash"] = spec.content_hash;
-        root["config_overrides"] = Json::parse(spec.config_overrides_json);
-        root["timeline_actions"] = Json::array();
-        for (const auto &action : spec.timeline_actions)
-        {
-            root["timeline_actions"].push_back(
-                {{"sequence", action.sequence},
-                 {"target_tick", action.target_tick},
-                 {"command", action.command},
-                 {"payload", Json::parse(action.payload_json)}});
-        }
-        root["probes"] = spec.probes;
-        root["captures"] = Json::array();
-        for (const auto &capture : spec.captures)
-        {
-            root["captures"].push_back({{"tick", capture.tick}, {"path", capture.path}});
-        }
-        root["assertions"] = Json::array();
-        for (const auto &assertion : spec.assertions)
-        {
-            root["assertions"].push_back(
-                {{"id", assertion.id},
-                 {"probe", assertion.probe},
-                 {"comparison", assertion.comparison},
-                 {"expected", ToJson(assertion.expected)},
-                 {"tolerance", assertion.tolerance}});
-        }
-        root["termination"] = {{"maximum_tick", spec.termination.maximum_tick},
-                               {"on_victory", spec.termination.on_victory},
-                               {"on_defeat", spec.termination.on_defeat},
-                               {"on_error", spec.termination.on_error}};
-
-        std::error_code error;
-        if (const auto parent = path.parent_path(); !parent.empty())
-        {
-            std::filesystem::create_directories(parent, error);
-            if (error)
-            {
-                return Failure(std::format("Cannot create spec directory: {}", error.message()));
-            }
-        }
-        std::ofstream stream(path, std::ios::trunc);
-        if (!stream)
-        {
-            return Failure(std::format("Cannot write spec: {}", path.string()));
-        }
-        stream << root.dump(2) << '\n';
-        if (!stream)
-        {
-            return Failure(std::format("Cannot finish spec: {}", path.string()));
-        }
-        return Result::Success();
-    }
-    catch (const std::exception &exception)
-    {
-        return Failure(exception.what());
-    }
-}
-
 Result ApplyExperimentOverrides(const ExperimentSpec &spec, ApplicationConfig &config)
 {
     try
@@ -693,12 +581,10 @@ Result ApplyExperimentOverrides(const ExperimentSpec &spec, ApplicationConfig &c
         boolean("smoke_render_lockstep", config.smoke_render_lockstep);
         if (overrides.contains("graphics_preset"))
         {
-            const auto preset = overrides.at("graphics_preset").get<std::string>();
-            if (preset == "low") config.graphics_preset = GraphicsPreset::Low;
-            else if (preset == "medium") config.graphics_preset = GraphicsPreset::Medium;
-            else if (preset == "high") config.graphics_preset = GraphicsPreset::High;
-            else if (preset == "ultra") config.graphics_preset = GraphicsPreset::Ultra;
-            else Invalid("config_overrides.graphics_preset", "must be low, medium, high, or ultra");
+            const auto preset = ParseGraphicsEnumToken<GraphicsPreset>(
+                String(overrides.at("graphics_preset"), "config_overrides.graphics_preset"));
+            if (!preset) Invalid("config_overrides.graphics_preset", "must be low, medium, high, ultra, or custom");
+            config.graphics_preset = *preset;
         }
         if (overrides.contains("pom_quality"))
         {
@@ -753,7 +639,8 @@ Result ApplyExperimentOverrides(const ExperimentSpec &spec, ApplicationConfig &c
         if (overrides.contains("vsync")) config.vsync_explicit = true;
         if (overrides.contains("borderless")) config.borderless_explicit = true;
         if (overrides.contains("bloom")) config.bloom_explicit = true;
-        if (config.capture_translucency_diagnostics || config.diagnostic_enemy_count)
+        if ((overrides.contains("capture_gpu_timings") && config.capture_gpu_timings) ||
+            config.capture_translucency_diagnostics || config.diagnostic_enemy_count)
             config.capture_diagnostics = true;
         if (overrides.contains("barrier_mode"))
         {
@@ -773,8 +660,7 @@ Result ApplyExperimentOverrides(const ExperimentSpec &spec, ApplicationConfig &c
 Result FinalizeExperimentArtifacts(const ExperimentSpec &spec,
                                    const std::filesystem::path &directory,
                                    std::string_view start_utc,
-                                   std::string_view end_utc,
-                                   int process_exit)
+                                   std::string_view end_utc)
 {
     try
     {
@@ -786,37 +672,8 @@ Result FinalizeExperimentArtifacts(const ExperimentSpec &spec,
                 return Failure(std::format("Missing experiment artifact: {}", name));
             }
         }
-        const auto generated_capture =
-            directory / std::format("capture_tick_{}.png", spec.termination.maximum_tick);
-        for (const auto &capture : spec.captures)
-        {
-            if (capture.tick != spec.termination.maximum_tick)
-            {
-                return Failure("Current render runner captures termination.maximum_tick only.");
-            }
-            const auto destination = directory / capture.path;
-            if (destination != generated_capture)
-            {
-                std::error_code error;
-                std::filesystem::copy_file(generated_capture, destination,
-                                           std::filesystem::copy_options::overwrite_existing,
-                                           error);
-                if (error)
-                {
-                    return Failure(std::format("Cannot copy capture '{}': {}", capture.path,
-                                               error.message()));
-                }
-            }
-            if (!std::filesystem::is_regular_file(destination))
-            {
-                return Failure(std::format("Missing requested capture: {}", capture.path));
-            }
-        }
-
-        if (auto saved = SaveExperimentSpec(directory / "spec.json", spec); !saved)
-        {
-            return saved;
-        }
+        if (!spec.final_capture_path.empty() && !std::filesystem::is_regular_file(directory / spec.final_capture_path))
+            return Failure(std::format("Missing requested capture: {}", spec.final_capture_path));
 
         std::ifstream input(directory / "result.json");
         Json result;
@@ -853,20 +710,6 @@ Result FinalizeExperimentArtifacts(const ExperimentSpec &spec,
                  {"passed", passed}});
         }
 
-        Json artifacts = Json::array();
-        std::vector<std::string> paths;
-        for (const auto &entry : std::filesystem::directory_iterator(directory))
-        {
-            if (entry.is_regular_file() && entry.path().filename() != "result.json")
-                paths.push_back(entry.path().filename().generic_string());
-        }
-        std::ranges::sort(paths);
-        for (const auto &path : paths)
-        {
-            const auto hash = FileHash(directory / path);
-            artifacts.push_back({{"path", path}, {"fnv1a64", std::format("{:016x}", hash)}});
-        }
-
         result["schema_version"] = 1;
         result["scenario_id"] = spec.scenario_id;
         result["mode"] = ToString(spec.mode);
@@ -874,9 +717,6 @@ Result FinalizeExperimentArtifacts(const ExperimentSpec &spec,
         result["content_hash"] = spec.content_hash;
         result["start_utc"] = start_utc;
         result["end_utc"] = end_utc;
-        result["process_exit"] = process_exit;
-        result["crash"] = false;
-        result["device_removed"] = false;
         const auto adapter_path = directory / "adapter.txt";
         if (std::ifstream adapter_file(adapter_path); adapter_file)
         {
@@ -893,10 +733,8 @@ Result FinalizeExperimentArtifacts(const ExperimentSpec &spec,
             result["driver"] = "none";
         }
         result["assertions"] = std::move(assertion_results);
-        result["artifacts"] = std::move(artifacts);
         result["execution_valid"] = assertions_passed;
         result["assertions_passed"] = assertions_passed;
-        result["user_review"] = "awaiting";
 
         std::ofstream output(directory / "result.json", std::ios::trunc);
         output << result.dump(2) << '\n';

@@ -201,7 +201,6 @@ void Produce(const fs::path &source_root, const fs::path &build_root)
     // This checks the captured inputs, not an atomic cross-file author revision.
     if (Current(build_root, spec, action_key))
     {
-        ap::TouchActionResult(actions / "result.json");
         return;
     }
     const auto stage = ap::CreateStage(actions);

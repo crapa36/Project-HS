@@ -18,13 +18,7 @@ Result ReadRange(const ShippedContentOwner &owner, const ShippingRange &range, s
 }
 Result ReadFont(const ShippedContentOwner &owner, const ShippingImageInfo &info, std::vector<std::byte> &output)
 {
-    if (!info.font_bytes || info.font_bytes > std::numeric_limits<std::uint32_t>::max() ||
-        info.font_offset < 64 || info.font_offset > owner.Size() || info.font_bytes > owner.Size()-info.font_offset)
-        return Result::Failure(ErrorCode::InvalidArgument, "ShippingFont", "compiled font range is invalid");
-    std::vector<std::byte> bytes(static_cast<std::size_t>(info.font_bytes));
-    if (auto result=owner.ReadVerified(info.font_offset, bytes, info.font_digest); !result) return result;
-    output=std::move(bytes);
-    return Result::Success();
+    return ReadRange(owner, {info.font_offset, info.font_bytes, info.font_digest}, output);
 }
 Result OpenImage(const std::filesystem::path &directory, const ShippingImageInfo &expected,
                  ShippedContentOwner &output)

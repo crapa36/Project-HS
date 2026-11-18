@@ -13,7 +13,6 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -183,73 +182,50 @@ rd::MaterialParameterType ParseParameterType(const Json &value)
 
 std::vector<rd::MaterialParameterDefinition> ParseParameterDeclarations(const Json &root, bool require_surface_defaults)
 {
-    const auto version = root.at("version").get<unsigned>();
     std::vector<rd::MaterialParameterDefinition> result;
-    if (version == 6 || version == 7)
+    const auto &definitions = root.at("parameters");
+    Require(definitions.is_array() && definitions.size() <= 64,
+            "material parameter declarations must be an array of at most 64 items");
+    for (const auto &definition : definitions)
     {
-        const auto &definitions = root.at("parameters");
-        Require(definitions.is_array() && definitions.size() <= 64,
-                "material parameter declarations must be an array of at most 64 items");
-        for (const auto &definition : definitions)
+        Require(definition.is_object() && definition.contains("id") &&
+                definition.contains("type") && definition.contains("default"),
+                "invalid material parameter declaration");
+        const bool has_min = definition.contains("uint_min");
+        const bool has_max = definition.contains("uint_max");
+        Require(definition.size() == 3 + (has_min ? 1 : 0) + (has_max ? 1 : 0),
+                "unexpected material parameter declaration fields");
+        Require(definition.at("id").is_string(), "material parameter ID must be a string");
+        rd::MaterialParameterDefinition parameter;
+        parameter.id = definition.at("id").get<std::string>();
+        parameter.type = ParseParameterType(definition.at("type"));
+        const auto components = parameter.type == rd::MaterialParameterType::Bool ||
+            parameter.type == rd::MaterialParameterType::Uint ||
+            parameter.type == rd::MaterialParameterType::Float ? 1u :
+            parameter.type == rd::MaterialParameterType::Float2 ? 2u :
+            parameter.type == rd::MaterialParameterType::Float3 ? 3u : 4u;
+        const auto &value = definition.at("default");
+        if (parameter.type == rd::MaterialParameterType::Bool)
         {
-            Require(definition.is_object() && definition.contains("id") &&
-                    definition.contains("type") && definition.contains("default"),
-                    "invalid material parameter declaration");
-            const bool has_min = definition.contains("uint_min");
-            const bool has_max = definition.contains("uint_max");
-            Require(definition.size() == 3 + (has_min ? 1 : 0) + (has_max ? 1 : 0),
-                    "unexpected material parameter declaration fields");
-            Require(definition.at("id").is_string(), "material parameter ID must be a string");
-            rd::MaterialParameterDefinition parameter;
-            parameter.id = definition.at("id").get<std::string>();
-            parameter.type = ParseParameterType(definition.at("type"));
-            const auto components = parameter.type == rd::MaterialParameterType::Bool ||
-                parameter.type == rd::MaterialParameterType::Uint ||
-                parameter.type == rd::MaterialParameterType::Float ? 1u :
-                parameter.type == rd::MaterialParameterType::Float2 ? 2u :
-                parameter.type == rd::MaterialParameterType::Float3 ? 3u : 4u;
-            const auto &value = definition.at("default");
-            if (parameter.type == rd::MaterialParameterType::Bool)
-            {
-                Require(value.is_boolean(), "bool material parameter default must be boolean");
-                parameter.default_words[0] = value.get<bool>() ? 1u : 0u;
-            }
-            else if (parameter.type == rd::MaterialParameterType::Uint)
-                parameter.default_words[0] = ParseUint(value);
-            else if (components == 1)
-                parameter.default_words[0] = std::bit_cast<std::uint32_t>(ParseParameterFloat(value));
-            else
-            {
-                Require(value.is_array() && value.size() == components,
-                        "material parameter vector default component count mismatch");
-                for (std::size_t lane = 0; lane < components; ++lane)
-                    parameter.default_words[lane] = std::bit_cast<std::uint32_t>(
-                        ParseParameterFloat(value[lane]));
-            }
-            if (has_min) parameter.uint_min = ParseUint(definition.at("uint_min"));
-            if (has_max) parameter.uint_max = ParseUint(definition.at("uint_max"));
-            result.push_back(std::move(parameter));
+            Require(value.is_boolean(), "bool material parameter default must be boolean");
+            parameter.default_words[0] = value.get<bool>() ? 1u : 0u;
         }
+        else if (parameter.type == rd::MaterialParameterType::Uint)
+            parameter.default_words[0] = ParseUint(value);
+        else if (components == 1)
+            parameter.default_words[0] = std::bit_cast<std::uint32_t>(ParseParameterFloat(value));
+        else
+        {
+            Require(value.is_array() && value.size() == components,
+                    "material parameter vector default component count mismatch");
+            for (std::size_t lane = 0; lane < components; ++lane)
+                parameter.default_words[lane] = std::bit_cast<std::uint32_t>(
+                    ParseParameterFloat(value[lane]));
+        }
+        if (has_min) parameter.uint_min = ParseUint(definition.at("uint_min"));
+        if (has_max) parameter.uint_max = ParseUint(definition.at("uint_max"));
+        result.push_back(std::move(parameter));
     }
-    else
-    {
-        const auto &parameters = root.at("parameters");
-        Require(parameters.is_object(), "legacy material parameters must be an object");
-        Require(parameters.empty() || (parameters.size() == 2 &&
-                    parameters.contains("metallic") && parameters.contains("roughness_scale")),
-                "legacy material parameter declarations must contain metallic and roughness_scale");
-        const auto add = [&](std::string id, float value) {
-            rd::MaterialParameterDefinition parameter;
-            parameter.id = std::move(id);
-            parameter.type = rd::MaterialParameterType::Float;
-            parameter.default_words[0] = std::bit_cast<std::uint32_t>(value);
-            parameter.uint_min = 0; parameter.uint_max = std::numeric_limits<std::uint32_t>::max();
-            result.push_back(std::move(parameter));
-        };
-        add("metallic", parameters.empty() ? 0.0f : ParseParameterFloat(parameters.at("metallic")));
-        add("roughness_scale", parameters.empty() ? 1.0f : ParseParameterFloat(parameters.at("roughness_scale")));
-    }
-    rd::ValidateMaterialParameters(result);
     const auto required_float = [&](std::string_view id, float lo, float hi) {
         const auto found = std::ranges::find(result, id, &rd::MaterialParameterDefinition::id);
         Require(found != result.end() && found->type == rd::MaterialParameterType::Float,
@@ -289,62 +265,23 @@ rd::MaterialTextureSemantic ParseSemantic(const Json &value)
 std::vector<rd::MaterialTextureDefinition> ParseTextures(const Json &root)
 {
     std::vector<rd::MaterialTextureDefinition> textures;
-    if (root.at("version") == 3 || root.at("version") == 4 || root.at("version") == 5 ||
-        root.at("version") == 6 || root.at("version") == 7)
+    Require(root.at("textures").is_array(), "texture declarations must be an array");
+    for (const auto &definition : root.at("textures"))
     {
-        Require(root.at("textures").is_array(), "texture declarations must be an array");
-        for (const auto &definition : root.at("textures"))
-        {
-            ExactKeys(definition, {"id", "product_id", "dimension", "semantic"});
-            Require(definition.at("id").is_string() && definition.at("product_id").is_string() &&
-                    definition.at("dimension") == "texture2d_array", "invalid texture declaration");
-            const auto id = definition.at("id").get<std::string>();
-            Require(ValidId(id), "invalid texture declaration ID");
-            textures.push_back({id, definition.at("product_id").get<std::string>(),
-                rd::MaterialTextureDimension::Texture2DArray, ParseSemantic(definition.at("semantic"))});
-        }
+        ExactKeys(definition, {"id", "product_id", "dimension", "semantic"});
+        Require(definition.at("id").is_string() && definition.at("product_id").is_string() &&
+                definition.at("dimension") == "texture2d_array", "invalid texture declaration");
+        const auto id = definition.at("id").get<std::string>();
+        Require(ValidId(id), "invalid texture declaration ID");
+        textures.push_back({id, definition.at("product_id").get<std::string>(),
+            rd::MaterialTextureDimension::Texture2DArray, ParseSemantic(definition.at("semantic"))});
     }
-    else
-    {
-        // Explicit legacy DDS role mapping is content-only. Runtime metadata uses
-        // typed packages, whose own upstream dependencies retain the DDS identity.
-        const auto &definitions = root.at("textures");
-        ExactKeys(definitions, {"base_color", "surface", "normal", "detail"});
-        constexpr std::array roles{"base_color", "surface", "normal", "detail"};
-        for (std::size_t slot = 0; slot < roles.size(); ++slot)
-        {
-            Require(definitions.at(roles[slot]).is_string(), "legacy texture ID must be a string");
-            const auto source = definitions.at(roles[slot]).get<std::string>();
-            if (source.empty()) { Require(slot == 3, "required legacy texture absent"); continue; }
-            constexpr std::string_view prefix = "environment/";
-            Require(source.starts_with(prefix) && source.ends_with(".dds"), "invalid legacy texture ID");
-            const auto stem = source.substr(prefix.size(), source.size() - prefix.size() - 4);
-            auto semantic = slot == 0 ? rd::MaterialTextureSemantic::BaseColor :
-                slot == 1 ? rd::MaterialTextureSemantic::Surface :
-                slot == 2 ? rd::MaterialTextureSemantic::Normal : rd::MaterialTextureSemantic::Detail;
-            const std::string suffix = slot == 0 ? "_basecolor" : slot == 2 ? "_normal" :
-                slot == 3 ? "_detail" : stem.ends_with("_roughness") ? "_roughness" : "_surface";
-            Require(stem.ends_with(suffix), "legacy texture ID does not match role");
-            if (slot == 1 && suffix == "_roughness") semantic = rd::MaterialTextureSemantic::Roughness;
-            textures.push_back({roles[slot], "render/texture/" + stem + ".rpkg",
-                rd::MaterialTextureDimension::Texture2DArray, semantic});
-        }
-    }
-    if (IsDecalMaterialName(root.at("id").get<std::string>()))
-    {
-        Require(textures.size() == 1, "decal requires one texture declaration");
-        rd::ValidateDecalMaterialTextureDefinition(textures.front());
-    }
-    else if (!textures.empty() || !IsCharacterMaterialName(root.at("id").get<std::string>()))
-        rd::ValidateMaterialTextureDefinitions(textures);
     return textures;
 }
 
 std::vector<rd::MaterialSamplerDefinition> ParseSamplers(const Json &root)
 {
     std::vector<rd::MaterialSamplerDefinition> samplers;
-    if (root.at("version") != 3 && root.at("version") != 4 && root.at("version") != 5 &&
-        root.at("version") != 6 && root.at("version") != 7) return samplers;
     Require((root.at("samplers").is_array() && !root.at("samplers").empty() &&
              root.at("samplers").size() <= 4) ||
             (IsCharacterMaterialName(root.at("id").get<std::string>()) &&
@@ -379,128 +316,27 @@ rd::MaterialContextInput ParseContext(const Json &value)
     Require(false, "unknown material context input"); return {};
 }
 
-rd::MaterialGraph LowerLegacyMaterialSamples(rd::MaterialGraph old, const rd::RockMaterial &material)
-{
-    rd::MaterialGraph graph;
-    graph.kind = old.kind;
-    graph.parameters = old.parameters;
-    graph.textures = old.textures;
-    graph.samplers.push_back({"legacy_sampler", material.alpha_mask
-        ? rd::MaterialSamplerProfile::FoliageAnisotropicClamp
-        : rd::MaterialSamplerProfile::EnvironmentAnisotropicWrap});
-    std::unordered_set<std::string> ids;
-    for (const auto &node : old.nodes) ids.insert(node.id);
-    const auto add = [&](rd::MaterialType type, rd::MaterialOp op,
-                         std::initializer_list<std::size_t> inputs = {}) {
-        rd::MaterialNode node;
-        node.type = type; node.op = op;
-        auto suffix = graph.nodes.size();
-        do { node.id = "_hs_legacy_" + std::to_string(suffix++); }
-        while (!ids.insert(node.id).second);
-        std::copy(inputs.begin(), inputs.end(), node.inputs.begin());
-        graph.nodes.push_back(std::move(node));
-        return graph.nodes.size() - 1;
-    };
-    const auto context = [&](rd::MaterialType type, rd::MaterialContextInput input) {
-        const auto index = add(type, rd::MaterialOp::Context);
-        graph.nodes[index].context_input = input;
-        return index;
-    };
-    const auto uv = context(rd::MaterialType::Float2, rd::MaterialContextInput::Uv);
-    const auto dx = context(rd::MaterialType::Float2, rd::MaterialContextInput::DUvDx);
-    const auto dy = context(rd::MaterialType::Float2, rd::MaterialContextInput::DUvDy);
-    const auto layer = context(rd::MaterialType::Uint, rd::MaterialContextInput::Layer);
-    const auto eye = context(rd::MaterialType::Float, rd::MaterialContextInput::EyeDistance);
-    const auto sampler = add(rd::MaterialType::SamplerRef, rd::MaterialOp::SamplerRef);
-    graph.nodes[sampler].declaration_index = 0;
-    std::vector<std::size_t> samples;
-    for (std::size_t slot = 0; slot < graph.textures.size(); ++slot)
-    {
-        const auto texture = add(rd::MaterialType::TextureRef, rd::MaterialOp::TextureRef);
-        graph.nodes[texture].declaration_index = slot;
-        samples.push_back(add(rd::MaterialType::Float4, rd::MaterialOp::SampleGrad,
-                             {texture, sampler, uv, layer, dx, dy}));
-    }
-    const auto extract = [&](std::size_t input, std::uint32_t component) {
-        const auto index = add(rd::MaterialType::Float, rd::MaterialOp::Extract, {input});
-        graph.nodes[index].component = component;
-        return index;
-    };
-    const auto color_r = extract(samples[0], 0), color_g = extract(samples[0], 1),
-               color_b = extract(samples[0], 2);
-    const auto color = add(rd::MaterialType::Float3, rd::MaterialOp::Construct,
-                           {color_r, color_g, color_b});
-    const auto alpha = extract(samples[0], 3);
-    const auto roughness = extract(samples[1], 0);
-    const auto decode = [&](std::size_t input) {
-        const auto x = extract(input, 0), y = extract(input, 1);
-        const auto xy = add(rd::MaterialType::Float2, rd::MaterialOp::Construct, {x, y});
-        return add(rd::MaterialType::Float3, rd::MaterialOp::DecodeNormalXY, {xy});
-    };
-    graph.normal_output = decode(samples[2]);
-    if (samples.size() == 4)
-    {
-        const auto detail = decode(samples[3]);
-        const auto faded = add(rd::MaterialType::Float3, rd::MaterialOp::DetailFade, {detail, eye});
-        graph.normal_output = add(rd::MaterialType::Float3, rd::MaterialOp::NormalRnm,
-                                  {graph.normal_output, faded});
-    }
-    if (graph.textures[1].semantic == rd::MaterialTextureSemantic::Surface)
-        graph.ao_output = extract(samples[1], 1);
-    else
-    {
-        graph.ao_output = add(rd::MaterialType::Float, rd::MaterialOp::Constant);
-        graph.nodes[graph.ao_output].value[0] = 1.0f;
-    }
-    const auto offset = graph.nodes.size();
-    for (auto node : old.nodes)
-    {
-        for (std::size_t slot = 0; slot < rd::MaterialInputCount(node.op, node.type); ++slot)
-            node.inputs[slot] += offset;
-        if (node.op == rd::MaterialOp::SampledBaseColor || node.op == rd::MaterialOp::SampledRoughness ||
-            node.op == rd::MaterialOp::SampledAlpha)
-        {
-            const auto input = node.op == rd::MaterialOp::SampledBaseColor ? color :
-                node.op == rd::MaterialOp::SampledRoughness ? roughness : alpha;
-            node.op = rd::MaterialOp::Convert;
-            node.inputs[0] = input;
-        }
-        graph.nodes.push_back(std::move(node));
-    }
-    graph.base_color_output = offset + old.base_color_output;
-    graph.roughness_output = offset + old.roughness_output;
-    if (graph.kind == rd::MaterialGraphKind::Masked) graph.opacity_output = offset + old.opacity_output;
-    return graph;
-}
+
 } // namespace
 
 static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Json &root,
-                                               rd::MaterialGraphKind kind, bool validate)
+                                               rd::MaterialGraphKind kind)
 {
     const bool hero = IsCharacterMaterialName(name);
     const bool decal = kind == rd::MaterialGraphKind::Decal;
     const bool transparent = kind == rd::MaterialGraphKind::Translucent || kind == rd::MaterialGraphKind::HeroRefractive;
-    const bool context = root.at("version") == 3 || root.at("version") == 4 ||
-                         root.at("version") == 5 || root.at("version") == 6 || root.at("version") == 7;
-    if (context) ExactKeys(root, {"id", "version", "domain", "shading_model", "parameters",
+    ExactKeys(root, {"id", "version", "domain", "shading_model", "parameters",
                      "textures", "samplers", "nodes", "outputs", "render_flags"});
-    else ExactKeys(root, {"id", "version", "domain", "shading_model", "parameters",
-                     "textures", "nodes", "outputs", "render_flags"});
+    Require(root.at("version").is_number_integer() && root.at("version") == 7, "material version must be 7");
     Require(root.at("id").is_string() &&
             std::string_view(root.at("id").get_ref<const std::string &>()) == name &&
-            (root.at("version") == 2 || context) &&
-            (root.at("version") != 4 || kind == rd::MaterialGraphKind::Terrain) &&
             root.at("domain") == (decal ? "decal" : transparent ? "translucent" : "surface") &&
             root.at("shading_model") == "metallic_roughness", "unsupported material");
-    Require(!hero || root.at("version") == 7, "hero context adapters require material version7");
-    const bool has_color = kind != rd::MaterialGraphKind::Leaf0;
-    const bool has_opacity = kind == rd::MaterialGraphKind::Leaf0 ||
-                             kind == rd::MaterialGraphKind::Masked || transparent;
+    const bool has_opacity = kind == rd::MaterialGraphKind::Masked || transparent;
     const auto &flags = root.at("render_flags");
     rd::DecalReceiverPolicy receivers;
     if (decal)
     {
-        Require(root.at("version") == 7, "decal requires typed material version7");
         ExactKeys(flags, {"alpha_mode", "receivers"});
         Require(flags.at("alpha_mode") == "mask", "decal profile requires masked evaluation");
         const auto &policy = flags.at("receivers");
@@ -520,7 +356,6 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
                 "unknown decal receiver normal filter");
         receivers.normal_filter = policy.at("normal_filter") == "any"
             ? rd::DecalReceiverNormalFilter::Any : rd::DecalReceiverNormalFilter::GroundFacing;
-        rd::ValidateDecalReceiverPolicy(receivers);
     }
     else
     {
@@ -532,10 +367,10 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
     const auto &definitions = root.at("nodes");
     Require(definitions.is_array() && !definitions.empty() && definitions.size() <= rd::kMaxMaterialGraphNodes,
             "node count out of bounds");
-    const auto textures = context ? ParseTextures(root) : std::vector<rd::MaterialTextureDefinition>{};
-    const auto samplers = ParseSamplers(root);
-    Require(!hero || (textures.empty() && samplers.empty()), "hero graph must use the native sampled-context adapter");
-    const auto parameters = ParseParameterDeclarations(root, !hero);
+    auto textures = ParseTextures(root);
+    auto samplers = ParseSamplers(root);
+    Require(hero || !textures.empty(), "material requires texture declarations");
+    auto parameters = ParseParameterDeclarations(root, !hero);
     std::vector<Pending> pending;
     std::unordered_map<std::string, std::size_t> ids;
     pending.reserve(definitions.size());
@@ -559,7 +394,7 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
         case rd::MaterialOp::TextureRef: case rd::MaterialOp::SamplerRef:
         {
             ExactKeys(definition, {"id", "op", "type", "declaration"});
-             Require(context && definition.at("declaration").is_string(), "reference requires a declaration ID");
+            Require(definition.at("declaration").is_string(), "reference requires a declaration ID");
             const auto id = definition.at("declaration").get<std::string>();
             if (item.node.op == rd::MaterialOp::TextureRef)
             {
@@ -577,7 +412,6 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
         }
         case rd::MaterialOp::Context:
             ExactKeys(definition, {"id", "op", "type", "name"});
-            Require(context, "context requires material version3");
             item.node.context_input = ParseContext(definition.at("name"));
             if (item.node.context_input == rd::MaterialContextInput::Metallic ||
                 item.node.context_input == rd::MaterialContextInput::RoughnessScale)
@@ -594,12 +428,6 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
         case rd::MaterialOp::Parameter:
         {
             ExactKeys(definition, {"id", "op", "type", "name"});
-            if (!context)
-            {
-                Require(definition.at("name") == "roughness_scale", "unknown parameter");
-                item.node.op = rd::MaterialOp::RoughnessScale;
-                break;
-            }
             Require(definition.at("name").is_string(), "material parameter name must be a string");
             const auto parameter_name = definition.at("name").get<std::string>();
             const auto found = std::ranges::find(parameters, parameter_name,
@@ -619,7 +447,6 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
             if (item.node.op == rd::MaterialOp::SampleGrad)
                 ExactKeys(definition, {"id", "op", "type", "texture", "sampler", "uv", "layer", "dx", "dy"});
             else ExactKeys(definition, {"id", "op", "type", "texture", "sampler", "uv", "layer", "lod"});
-            Require(context, "sample requires material version3");
             constexpr std::array fields{"texture", "sampler", "uv", "layer", "dx", "dy"};
             for (std::size_t i = 0; i < rd::MaterialInputCount(item.node.op, item.node.type); ++i)
                 item.inputs[i] = ParseEdge(definition.at(i == 4 && item.node.op == rd::MaterialOp::SampleLevel ? "lod" : fields[i]));
@@ -654,7 +481,7 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
             ExactKeys(definition, {"id", "op", "type", "textures", "samplers", "world",
                                    "world_dx", "world_dy", "mesh", "seed", "view_direction",
                                    "eye_distance"});
-            Require(context && item.node.type == rd::MaterialType::TerrainResult &&
+            Require(item.node.type == rd::MaterialType::TerrainResult &&
                     definition.at("textures").is_array() && definition.at("textures").size() == 6 &&
                     definition.at("samplers").is_array() && definition.at("samplers").size() == 2,
                     "terrain stochastic requires six textures and two samplers");
@@ -670,7 +497,7 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
         }
         case rd::MaterialOp::TerrainField:
             ExactKeys(definition, {"id", "op", "type", "input", "field"});
-            Require(context && definition.at("field").is_string(), "terrain field requires a field name");
+            Require(definition.at("field").is_string(), "terrain field requires a field name");
             if (definition.at("field") == "base_color") item.node.terrain_field = rd::TerrainField::BaseColor;
             else if (definition.at("field") == "normal") item.node.terrain_field = rd::TerrainField::Normal;
             else if (definition.at("field") == "detail") item.node.terrain_field = rd::TerrainField::Detail;
@@ -681,8 +508,7 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
         case rd::MaterialOp::MetallicRoughnessClosure:
             ExactKeys(definition, {"id", "op", "type", "base_color", "normal", "roughness",
                                    "metallic", "ao", "opacity"});
-            Require((root.at("version") == 5 || root.at("version") == 6 || root.at("version") == 7) && context &&
-                        item.node.type == rd::MaterialType::SurfaceClosure,
+            Require(item.node.type == rd::MaterialType::SurfaceClosure,
                     "metallic roughness closure requires a typed context graph");
             item.inputs[0] = ParseEdge(definition.at("base_color"));
             item.inputs[1] = ParseEdge(definition.at("normal"));
@@ -693,21 +519,18 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
             break;
         case rd::MaterialOp::CoatClosure:
             ExactKeys(definition, {"id", "op", "type", "base", "weight", "roughness"});
-            Require(root.at("version") == 7, "advanced closures require material version7");
             item.inputs[0] = ParseEdge(definition.at("base"));
             item.inputs[1] = ParseEdge(definition.at("weight"));
             item.inputs[2] = ParseEdge(definition.at("roughness"));
             break;
         case rd::MaterialOp::AnisotropyClosure:
             ExactKeys(definition, {"id", "op", "type", "base", "amount", "tangent"});
-            Require(root.at("version") == 7, "advanced closures require material version7");
             item.inputs[0] = ParseEdge(definition.at("base"));
             item.inputs[1] = ParseEdge(definition.at("amount"));
             item.inputs[2] = ParseEdge(definition.at("tangent"));
             break;
         case rd::MaterialOp::SheenClosure:
             ExactKeys(definition, {"id", "op", "type", "base", "weight", "tint", "roughness"});
-            Require(root.at("version") == 7, "advanced closures require material version7");
             item.inputs[0] = ParseEdge(definition.at("base"));
             item.inputs[1] = ParseEdge(definition.at("weight"));
             item.inputs[2] = ParseEdge(definition.at("tint"));
@@ -715,26 +538,22 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
             break;
         case rd::MaterialOp::ThinTransmissionClosure:
             ExactKeys(definition, {"id", "op", "type", "base", "weight", "tint"});
-            Require(root.at("version") == 7, "advanced closures require material version7");
             item.inputs[0] = ParseEdge(definition.at("base"));
             item.inputs[1] = ParseEdge(definition.at("weight"));
             item.inputs[2] = ParseEdge(definition.at("tint"));
             break;
         case rd::MaterialOp::EmissionClosure:
             ExactKeys(definition, {"id", "op", "type", "base", "emission"});
-            Require(root.at("version") == 7, "advanced closures require material version7");
             item.inputs[0] = ParseEdge(definition.at("base"));
             item.inputs[1] = ParseEdge(definition.at("emission"));
             break;
         case rd::MaterialOp::UnlitClosure:
             ExactKeys(definition, {"id", "op", "type", "color", "opacity"});
-            Require(root.at("version") == 7, "advanced closures require material version7");
             item.inputs[0] = ParseEdge(definition.at("color"));
             item.inputs[1] = ParseEdge(definition.at("opacity"));
             break;
         case rd::MaterialOp::SubsurfaceClosure:
             ExactKeys(definition, {"id", "op", "type", "base", "weight", "radius_m", "thickness_m"});
-            Require(root.at("version") == 7, "subsurface closure requires material version7");
             item.inputs[0] = ParseEdge(definition.at("base"));
             item.inputs[1] = ParseEdge(definition.at("weight"));
             item.inputs[2] = ParseEdge(definition.at("radius_m"));
@@ -742,7 +561,6 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
             break;
         case rd::MaterialOp::SolidTransmissionClosure:
             ExactKeys(definition, {"id", "op", "type", "base", "weight", "ior", "absorption_per_m", "thickness_m"});
-            Require(root.at("version") == 7, "solid transmission closure requires material version7");
             item.inputs[0] = ParseEdge(definition.at("base"));
             item.inputs[1] = ParseEdge(definition.at("weight"));
             item.inputs[2] = ParseEdge(definition.at("ior"));
@@ -836,64 +654,21 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
         pending.push_back(std::move(item));
     }
     const auto &outputs = root.at("outputs");
-    const bool typed_closure = root.at("version") == 5 || root.at("version") == 6 || root.at("version") == 7;
-    Edge first, roughness, opacity, normal, ao, closure;
-    if (typed_closure)
-    {
-        ExactKeys(outputs, {"surface", "closure", "normal_space"});
-        Require(outputs.at("surface") == "typed_closure", "unsupported surface output");
-        closure = ParseEdge(outputs.at("closure"));
-        Require(closure.type == rd::MaterialType::SurfaceClosure && ids.contains(closure.id),
-                "invalid typed closure output edge");
-        Require(outputs.at("normal_space") == "tangent" || outputs.at("normal_space") == "world",
-                "invalid normal output space");
-    }
-    else
-    {
-        if (context && has_color && has_opacity)
-            ExactKeys(outputs, {"surface", "base_color", "roughness", "opacity", "normal", "normal_space", "ao"});
-        else if (context && has_color)
-            ExactKeys(outputs, {"surface", "base_color", "roughness", "normal", "normal_space", "ao"});
-        else if (has_color && has_opacity)
-            ExactKeys(outputs, {"surface", "base_color", "roughness", "opacity"});
-        else if (has_color)
-            ExactKeys(outputs, {"surface", "base_color", "roughness"});
-        else ExactKeys(outputs, {"surface", "opacity"});
-        Require(outputs.at("surface") == "builtin_metallic_roughness", "unsupported surface output");
-        first = ParseEdge(outputs.at(has_color ? "base_color" : "opacity"));
-        Require(first.type == (has_color ? rd::MaterialType::Float3 : rd::MaterialType::Float) &&
-                ids.contains(first.id), "invalid first output edge");
-        if (has_color)
-        {
-            roughness = ParseEdge(outputs.at("roughness"));
-            Require(roughness.type == rd::MaterialType::Float && ids.contains(roughness.id),
-                    "invalid roughness output edge");
-        }
-        if (has_color && has_opacity)
-        {
-            opacity = ParseEdge(outputs.at("opacity"));
-            Require(opacity.type == rd::MaterialType::Float && ids.contains(opacity.id),
-                    "invalid opacity output edge");
-        }
-        if (context)
-        {
-            Require(has_color, "context graph requires full surface outputs");
-            normal = ParseEdge(outputs.at("normal"));
-            ao = ParseEdge(outputs.at("ao"));
-            Require(normal.type == rd::MaterialType::Float3 && ids.contains(normal.id) &&
-                    ao.type == rd::MaterialType::Float && ids.contains(ao.id), "invalid normal or AO output");
-            Require(outputs.at("normal_space") == "tangent" || outputs.at("normal_space") == "world",
-                    "invalid normal output space");
-        }
-    }
+    ExactKeys(outputs, {"surface", "closure", "normal_space"});
+    Require(outputs.at("surface") == "typed_closure", "unsupported surface output");
+    const auto closure = ParseEdge(outputs.at("closure"));
+    Require(closure.type == rd::MaterialType::SurfaceClosure && ids.contains(closure.id),
+            "invalid typed closure output edge");
+    Require(outputs.at("normal_space") == "tangent" || outputs.at("normal_space") == "world",
+            "invalid normal output space");
 
     rd::MaterialGraph graph;
     graph.kind = kind;
     graph.decal_receivers = receivers;
-    graph.parameters = parameters;
-    graph.textures = textures;
-    graph.samplers = samplers;
-    if (context) graph.normal_space = outputs.at("normal_space") == "world"
+    graph.parameters = std::move(parameters);
+    graph.textures = std::move(textures);
+    graph.samplers = std::move(samplers);
+    graph.normal_space = outputs.at("normal_space") == "world"
         ? rd::MaterialNormalSpace::World : rd::MaterialNormalSpace::Tangent;
     graph.nodes.reserve(pending.size());
     std::vector<unsigned char> state(pending.size());
@@ -902,7 +677,7 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
         Require(state[index] != 1, "cycle detected");
         if (state[index] == 2) return;
         state[index] = 1;
-        auto node = pending[index].node;
+        auto &node = pending[index].node;
         for (std::size_t slot = 0; slot < rd::MaterialInputCount(node.op, node.type); ++slot)
         {
             const auto &edge = pending[index].inputs[slot];
@@ -917,91 +692,11 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
         graph.nodes.push_back(std::move(node));
         state[index] = 2;
     };
-    if (typed_closure) visit(ids.at(closure.id));
-    else
-    {
-        visit(ids.at(first.id));
-        if (has_color) visit(ids.at(roughness.id));
-        if (has_color && has_opacity) visit(ids.at(opacity.id));
-        if (context) { visit(ids.at(normal.id)); visit(ids.at(ao.id)); }
-    }
+    visit(ids.at(closure.id));
     // Validate dead nodes too, including their cycles and type constraints;
     // the emitter prunes them separately for every output.
     for (std::size_t index = 0; index < pending.size(); ++index) visit(index);
-    if (typed_closure)
-    {
-        graph.base_color_output = graph.roughness_output = graph.opacity_output = rd::kNoMaterialInput;
-        graph.closure_output = ordered_index[ids.at(closure.id)];
-    }
-    else if (has_color)
-    {
-        graph.base_color_output = ordered_index[ids.at(first.id)];
-        graph.roughness_output = ordered_index[ids.at(roughness.id)];
-        if (has_opacity) graph.opacity_output = ordered_index[ids.at(opacity.id)];
-    }
-    else
-    {
-        graph.opacity_output = ordered_index[ids.at(first.id)];
-    }
-    if (context && !typed_closure)
-    {
-        graph.normal_output = ordered_index[ids.at(normal.id)];
-        graph.ao_output = ordered_index[ids.at(ao.id)];
-    }
-    if (context && !typed_closure && has_color)
-    {
-        const auto unique_id = [&](std::string base) {
-            const auto used = [&](std::string_view candidate) {
-                return std::ranges::any_of(graph.nodes, [&](const rd::MaterialNode &node) {
-                    return node.id == candidate;
-                });
-            };
-            if (!used(base)) return base;
-            for (std::size_t suffix = 1;; ++suffix)
-            {
-                auto candidate = base + "_" + std::to_string(suffix);
-                if (!used(candidate)) return candidate;
-            }
-        };
-        rd::MaterialNode metallic;
-        metallic.id = unique_id("legacy_metallic");
-        metallic.op = rd::MaterialOp::Parameter;
-        metallic.type = rd::MaterialType::Float;
-        const auto metallic_parameter = std::ranges::find(graph.parameters, "metallic",
-            &rd::MaterialParameterDefinition::id);
-        Require(metallic_parameter != graph.parameters.end(),
-                "legacy material graph has no metallic parameter declaration");
-        metallic.declaration_index = static_cast<std::size_t>(metallic_parameter - graph.parameters.begin());
-        graph.nodes.push_back(std::move(metallic));
-        const auto metallic_output = graph.nodes.size() - 1;
-
-        std::size_t opacity_output = graph.opacity_output;
-        if (!has_opacity)
-        {
-            rd::MaterialNode opacity_node;
-            opacity_node.id = unique_id("legacy_opacity");
-            opacity_node.op = rd::MaterialOp::Constant;
-            opacity_node.type = rd::MaterialType::Float;
-            opacity_node.value[0] = 1.0f;
-            graph.nodes.push_back(std::move(opacity_node));
-            opacity_output = graph.nodes.size() - 1;
-        }
-
-        rd::MaterialNode closure_node;
-        closure_node.id = unique_id("legacy_surface_closure");
-        closure_node.op = rd::MaterialOp::MetallicRoughnessClosure;
-        closure_node.type = rd::MaterialType::SurfaceClosure;
-        closure_node.inputs[0] = graph.base_color_output;
-        closure_node.inputs[1] = graph.normal_output;
-        closure_node.inputs[2] = graph.roughness_output;
-        closure_node.inputs[3] = metallic_output;
-        closure_node.inputs[4] = graph.ao_output;
-        closure_node.inputs[5] = opacity_output;
-        graph.nodes.push_back(std::move(closure_node));
-        graph.closure_output = graph.nodes.size() - 1;
-        Require(graph.nodes.size() <= rd::kMaxMaterialGraphNodes,
-                "legacy closure lowering exceeded the graph node bound");
-    }
+    graph.closure_output = ordered_index[ids.at(closure.id)];
     if (kind == rd::MaterialGraphKind::Terrain)
     {
         const auto aggregate = std::ranges::find_if(graph.nodes, [](const rd::MaterialNode &node) {
@@ -1010,29 +705,12 @@ static rd::MaterialGraph ParseMaterialGraphRoot(std::string_view name, const Jso
         Require(aggregate != graph.nodes.end(), "terrain graph has no stochastic aggregate");
         graph.terrain_output = static_cast<std::size_t>(aggregate - graph.nodes.begin());
     }
-    if (validate)
-    {
-        if (kind == rd::MaterialGraphKind::Rock0) rd::ValidateRock0MaterialGraph(graph);
-        else if (kind == rd::MaterialGraphKind::Leaf0) rd::ValidateLeaf0MaterialGraph(graph);
-        else if (kind == rd::MaterialGraphKind::Terrain) rd::ValidateTerrainMaterialGraph(graph);
-        else if (decal) rd::ValidateDecalMaterialGraph(graph);
-        else if (hero) rd::ValidateCharacterMaterialGraph(graph);
-        else rd::ValidateEnvironmentMaterialGraph(graph);
-    }
     return graph;
-}
-
-rd::MaterialGraph ParseMaterialGraph(std::string_view name, std::string_view json_text,
-                                   rd::MaterialGraphKind kind)
-{
-    return ParseMaterialGraphRoot(name, Json::parse(json_text), kind, true);
 }
 
 bool IsEnvironmentMaterialName(std::string_view name)
 {
-    for (const auto candidate : rd::kEnvironmentMaterialNames)
-        if (name == candidate) return true;
-    return false;
+    return std::ranges::find(rd::kEnvironmentMaterialNames, name) != rd::kEnvironmentMaterialNames.end();
 }
 
 bool IsAuthoredMaterialName(std::string_view name)
@@ -1052,17 +730,11 @@ bool IsDecalMaterialName(std::string_view name)
     return std::ranges::find(rd::kDecalMaterialNames, name) != rd::kDecalMaterialNames.end();
 }
 
-rd::MaterialGraph ParseDecalMaterialGraph(std::string_view name, std::string_view json_text)
-{
-    Require(IsDecalMaterialName(name), "unknown decal material name");
-    return ParseMaterialGraph(name, json_text, rd::MaterialGraphKind::Decal);
-}
-
 rd::PreparedMaterial ParsePreparedDecalMaterial(std::string_view name, std::string_view json_text)
 {
     Require(IsDecalMaterialName(name), "unknown decal material name");
     return rd::PrepareMaterial(ParseMaterialGraphRoot(name, Json::parse(json_text),
-        rd::MaterialGraphKind::Decal, false), rd::MaterialPreparationDomain::Decal);
+        rd::MaterialGraphKind::Decal), rd::MaterialPreparationDomain::Decal);
 }
 
 bool IsMaskedEnvironmentMaterial(std::string_view name)
@@ -1090,67 +762,34 @@ static rd::MaterialGraphKind AuthoredMaterialKind(std::string_view name, const J
     return rd::MaterialGraphKind::Opaque;
 }
 
-rd::MaterialGraph ParseEnvironmentMaterialGraph(std::string_view name,
-                                              std::string_view json_text)
-{
-    const auto root = Json::parse(json_text);
-    const auto kind = AuthoredMaterialKind(name, root);
-    return ParseMaterialGraphRoot(name, root, kind, root.at("version") == 2);
-}
-
-rd::MaterialGraph ParseRock0MaterialGraph(std::string_view json_text)
-{
-    return ParseMaterialGraph("rock_0", json_text, rd::MaterialGraphKind::Rock0);
-}
-
-rd::MaterialGraph ParseLeaf0MaterialGraph(std::string_view json_text)
-{
-    return ParseMaterialGraph("leaf_0", json_text, rd::MaterialGraphKind::Leaf0);
-}
-
-rd::MaterialGraph ParseTerrainMaterialGraph(std::string_view json_text)
-{
-    return ParseMaterialGraph("terrain", json_text, rd::MaterialGraphKind::Terrain);
-}
-
 MaterialDefinition ParseMaterialDefinition(std::string_view name, std::string_view json_text)
 {
     const auto root = Json::parse(json_text);
     const auto kind = AuthoredMaterialKind(name, root);
-    const bool legacy = root.at("version") == 2;
-    auto graph = ParseMaterialGraphRoot(name, root, kind, legacy);
-    const auto material_from_graph = [&](const rd::MaterialGraph &source) {
-        rd::RockMaterial material;
-        for (std::size_t slot = 0; slot < source.textures.size(); ++slot)
-            material.textures[slot] = source.textures[slot].product_id;
-        const auto find_parameter = [&](std::string_view id) -> const rd::MaterialParameterDefinition & {
-            const auto found = std::ranges::find(source.parameters, id,
-                &rd::MaterialParameterDefinition::id);
-            Require(found != source.parameters.end(), "required material parameter is missing");
-            Require(found->type == rd::MaterialParameterType::Float,
-                    "required material parameter must be float");
-            return *found;
-        };
-        material.metallic = std::bit_cast<float>(find_parameter("metallic").default_words[0]);
-        material.roughness_scale = std::bit_cast<float>(find_parameter("roughness_scale").default_words[0]);
-        const auto &flags = root.at("render_flags");
-        Require(flags.at("two_sided").is_boolean(), "invalid two-sided flag type");
-        material.two_sided = flags.at("two_sided").get<bool>();
-        material.alpha_mask = flags.at("alpha_mode") == "mask";
-        rd::ValidateRockMaterial(material);
-        return material;
-    };
-    if (legacy)
-    {
-        graph.textures = ParseTextures(root);
-        auto material = material_from_graph(graph);
-        return {material, rd::PrepareMaterial(LowerLegacyMaterialSamples(std::move(graph), material),
-            rd::MaterialPreparationDomain::Environment)};
-    }
-    auto prepared = rd::PrepareMaterial(std::move(graph), IsCharacterMaterialName(name)
+    const bool hero = IsCharacterMaterialName(name);
+    auto prepared = rd::PrepareMaterial(ParseMaterialGraphRoot(name, root, kind), hero
         ? rd::MaterialPreparationDomain::Hero : rd::MaterialPreparationDomain::Environment);
-    if (IsCharacterMaterialName(name)) return {{}, std::move(prepared)};
-    auto material = material_from_graph(prepared.Graph());
+    if (hero) return {{}, std::move(prepared)};
+    const auto &graph = prepared.Graph();
+    rd::RockMaterial material;
+    for (std::size_t slot = 0; slot < graph.textures.size(); ++slot)
+        material.textures[slot] = graph.textures[slot].product_id;
+    const auto metallic = std::ranges::find(graph.parameters, "metallic",
+        &rd::MaterialParameterDefinition::id);
+    const auto roughness = std::ranges::find(graph.parameters, "roughness_scale",
+        &rd::MaterialParameterDefinition::id);
+    Require(metallic != graph.parameters.end() && roughness != graph.parameters.end(),
+            "required material parameter is missing");
+    Require(metallic->type == rd::MaterialParameterType::Float &&
+            roughness->type == rd::MaterialParameterType::Float,
+            "required material parameter must be float");
+    material.metallic = std::bit_cast<float>(metallic->default_words[0]);
+    material.roughness_scale = std::bit_cast<float>(roughness->default_words[0]);
+    const auto &flags = root.at("render_flags");
+    Require(flags.at("two_sided").is_boolean(), "invalid two-sided flag type");
+    material.two_sided = flags.at("two_sided").get<bool>();
+    material.alpha_mask = flags.at("alpha_mode") == "mask";
+    rd::ValidateRockMaterial(material);
     return {material, std::move(prepared)};
 }
 } // namespace hs::material_content

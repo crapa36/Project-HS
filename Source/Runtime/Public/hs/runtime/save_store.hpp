@@ -15,7 +15,6 @@ namespace hs
 
 struct ProfileData
 {
-    // Version 2 removes unused unlock masks; the reader accepts version 1 without rewriting it.
     static constexpr std::uint32_t kSchemaVersion = 2;
 
     std::uint32_t schema_version{kSchemaVersion};

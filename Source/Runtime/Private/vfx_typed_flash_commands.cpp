@@ -1,4 +1,5 @@
 #include "vfx_typed_flash_commands.hpp"
+#include <hs/render_data/vfx_payload_ids.hpp>
 
 #include <hs/render_data/render_snapshot_values.hpp>
 
@@ -7,19 +8,12 @@
 #include <limits>
 #include <numbers>
 #include <stdexcept>
-#include <string_view>
 #include <type_traits>
 
 namespace hs::runtime_detail
 {
 namespace
 {
-consteval std::uint32_t Hash32(std::string_view value) noexcept
-{
-    std::uint32_t hash = 2166136261u;
-    for (const unsigned char character : value) { hash ^= character; hash *= 16777619u; }
-    return hash;
-}
 bool Finite(const Float3 &v) noexcept
 { return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z); }
 }
@@ -217,23 +211,7 @@ void AppendVfxPreparedFlashOutputs(std::span<const VfxPreparedFlashOutput> prepa
     }
 }
 
-void AppendVfxTypedFlashCommands(const VfxImage &image, VfxEventView inputs,
-    std::span<const Sequence> excluded_sorted_sequences,
-    std::vector<VfxFlashSpawnInput> &result,
-    std::vector<Sequence> *superseded_pickup_sequences)
-{
-    std::vector<VfxPreparedFlashOutput> prepared;
-    PrepareVfxTypedFlashOutputs(image, inputs, excluded_sorted_sequences, prepared);
-    AppendVfxPreparedFlashOutputs(prepared, result, superseded_pickup_sequences);
-}
 
-std::vector<VfxFlashSpawnInput> BuildVfxTypedFlashCommands(const VfxImage &image,
-    VfxEventView inputs, std::vector<Sequence> *superseded_pickup_sequences)
-{
-    std::vector<VfxFlashSpawnInput> result;
-    AppendVfxTypedFlashCommands(image, inputs, {}, result, superseded_pickup_sequences);
-    return result;
-}
 
 void PrepareVfxPersistentFireSources(const VfxImage &image,
     std::span<const VfxPersistentInput> inputs, double current_tick,
@@ -399,21 +377,6 @@ void AppendVfxPreparedFireFlameCommands(
     }
 }
 
-void AppendVfxPersistentFireFlameCommands(
-    const VfxImage &image, std::span<const VfxPersistentInput> inputs, double current_tick,
-    std::vector<VfxFlashSpawnInput> &result)
-{
-    std::vector<VfxPreparedFireSource> prepared;
-    PrepareVfxPersistentFireSources(image, inputs, current_tick, prepared);
-    AppendVfxPreparedFireFlameCommands(prepared, std::numeric_limits<std::size_t>::max(), result);
-}
-std::vector<VfxFlashSpawnInput> BuildVfxPersistentFireFlameCommands(
-    const VfxImage &image, std::span<const VfxPersistentInput> inputs, double current_tick)
-{
-    std::vector<VfxFlashSpawnInput> result;
-    AppendVfxPersistentFireFlameCommands(image, inputs, current_tick, result);
-    return result;
-}
 
 void AppendVfxPersistentStatusStampCommands(
     const VfxImage &image, std::span<const VfxPersistentInput> inputs,
@@ -435,12 +398,12 @@ void AppendVfxPersistentStatusStampCommands(
         for (const auto &recipe : image.persistent_stamp_recipes.subspan(range.first, range.count))
         {
             if (recipe.source_visual_kind != input.source_visual_kind ||
-                recipe.payload_kind != (path ? Hash32("ProjectilePathPayload") : Hash32("EntityAttachmentPayload")) ||
+                recipe.payload_kind != (path ? hs::vfx_payload::ProjectilePath : hs::vfx_payload::EntityAttachment) ||
                 (recipe.timing_kind == 0 && recipe.fixed_seconds != input.source_duration_seconds) ||
                 input.normalized_age >= recipe.source_end) continue;
             Float3 position{}, previous_position{};
             float footprint{};
-            if (recipe.payload_kind == Hash32("ProjectilePathPayload"))
+            if (recipe.payload_kind == hs::vfx_payload::ProjectilePath)
             {
                 if (!path || !Finite(path->current_position) || !Finite(path->previous_position) ||
                     !Finite(path->velocity) || !std::isfinite(path->projectile_radius) ||
@@ -482,77 +445,5 @@ void AppendVfxPersistentStatusStampCommands(
         }
     }
 }
-std::vector<VfxFlashSpawnInput> BuildVfxPersistentStatusStampCommands(
-    const VfxImage &image, std::span<const VfxPersistentInput> inputs)
-{
-    std::vector<VfxFlashSpawnInput> result;
-    AppendVfxPersistentStatusStampCommands(image, inputs, result);
-    return result;
-}
 
-void AppendVfxOwnedStatusTickFlashes(const VfxImage &image, VfxEventView events,
-    std::span<const VfxPersistentInput> persistent,
-    std::vector<VfxFlashSpawnInput> &flashes,
-    std::vector<Sequence> &emitted_sequences)
-{
-    for (const auto &event : events)
-    {
-        if (event.effect_handle == 0 || event.effect_handle > image.owned_status_tick_effect_ranges.size() ||
-            event.geometry_owner_id == 0 || event.geometry_owner_id >= (1ull << 60) ||
-            event.status_episode_generation == 0 || static_cast<std::uint32_t>(event.quality) > 2 ||
-            !std::holds_alternative<VfxPointPayload>(event.payload)) continue;
-        const auto range = image.owned_status_tick_effect_ranges[event.effect_handle - 1];
-        if (!range.count) continue;
-        const auto render_id = (2ull << 60) | event.geometry_owner_id;
-        bool emitted = false;
-        for (const auto &owner : persistent)
-        {
-            if (owner.effect_handle == 0 || static_cast<std::uint32_t>(owner.quality) > 2 ||
-                owner.stable_id == 0 || owner.status_episode_generation != event.status_episode_generation ||
-                !std::isfinite(owner.elapsed_seconds) || owner.elapsed_seconds < 0.0f ||
-                !std::isfinite(owner.normalized_age) || owner.normalized_age < 0.0f || owner.normalized_age >= 1.0f)
-                continue;
-            const auto *entity = std::get_if<VfxEntityPayload>(&owner.payload);
-            if (!entity || entity->render_instance_id != render_id ||
-                !std::isfinite(entity->footprint_radius) || entity->footprint_radius <= 0.0f ||
-                !std::isfinite(entity->lifetime01) || entity->lifetime01 != owner.normalized_age) continue;
-            const Float3 position{owner.current_transform[12], owner.current_transform[13], owner.current_transform[14]};
-            if (!Finite(position)) continue;
-            for (const auto &recipe : image.owned_status_tick_recipes.subspan(range.first, range.count))
-            {
-                if (recipe.status_effect_handle != owner.effect_handle ||
-                    recipe.min_quality > static_cast<std::uint32_t>(event.quality) ||
-                    recipe.min_quality > static_cast<std::uint32_t>(owner.quality)) continue;
-                auto flash = InstantiateVfxFlash(recipe.spawn);
-                flash.size = entity->footprint_radius;
-                flash.position = position;
-                flash.event_tick = event.event_tick;
-                flash.stable_seed = event.stable_seed;
-                if (recipe.bleed)
-                {
-                    flash.mask_slice = recipe.mask_slices[event.stable_seed % recipe.mask_slices.size()];
-                    flash.mask_strength = recipe.mask_strength;
-                }
-                flashes.push_back(flash);
-                emitted_sequences.push_back(event.sequence);
-                emitted = true;
-                break;
-            }
-            if (emitted) break;
-        }
-    }
-}
-
-std::vector<VfxOwnedStatusTickFlashCommand> BuildVfxOwnedStatusTickFlashCommands(
-    const VfxImage &image, VfxEventView events, std::span<const VfxPersistentInput> persistent)
-{
-    std::vector<VfxFlashSpawnInput> flashes;
-    std::vector<Sequence> sequences;
-    AppendVfxOwnedStatusTickFlashes(image, events, persistent, flashes, sequences);
-    std::vector<VfxOwnedStatusTickFlashCommand> result;
-    result.reserve(flashes.size());
-    for (std::size_t index = 0; index < flashes.size(); ++index)
-        result.push_back({sequences[index], flashes[index]});
-    return result;
-}
 } // namespace hs::runtime_detail

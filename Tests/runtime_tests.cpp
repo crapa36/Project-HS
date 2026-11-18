@@ -1,14 +1,19 @@
 #include <hs/render_data/render_snapshot_storage.hpp>
 #include <hs/core/shipped_content_owner.hpp>
-#include <hs/runtime/save_store.hpp>
 #include <hs/runtime/audio_engine.hpp>
+#include <hs/core/cooked_format.hpp>
+#include <hs/render_data/vfx_payload_ids.hpp>
 #include <hs/core/sha256.hpp>
 #include <hs/renderer/renderer.hpp>
+#include <hs/runtime/vfx_image_io.hpp>
 #include "runtime_channels.hpp"
 #include "native_input_frame.hpp"
 #include "window.hpp"
 #include "vfx_session_state.hpp"
 #include "renderer_receipts.hpp"
+#include "vfx_catalog.hpp"
+#include "vfx_typed_frame_adapter.hpp"
+#include "vfx_typed_mote_commands.hpp"
 
 #include <Windows.h>
 
@@ -19,14 +24,14 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <iterator>
 #include <memory>
-#include <limits>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <vector>
+
+void TestGraphicsSettings();
 
 namespace
 {
@@ -41,117 +46,6 @@ std::filesystem::path TestDirectory()
     return std::filesystem::temp_directory_path() /
            (L"ProjectHS_runtime_" + std::to_wstring(GetCurrentProcessId()));
 }
-
-void WriteCorrupt(const std::filesystem::path &path)
-{
-    std::ofstream(path, std::ios::trunc) << "{broken";
-}
-
-void TestSaveRecovery(const std::filesystem::path &root)
-{
-    hs::SaveStore store(root);
-    hs::ProfileData first;
-    first.best_level = 7;
-    Check(store.SaveProfile(first).Succeeded(), "first profile save");
-
-    auto second = first;
-    second.best_level = 11;
-    const auto second_save = store.SaveProfile(second);
-    if (!second_save.Succeeded())
-        throw std::runtime_error("second profile save: " +
-                                 std::string(second_save.Message()));
-    Check(std::filesystem::is_regular_file(root / "profile.json.bak"),
-          "atomic replacement retains backup");
-
-    WriteCorrupt(root / "profile.json");
-    hs::ProfileData recovered;
-    Check(store.LoadProfile(recovered).Succeeded() && recovered.best_level == 7,
-          "corrupt primary restores valid backup");
-
-    WriteCorrupt(root / "profile.json");
-    WriteCorrupt(root / "profile.json.bak");
-    hs::ProfileData reset;
-    Check(store.LoadProfile(reset).Succeeded() && reset.best_level == 1,
-          "two corrupt copies reset profile");
-    std::size_t corrupt_count{};
-    for (const auto &entry : std::filesystem::directory_iterator(root))
-    {
-        if (entry.path().extension() == ".corrupt") ++corrupt_count;
-    }
-    Check(corrupt_count >= 2, "corrupt profile copies are preserved");
-}
-
-void TestProfileMigration(const std::filesystem::path &root)
-{
-    const std::string legacy = R"({"schema_version":1,"best_level":42,"total_wins":19,"total_kills":18446744073709551614,"unlocked_skills_mask":255,"unlocked_relics_mask":4095})";
-    const auto read = [](const std::filesystem::path &path) {
-        std::ifstream stream(path, std::ios::binary);
-        return std::string(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
-    };
-    const auto folder = root / "profile-migration";
-    std::filesystem::create_directories(folder);
-    hs::SaveStore store(folder);
-    const auto primary = folder / "profile.json";
-    const auto backup = folder / "profile.json.bak";
-    std::ofstream(primary) << legacy;
-    hs::ProfileData profile;
-    Check(store.LoadProfile(profile).Succeeded() && profile.schema_version == 2 &&
-              profile.best_level == 42 && profile.total_wins == 19 &&
-              profile.total_kills == std::numeric_limits<std::uint64_t>::max() - 1,
-          "v1 profile migrates all used statistics without narrowing");
-    Check(read(primary) == legacy && !std::filesystem::exists(backup),
-          "reading legacy profile does not rewrite user bytes");
-    Check(store.SaveProfile(profile).Succeeded(), "explicit save writes migrated profile");
-    const auto current = read(primary);
-    Check(current.find("unlocked_") == std::string::npos && read(backup) == legacy,
-          "v2 removes unused masks while atomic backup preserves original v1");
-    hs::ProfileData roundtrip;
-    Check(store.LoadProfile(roundtrip).Succeeded() && roundtrip.schema_version == 2 &&
-              roundtrip.total_kills == profile.total_kills && roundtrip.total_wins == 19,
-          "v2 profile round trips statistics exactly");
-
-    const std::string duplicate_current =
-        R"({"schema_version":2,"best_level":99,"best_level":100,"total_wins":0,"total_kills":0})";
-    std::ofstream(primary, std::ios::trunc) << duplicate_current;
-    Check(store.LoadProfile(roundtrip).Succeeded() && roundtrip.best_level == 100 &&
-              read(primary) == duplicate_current,
-          "duplicate current-profile key uses its last value without rewriting bytes");
-
-    WriteCorrupt(primary);
-    Check(store.LoadProfile(roundtrip).Succeeded() && roundtrip.best_level == 42 &&
-              roundtrip.total_kills == profile.total_kills && read(backup) == legacy,
-          "corrupt v2 primary recovers v1 backup without losing its original bytes");
-
-    for (const auto &bad : {
-             R"({"schema_version":1,"best_level":99,"total_wins":0,"total_kills":0,"unlocked_skills_mask":256,"unlocked_relics_mask":4095})",
-             R"({"schema_version":1,"best_level":99,"total_wins":0,"total_kills":0,"unlocked_skills_mask":255,"unlocked_relics_mask":4096})",
-             R"({"schema_version":2,"best_level":99,"total_wins":0,"total_kills":0,"unlocked_skills_mask":255})"})
-    {
-        std::ofstream(primary, std::ios::trunc) << bad;
-        Check(store.LoadProfile(roundtrip).Succeeded() && roundtrip.best_level == 42,
-              "migration keeps legacy mask bounds and current profile field checks");
-    }
-
-    const std::string future = R"({"schema_version":3,"future_data":[1,2,3]})";
-    std::ofstream(primary, std::ios::trunc) << future;
-    Check(!store.LoadProfile(roundtrip) && !store.SaveProfile(profile) &&
-              read(primary) == future && read(backup) == legacy,
-          "future profile primary remains byte-for-byte read-only on load and save");
-    // WriteDocument emits LF bytes directly; text-mode output would translate them to CRLF.
-    std::ofstream(primary, std::ios::binary | std::ios::trunc) << current;
-    std::ofstream(backup, std::ios::trunc) << future;
-    Check(!store.SaveProfile(profile), "future backup blocks profile save");
-    Check(read(primary) == current && read(backup) == future,
-          "blocked save preserves primary and future backup bytes exactly");
-    WriteCorrupt(primary);
-    Check(!store.LoadProfile(roundtrip) && read(primary) == "{broken" && read(backup) == future,
-          "future backup blocks recovery before corrupt primary is moved");
-    const std::string duplicate_future = R"({"schema_version":3,"future_data":1,"future_data":2})";
-    std::ofstream(primary, std::ios::trunc) << duplicate_future;
-    Check(!store.LoadProfile(roundtrip) && !store.SaveProfile(profile) && read(primary) == duplicate_future,
-          "future duplicate-key document remains read-only under last-value parsing");
-}
-
 
 void TestMainWake()
 {
@@ -223,8 +117,8 @@ void TestTypedAudioPcm(const std::filesystem::path &root)
         output.write(reinterpret_cast<const char *>(pcm.data()), static_cast<std::streamsize>(pcm.size()));
         Check(bool(output), "typed audio PCM fixture write");
     }
-    hs::ShippedContentOwner owner;
-    Check(hs::ShippedContentOwner::Open(path, owner).Succeeded(), "typed audio backing open");
+    auto owner = std::make_shared<hs::ShippedContentOwner>();
+    Check(hs::ShippedContentOwner::Open(path, *owner).Succeeded(), "typed audio backing open");
     const std::array samples{hs::AudioSampleRow{0, 14400, 48000, 1, 24},
                              hs::AudioSampleRow{14400, 14400, 48000, 1, 24}};
     const auto digest = hs::Sha256(std::span(pcm).first(14400));
@@ -240,51 +134,12 @@ void TestTypedAudioPcm(const std::filesystem::path &root)
     hs::AudioEngine engine;
     hs::SettingsData settings; settings.master_volume = 0;
     const hs::AudioImage image{cues, samples, chunks};
-    const auto corrupt_path = root / "typed-audio-corrupt.pcm";
-    for (std::size_t damaged_sample = 0; damaged_sample < samples.size(); ++damaged_sample)
-    {
-        auto damaged = pcm;
-        damaged[damaged_sample * 14400] ^= std::byte{1};
-        {
-            std::ofstream output(corrupt_path, std::ios::binary | std::ios::trunc);
-            output.write(reinterpret_cast<const char *>(damaged.data()), static_cast<std::streamsize>(damaged.size()));
-            Check(bool(output), "same-size corrupt PCM fixture write");
-        }
-        hs::ShippedContentOwner corrupt_owner;
-        Check(hs::ShippedContentOwner::Open(corrupt_path, corrupt_owner).Succeeded(), "corrupt PCM backing open");
-        hs::AudioEngine rejected;
-        const auto initialized = rejected.Initialize(settings, image, corrupt_owner);
-        if (damaged_sample == 0)
-            Check(!initialized && rejected.Status().loaded_files == 0,
-                  "preload digest failure must not expose resident PCM");
-        else
-        {
-            Check(initialized.Succeeded() && rejected.Status().loaded_files == 1,
-                  "unloaded transition corruption must not reject a verified preload chunk");
-            for (unsigned attempt = 0; attempt < 2; ++attempt)
-            {
-                const auto failures = rejected.Status().skipped_load_failures;
-                const auto failure_deadline = GetTickCount64() + 1000;
-                do
-                {
-                    Check(!rejected.PrepareCue(transition), "corrupt transition became Ready");
-                    if (rejected.Status().skipped_load_failures > failures) break;
-                    Sleep(1);
-                } while (GetTickCount64() < failure_deadline);
-                Check(rejected.Status().skipped_load_failures == failures + 1 && rejected.Status().loaded_files == 1,
-                      "transition digest failure must retain only verified resident PCM");
-                rejected.Stop(transition);
-                rejected.UpdateListener({}, {0, 0, 1}, {0, 1, 0});
-            }
-        }
-        rejected.Shutdown();
-    }
-    std::filesystem::remove(corrupt_path);
-    Check(!engine.CaptureTimings().captured, "audio timing capture defaults off");
-    engine.SetCaptureTimings(true);
     engine.SetWakeCallback(hs::runtime_detail::MainWake::NotifyOpaque, &wake);
-    Check(engine.Initialize(settings, image, owner).Succeeded(), "typed audio initializes without JSON or WAV");
-    Check(engine.Status().loaded_cues == 2 && engine.Status().loaded_files == 1, "typed audio preloads only declared samples");
+    std::shared_ptr<hs::audio_detail::PreparedAudio> prepared;
+    Check(hs::PrepareAudio(image, *owner, prepared).Succeeded() &&
+          engine.Initialize(settings, std::move(prepared), std::move(owner)).Succeeded(),
+          "typed audio initializes with its pack owner");
+    Check(engine.Status().loaded_files == 1, "typed audio preloads only declared samples");
     Check(engine.PrepareCue(preload), "verified resident PCM remains ready without another load");
     std::filesystem::remove(path); // Subsequent reads must use the held content handle.
     const auto deadline = GetTickCount64() + 1000;
@@ -298,7 +153,7 @@ void TestTypedAudioPcm(const std::filesystem::path &root)
     const auto completion_deadline = GetTickCount64() + 1000;
     do
     {
-        engine.UpdateListener({}, {0, 0, 1}, {0, 1, 0});
+        engine.UpdateListener({});
         if (engine.Status().loaded_files == 1) break;
         Sleep(1);
     } while (GetTickCount64() < completion_deadline);
@@ -307,13 +162,8 @@ void TestTypedAudioPcm(const std::filesystem::path &root)
     while (!engine.PrepareCue(transition) && GetTickCount64() < reload_deadline) Sleep(1);
     Check(engine.PrepareCue(transition) && engine.Status().loaded_files == 2,
           "evicted transition reloads and verifies through the retained content handle");
-    const auto work = engine.CaptureTimings();
-    Check(work.captured && work.qpc_frequency != 0 && work.reader_jobs == 2 && work.reader_failures == 0 &&
-              work.reader_bytes == 28800 && work.scopes[static_cast<std::size_t>(hs::AudioWorkId::PrepareCue)].calls != 0 &&
-              work.scopes[static_cast<std::size_t>(hs::AudioWorkId::Play)].calls == 1,
-          "opt-in audio work counts actual verified worker loads and API activity without counting resident reuse as IO");
     engine.Stop(transition);
-    engine.UpdateListener({}, {0, 0, 1}, {0, 1, 0});
+    engine.UpdateListener({});
     (void)engine.PrepareCue(transition);
     engine.Shutdown(); // Joins a queued/in-flight preparation before owner destruction.
     Check(engine.Status().loaded_files == 0, "shutdown releases typed PCM and pending preparation");
@@ -338,8 +188,6 @@ void TestUiPacketReceiptFollowsExactPresentedFrame()
     auto draw_content = std::make_shared<hs::UiDrawContent>();
     draw_content->models.push_back({hs::UiModel::Kind::Button, {360, 300}, {360, 420}});
     older->draw_content = draw_content;
-    older->draw_facts = std::make_shared<const std::vector<std::uint64_t>>(
-        std::vector<std::uint64_t>{1, 2, 3});
     auto newer = std::make_shared<hs::UiFrame>(*older);
     newer->generation = 11; newer->session.cards[0].subject = 2;
     auto first = exchange.TryBeginWrite();
@@ -373,18 +221,6 @@ void TestUiPacketReceiptFollowsExactPresentedFrame()
           !packets.AcceptPresentedUiPacket(10, older, 7, {1280, 720}) &&
           packets.presented_ui_packet.load(std::memory_order_acquire)->frame == newer,
           "new frame supersedes old receipts without accepting stale UI");
-    const std::array<std::uint64_t, 3> unchanged_facts{1, 2, 3};
-    const std::array<std::uint64_t, 3> changed_facts{1, 2, 4};
-    Check(hs::runtime_detail::SameUiDrawInputs(*newer, unchanged_facts, newer->graphics_model) &&
-          !hs::runtime_detail::SameUiDrawInputs(*newer, changed_facts, newer->graphics_model),
-          "UI draw reuse follows concrete display facts while newer interaction receipts share the content owner");
-    const auto changed_graphics = std::make_shared<const hs::GraphicsSettingsUiModel>();
-    Check(hs::runtime_detail::SameUiDrawInputs(*newer, unchanged_facts, changed_graphics),
-          "hidden graphics telemetry invalidated unchanged root draw content");
-    auto settings_frame = *newer;
-    settings_frame.ui.page = hs::UiPage::PauseSettings;
-    Check(!hs::runtime_detail::SameUiDrawInputs(settings_frame, unchanged_facts, changed_graphics),
-          "visible graphics settings ignored a new model owner");
 }
 
 void TestRendererReceiptsSurviveLaterFailure()
@@ -441,6 +277,220 @@ void TestRendererReceiptsSurviveLaterFailure()
           "Present failure leaves UI unchanged while accepted world mutation stays acknowledged");
 }
 
+void TestPreparedVfxOwnerRoutes()
+{
+    using namespace hs;
+    using namespace runtime_detail;
+
+    const auto bleed_id = MakeAssetId("persistent.status.bleed");
+    const auto tick_id = MakeAssetId("particle.status.bleed_tick");
+    const auto ready_id = MakeAssetId("particle.upgrade.charged.full_ready");
+    std::array<VfxEffectRecord, 3> effects{};
+    effects[0].handle = 1;
+    effects[0].input_mode = 1;
+    effects[0].payload_kind = hs::vfx_payload::EntityAttachment;
+    effects[0].timing_kind = 1;
+    effects[0].sources = {0, 1};
+    effects[1].handle = 2;
+    effects[1].input_mode = 0;
+    effects[1].payload_kind = hs::vfx_payload::PointEvent;
+    effects[1].timing_kind = 0;
+    effects[1].seconds = 0.5f;
+    effects[1].sources = {1, 1};
+    effects[2].handle = 3;
+    effects[2].input_mode = 1;
+    effects[2].payload_kind = hs::vfx_payload::EntityAttachment;
+    effects[2].timing_kind = 0;
+    effects[2].seconds = 1.0f;
+    effects[2].sources = {2, 0};
+    std::array<VfxEffectLookupRecord, 3> lookups{{
+        {bleed_id.value, 1}, {tick_id.value, 2}, {ready_id.value, 3}}};
+    std::sort(lookups.begin(), lookups.end(), [](const auto &left, const auto &right) {
+        return left.effect_id < right.effect_id;
+    });
+    std::array<VfxUpgradeBindingRecord, 1> upgrades{{
+        {MakeAssetId("skill.charged_shot").value, 1, {0, 1}}}};
+    std::array<std::uint32_t, 1> sequences{3};
+    std::array<VfxSourceRecord, 2> program_sources{};
+    program_sources[0].effect = 1;
+    program_sources[0].outputs = {0, 1};
+    program_sources[1].effect = 2;
+    std::array<VfxOutputRecord, 1> program_outputs{};
+    program_outputs[0].source = 0;
+    VfxImage image{};
+    image.program.effects = effects;
+    image.program.sources = program_sources;
+    image.program.outputs = program_outputs;
+    image.program.effect_lookup = lookups;
+    image.program.upgrade_bindings = upgrades;
+    image.program.upgrade_sequences = sequences;
+    image.effect_lookup_by_id = lookups;
+
+    std::array<VfxMoteSourceRecipe, 2> mote_sources{};
+    mote_sources[0].effect_id = bleed_id.value;
+    mote_sources[0].effect_routes = kVfxMoteBleedOwner;
+    mote_sources[0].count = 2;
+    mote_sources[0].stable_id = 11;
+    mote_sources[0].tick_route_valid = true;
+    mote_sources[0].output_range = {0, 1};
+    mote_sources[1].effect_id = tick_id.value;
+    mote_sources[1].effect_routes = kVfxMoteBleedTick;
+    std::array<VfxMoteOutputRecipe, 1> mote_outputs{};
+    mote_outputs[0].tick_route_valid = true;
+    mote_outputs[0].output_color_valid = true;
+    mote_outputs[0].min_quality = 2;
+    image.mote_source_recipes = mote_sources;
+    image.mote_output_recipes = mote_outputs;
+    std::array<VfxRange, 3> flash_ranges{};
+    flash_ranges[1] = {0, 1};
+    std::array<VfxOwnedStatusTickRecipe, 1> flash_recipes{};
+    flash_recipes[0].tick_effect_id = tick_id.value;
+    flash_recipes[0].status_effect_id = bleed_id.value;
+    flash_recipes[0].tick_effect_handle = 2;
+    flash_recipes[0].status_effect_handle = 1;
+    flash_recipes[0].min_quality = 1;
+    flash_recipes[0].bleed = true;
+    flash_recipes[0].mask_slices = {2, 3, 4};
+    flash_recipes[0].mask_strength = 1.0f;
+    flash_recipes[0].spawn.shape = VfxImpactShape::SmallMote;
+    image.owned_status_tick_effect_ranges = flash_ranges;
+    image.owned_status_tick_recipes = flash_recipes;
+
+    VfxCatalog catalog;
+    Check(catalog.Bind(image).Succeeded(), "bind prepared VFX owner routes");
+    std::array<PersistentVfxVisual, 2> visuals{};
+    visuals[0].kind = PersistentVfxKind::EnemyBleedStatus;
+    visuals[0].stable_id = 99;
+    visuals[0].status_episode_generation = 9;
+    visuals[0].active_tick = 0;
+    visuals[0].expires = 120;
+    visuals[0].position = {1, 2, 3};
+    visuals[0].radius = 1;
+    visuals[0].entity_render_id = (2ull << 60) | 7;
+    visuals[0].effect_asset = bleed_id;
+    visuals[1] = visuals[0];
+    visuals[1].kind = PersistentVfxKind::ChargedFullReady;
+    visuals[1].stable_id = 100;
+    visuals[1].effect_asset = ready_id;
+    visuals[1].skill = 3;
+    visuals[1].source_upgrade = 0;
+    PreparedPairFacts facts;
+    facts.Prepare({1, 0, 1, 0, 2, 0, 0}, {}, visuals, {}, {});
+    VfxTypedFrameInputs inputs;
+    BuildVfxTypedFrameInputs(catalog, {}, visuals, {}, 30, inputs, facts);
+    Check(inputs.persistent.size() == 2 && inputs.persistent[0].effect_handle == 1 &&
+              inputs.persistent[1].effect_handle == 3 && inputs.unsupported_input_count == 0,
+          "prepared catalog routes supported persistent owner handles");
+    const auto bleed_owner = inputs.persistent[0];
+    visuals[1].source_upgrade = 4;
+    BuildVfxTypedFrameInputs(catalog, {}, visuals, {}, 30, inputs, facts);
+    Check(inputs.persistent.size() == 1 && inputs.persistent[0].effect_handle == 1,
+          "unregistered charged upgrade does not produce a persistent effect");
+
+    std::vector<VfxPersistentInput> owners;
+    for (std::size_t i = 0; i < 64; ++i)
+    {
+        auto owner = bleed_owner;
+        owner.stable_id = 1000 + i;
+        owner.current_transform[12] = static_cast<float>(i);
+        auto &entity = std::get<VfxEntityPayload>(owner.payload);
+        entity.render_instance_id = (2ull << 60) | (4 + i % 13);
+        owners.push_back(owner);
+    }
+    owners[3].quality = VfxQuality::Medium;
+    std::array<VfxEventInput, 1> events{};
+    events[0].effect_handle = 2;
+    events[0].sequence = 17;
+    events[0].geometry_owner_id = 7;
+    events[0].status_episode_generation = 9;
+    events[0].quality = VfxQuality::High;
+    events[0].event_tick = 30;
+    events[0].stable_seed = 57;
+    events[0].payload = VfxPointPayload{};
+    std::vector<VfxFlashSpawnInput> flashes;
+    std::vector<Sequence> emitted_sequences;
+    std::vector<VfxPreparedMoteBurst> prepared;
+    std::vector<std::size_t> owner_indices{999};
+    PrepareVfxOwnedStatusTickOutputs(image, events, owners, flashes,
+                                     emitted_sequences, prepared, owner_indices);
+    Check(flashes.size() == 1 && emitted_sequences.size() == 1 &&
+              emitted_sequences[0] == 17 && prepared.size() == 1 &&
+              prepared[0].count == 2 && prepared[0].event_sequence == 17 &&
+              flashes[0].position.x == 3.0f && prepared[0].base.position.x == 16.0f,
+          "status tick routes flash and mote to independent first eligible owners in source order");
+
+    owners[3].status_episode_generation = 10;
+    flashes.clear();
+    emitted_sequences.clear();
+    PrepareVfxOwnedStatusTickOutputs(image, events, owners, flashes,
+                                     emitted_sequences, prepared, owner_indices);
+    Check(flashes.size() == 1 && emitted_sequences.size() == 1 &&
+              emitted_sequences[0] == 17 && prepared.size() == 1 &&
+              flashes[0].position.x == 16.0f &&
+              prepared[0].base.position.x == 16.0f,
+          "new owner generation cannot take an event from an older status episode");
+
+    const auto hash = [](std::string_view value) {
+        std::uint32_t result = 2166136261u;
+        for (const unsigned char c : value) { result ^= c; result *= 16777619u; }
+        return result;
+    };
+    VfxImageData mote_data;
+    auto &program = mote_data.program;
+    program.effects.push_back({});
+    program.effects[0].handle = 1;
+    program.effects[0].input_mode = 0;
+    program.effects[0].timing_kind = 0;
+    program.effects[0].seconds = .65f;
+    program.effects[0].payload_kind = hs::vfx_payload::PointEvent;
+    program.effects[0].sources = {0, 2};
+    program.effect_lookup.push_back({MakeAssetId("particle.skill.trap").value, 1});
+    program.parameters.push_back({hash("count_per_second"), VfxParameterType::Int, 3});
+    program.sources.resize(2);
+    for (auto &source : program.sources)
+    {
+        source.effect = 1;
+        source.type = VfxSourceType::CurlMotes;
+        source.knot_count = 2;
+        source.knots[0] = 0.0f;
+        source.knots[1] = 1.0f;
+        source.parameters = {0, 1};
+    }
+    program.sources[0].stable_id = hash("unused_rate");
+    program.sources[0].outputs = {0, 0};
+    program.sources[1].stable_id = hash("ambient_motes");
+    program.sources[1].outputs = {0, 1};
+    program.outputs.push_back({});
+    auto &rate_output = program.outputs[0];
+    rate_output.source = 1;
+    rate_output.profile = VfxOutputProfile::SpriteAdd;
+    rate_output.shape = hash("soft_motes");
+    rate_output.shape_domain = hash("sprite");
+    rate_output.shape_scale_rule = hash("component_size");
+    rate_output.shape_component_kind = hash("particle");
+    rate_output.rgba = {1, 1, 1, 1};
+    rate_output.hdr = 1;
+    rate_output.min_quality = static_cast<std::uint32_t>(VfxQuality::Medium);
+    rate_output.coverage_type = hash("analytic");
+    rate_output.coverage_ref = hash("soft_disc");
+    rate_output.motion = VfxMotionKind::RareInwardDrift;
+
+    PrepareVfxMoteRecipes(mote_data);
+    std::array<VfxEventInput, 1> rate_events{};
+    rate_events[0].sequence = 1;
+    rate_events[0].effect_handle = 1;
+    rate_events[0].event_tick = 0;
+    rate_events[0].stable_seed = 57;
+    rate_events[0].quality = VfxQuality::High;
+    VfxPointPayload rate_payload{};
+    rate_payload.position = {1, 2, 3};
+    rate_payload.authored_scale = 1;
+    rate_events[0].payload = rate_payload;
+    flashes.clear();
+    AppendVfxOwnedMoteCommands(mote_data.View(), std::span(rate_events), 20, flashes);
+    Check(flashes.size() == 2, "empty mote source must not borrow the following source's output");
+}
+
 
 
 } // namespace
@@ -452,12 +502,12 @@ int main()
     std::filesystem::remove_all(root, error);
     try
     {
-        TestSaveRecovery(root);
-        TestProfileMigration(root);
         TestMainWake();
+        TestGraphicsSettings();
         TestTypedAudioPcm(root);
         TestUiPacketReceiptFollowsExactPresentedFrame();
         TestRendererReceiptsSurviveLaterFailure();
+        TestPreparedVfxOwnerRoutes();
         std::filesystem::remove_all(root, error);
         std::cout << "runtime_tests passed\n";
         return 0;

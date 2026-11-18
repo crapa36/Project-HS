@@ -9,7 +9,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <set>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -42,7 +41,7 @@ class PickupWorkOwner
 
     void Reserve(std::size_t count)
     {
-        stationary_cells_.reserve(count);
+        locations_.reserve(count);
         queued_ids_.reserve(count);
     }
 
@@ -74,9 +73,7 @@ class PickupWorkOwner
     {
         needs_compaction_ = true;
         if (!indexed_) return;
-        RemoveStationary(id);
-        Erase(active_ids_, id);
-        Erase(utility_ids_, id);
+        Remove(id);
     }
 
     void Update(const PickupActor &pickup, bool moving)
@@ -93,12 +90,11 @@ class PickupWorkOwner
             if (pickup.globally_attracted || moving)
             {
                 // Each live XP pickup belongs to exactly one of stationary or active.
-                if (RemoveStationary(pickup.id.value)) active_ids_.insert(pickup.id.value);
+                Upsert(pickup.id.value, kActiveBucket);
             }
             else
             {
-                if (UpsertStationary(pickup.id.value, pickup.position))
-                    Erase(active_ids_, pickup.id.value);
+                Upsert(pickup.id.value, StationaryBucket(pickup.position));
             }
         }
         indexed_ = true;
@@ -112,8 +108,8 @@ class PickupWorkOwner
             Rebuild(pickups, arena_half_extent);
         queued_ids_.clear();
         next_ = 0;
-        Append(active_ids_);
-        Append(utility_ids_);
+        Append(buckets_[kActiveBucket]);
+        Append(buckets_[kUtilityBucket]);
         const auto radius = std::max(std::abs(attraction_radius), std::abs(collection_radius));
         int low_x{}, low_y{}, high_x = kGridDimension - 1, high_y = kGridDimension - 1;
         if (std::isfinite(player.x) && std::isfinite(player.y) && std::isfinite(radius))
@@ -126,7 +122,7 @@ class PickupWorkOwner
         }
         for (auto y = low_y; y <= high_y; ++y)
             for (auto x = low_x; x <= high_x; ++x)
-                Append(bins_[static_cast<std::size_t>(y * kGridDimension + x)]);
+                Append(buckets_[static_cast<std::size_t>(y * kGridDimension + x)]);
         if (auto_collect)
             for (const auto &pickup : pickups)
                 if (!pickup.dead && (pickup.kind == PickupKind::Experience ||
@@ -140,36 +136,35 @@ class PickupWorkOwner
         if (next_ == queued_ids_.size()) return std::nullopt;
         return queued_ids_[next_++];
     }
-    void ApplyMagnet(std::span<PickupActor> pickups, Id cursor, float arena_half_extent)
+    void ApplyMagnet(std::span<PickupActor> pickups, Id cursor)
     {
         // Magnet is the exceptional all-XP operation. Earlier IDs become active
         // for the next tick; only later IDs may enter this tick's remaining work.
-        if (!indexed_ || !has_extent_ || extent_ != arena_half_extent)
-            Rebuild(pickups, arena_half_extent);
+        const auto previous_size = queued_ids_.size();
         indexed_ = false;
         for (auto &pickup : pickups)
         {
-            if (pickup.dead || pickup.kind != PickupKind::Experience) continue;
+            if (pickup.dead || pickup.kind != PickupKind::Experience || pickup.globally_attracted) continue;
             pickup.globally_attracted = true;
-            if (RemoveStationary(pickup.id.value)) active_ids_.insert(pickup.id.value);
+            Upsert(pickup.id.value, kActiveBucket);
             if (pickup.id.value > cursor) queued_ids_.push_back(pickup.id.value);
         }
         indexed_ = true;
-        Canonicalize();
+        if (queued_ids_.size() != previous_size) Canonicalize();
     }
     [[nodiscard]] std::span<const Id> Queued() const noexcept { return queued_ids_; }
 
   private:
-    std::array<std::vector<Id>, kGridCellCount> bins_;
-    struct StationaryLocation { std::size_t cell{}, offset{}; };
-    std::unordered_map<Id, StationaryLocation> stationary_cells_;
-    std::set<Id> active_ids_, utility_ids_;
+    static constexpr std::size_t kActiveBucket = kGridCellCount;
+    static constexpr std::size_t kUtilityBucket = kGridCellCount + 1;
+    std::array<std::vector<Id>, kGridCellCount + 2> buckets_;
+    struct Location { std::size_t bucket{}, offset{}; };
+    std::unordered_map<Id, Location> locations_;
     std::vector<Id> queued_ids_;
     std::size_t next_{};
     float extent_{};
     bool indexed_{true}, has_extent_{}, needs_compaction_{};
 
-    static void Erase(std::set<Id> &ids, Id id) noexcept { ids.erase(id); }
     int Coordinate(float value) const noexcept
     {
         const auto low = -extent_;
@@ -178,45 +173,48 @@ class PickupWorkOwner
         return std::clamp(static_cast<int>(std::floor((value + extent_) / kGridCellSize)),
                           0, kGridDimension - 1);
     }
-    bool RemoveStationary(Id id) noexcept
+    void RemoveFromBucket(Id id, Location location) noexcept
     {
-        const auto found = stationary_cells_.find(id);
-        if (found == stationary_cells_.end()) return false;
-        const auto location = found->second;
-        auto &bin = bins_[location.cell];
-        const auto moved = bin.back();
-        bin[location.offset] = moved;
-        // Cell order is private broad-phase scratch; only the merged work is canonical.
-        if (moved != id) stationary_cells_.find(moved)->second.offset = location.offset;
-        bin.pop_back();
-        stationary_cells_.erase(found);
-        return true;
+        auto &bucket = buckets_[location.bucket];
+        const auto moved = bucket.back();
+        bucket[location.offset] = moved;
+        // Bucket order is private broad-phase scratch; only the merged work is canonical.
+        if (moved != id) locations_.find(moved)->second.offset = location.offset;
+        bucket.pop_back();
     }
-    bool UpsertStationary(Id id, Float2 position)
+    void Remove(Id id) noexcept
     {
-        const auto cell = static_cast<std::size_t>(Coordinate(position.y) * kGridDimension + Coordinate(position.x));
-        const auto found = stationary_cells_.find(id);
-        if (found != stationary_cells_.end() && found->second.cell == cell) return false;
-        const bool inserted = found == stationary_cells_.end();
-        RemoveStationary(id);
-        const auto offset = bins_[cell].size();
-        bins_[cell].push_back(id);
-        stationary_cells_.emplace(id, StationaryLocation{cell, offset});
-        return inserted;
+        const auto found = locations_.find(id);
+        if (found == locations_.end()) return;
+        RemoveFromBucket(id, found->second);
+        locations_.erase(found);
+    }
+    void Upsert(Id id, std::size_t bucket_index)
+    {
+        const auto found = locations_.find(id);
+        if (found != locations_.end() && found->second.bucket == bucket_index) return;
+        if (found != locations_.end()) RemoveFromBucket(id, found->second);
+        auto &bucket = buckets_[bucket_index];
+        const auto offset = bucket.size();
+        bucket.push_back(id);
+        if (found != locations_.end()) found->second = {bucket_index, offset};
+        else locations_.emplace(id, Location{bucket_index, offset});
+    }
+    [[nodiscard]] std::size_t StationaryBucket(Float2 position) const noexcept
+    {
+        return static_cast<std::size_t>(Coordinate(position.y) * kGridDimension + Coordinate(position.x));
     }
     void Index(const PickupActor &pickup, bool moving)
     {
         if (pickup.dead) { needs_compaction_ = true; return; }
-        if (pickup.kind != PickupKind::Experience) utility_ids_.insert(pickup.id.value);
-        else if (pickup.globally_attracted || moving) active_ids_.insert(pickup.id.value);
-        else UpsertStationary(pickup.id.value, pickup.position);
+        if (pickup.kind != PickupKind::Experience) Upsert(pickup.id.value, kUtilityBucket);
+        else if (pickup.globally_attracted || moving) Upsert(pickup.id.value, kActiveBucket);
+        else Upsert(pickup.id.value, StationaryBucket(pickup.position));
     }
     void ClearIndices() noexcept
     {
-        for (auto &bin : bins_) bin.clear();
-        stationary_cells_.clear();
-        active_ids_.clear();
-        utility_ids_.clear();
+        for (auto &bucket : buckets_) bucket.clear();
+        locations_.clear();
     }
     void Rebuild(std::span<const PickupActor> pickups, float arena_half_extent)
     {
@@ -228,7 +226,6 @@ class PickupWorkOwner
         indexed_ = true;
     }
     void Append(const std::vector<Id> &ids) { queued_ids_.insert(queued_ids_.end(), ids.begin(), ids.end()); }
-    void Append(const std::set<Id> &ids) { queued_ids_.insert(queued_ids_.end(), ids.begin(), ids.end()); }
     void Canonicalize()
     {
         std::ranges::sort(queued_ids_);

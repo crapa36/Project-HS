@@ -2,6 +2,7 @@
 
 #if defined(HS_DEVELOPMENT_TOOLS)
 #include <hs/render_data/material_schema.hpp>
+#include <hs/render_data/vfx_payload_ids.hpp>
 #include <hs/render_data/render_snapshot_values.hpp>
 #include <hs/presentation/projector.hpp>
 #include <hs/renderer/renderer.hpp>
@@ -125,15 +126,15 @@ struct AssetTestRoom
             { prepared_cycles[index] = cycle; station_starts[index] = current_tick; }
             const auto start = station_starts[index];
             const auto owner_id = OwnerId(index, cycle);
-            if (entry.payload_kind == VfxRibbonBoundsHash32("SourceTargetPayload"))
+            if (entry.payload_kind == hs::vfx_payload::SourceTarget)
             {
                 RenderInstance target{}; target.mesh = RenderMesh::GroundDetail; target.environment_variant = 9;
                 target.position = {entry.position.x + 3, entry.position.y, entry.position.z};
                 target.stable_id = actor.stable_id ^ 0x10000000ull;
                 PopulateRenderInstanceRevisions(target); instances.push_back(target);
             }
-            if (entry.payload_kind == VfxRibbonBoundsHash32("ProjectilePayload") ||
-                entry.payload_kind == VfxRibbonBoundsHash32("ProjectilePathPayload"))
+            if (entry.payload_kind == hs::vfx_payload::Projectile ||
+                entry.payload_kind == hs::vfx_payload::ProjectilePath)
             {
                 RenderInstance projectile{}; projectile.mesh = RenderMesh::EnemyProjectile;
                 projectile.position = {entry.position.x, entry.position.y + .5f,
@@ -188,7 +189,6 @@ struct AssetTestRoom
     {
         active_screen_station.reset();
         if (!tick) return;
-        const auto hash = VfxRibbonBoundsHash32;
         for (std::size_t index = 0; index < entries.size(); ++index)
         {
             const auto &entry = entries[index];
@@ -207,7 +207,7 @@ struct AssetTestRoom
             const auto &actor = instances[station_instances[index]]; const auto point = actor.position;
             const Float3 target{point.x + 3, point.y, point.z};
             const auto kind = effect.payload_kind;
-            const bool moving = kind == hash("ProjectilePayload") || kind == hash("ProjectilePathPayload");
+            const bool moving = kind == hs::vfx_payload::Projectile || kind == hs::vfx_payload::ProjectilePath;
             // Prepare placed each projectile immediately after its station actor.
             const auto projectile = moving ? instances[station_instances[index] + 1].position : point;
             const Float3 prior = moving
@@ -238,20 +238,20 @@ struct AssetTestRoom
             }
             if (effect.input_mode == 0 && last_event_cycles[index] == cycle) continue;
             VfxPayload payload;
-            if (kind == hash("PointEventPayload")) payload = VfxPointPayload{point, {0,1,0}, {0,0,1}, 1, 1, 0};
-            else if (kind == hash("PresentationContextPayload")) payload = VfxContextPayload{actor.stable_id & ((1ull << 60) - 1), {0,0,1}, entry.screen_effect ? .2f : age, 1, 0};
-            else if (kind == hash("ProjectilePayload")) payload = VfxProjectilePayload{{0,0,1}, {.2f,.2f,.2f}, .2f, age, 0};
-            else if (kind == hash("ProjectilePathPayload")) payload = VfxProjectilePathPayload{projectile, prior, {0,0,1}, point, .2f, age, 0};
-            else if (kind == hash("CircleAreaPayload")) payload = VfxCirclePayload{point, {0,0,1}, 2, 0, age, 0};
-            else if (kind == hash("ConePayload")) payload = VfxConePayload{point, {0,0,1}, 4, 30, age, 0};
-            else if (kind == hash("LineAreaPayload")) payload = VfxLinePayload{point, target, {1,0,0}, 1, age, 0};
-            else if (kind == hash("RingWithGapsPayload"))
+            if (kind == hs::vfx_payload::PointEvent) payload = VfxPointPayload{point, {0,1,0}, {0,0,1}, 1, 1, 0};
+            else if (kind == hs::vfx_payload::PresentationContext) payload = VfxContextPayload{actor.stable_id & ((1ull << 60) - 1), {0,0,1}, entry.screen_effect ? .2f : age, 1, 0};
+            else if (kind == hs::vfx_payload::Projectile) payload = VfxProjectilePayload{{0,0,1}, {.2f,.2f,.2f}, .2f, age, 0};
+            else if (kind == hs::vfx_payload::ProjectilePath) payload = VfxProjectilePathPayload{projectile, prior, {0,0,1}, point, .2f, age, 0};
+            else if (kind == hs::vfx_payload::CircleArea) payload = VfxCirclePayload{point, {0,0,1}, 2, 0, age, 0};
+            else if (kind == hs::vfx_payload::Cone) payload = VfxConePayload{point, {0,0,1}, 4, 30, age, 0};
+            else if (kind == hs::vfx_payload::LineArea) payload = VfxLinePayload{point, target, {1,0,0}, 1, age, 0};
+            else if (kind == hs::vfx_payload::RingWithGaps)
             { VfxRingGapsPayload ring{}; ring.center = point; ring.inner_radius = 1; ring.outer_radius = 2;
               ring.gap_half_width_degrees = 20; ring.lifetime01 = age; ring.uniform_gaps.count = 1; payload = std::move(ring); }
-            else if (kind == hash("SafeGapSectorPayload")) payload = VfxSafeSectorPayload{point, {0,0,1}, 1, 2, 20, age};
-            else if (kind == hash("EntityAttachmentPayload")) payload = VfxEntityPayload{1, age, .2f, 0, actor.stable_id};
-            else if (kind == hash("SourceTargetPayload")) payload = VfxLinkPayload{point, target, actor.stable_id, actor.stable_id ^ 0x10000000ull, age, .5f, 0};
-            else if (kind == hash("GenericGameplayGeometryPayload")) payload = VfxGeometryPayload{{0,0,1}, 2, 1, 4, 30, age, 0};
+            else if (kind == hs::vfx_payload::SafeGapSector) payload = VfxSafeSectorPayload{point, {0,0,1}, 1, 2, 20, age};
+            else if (kind == hs::vfx_payload::EntityAttachment) payload = VfxEntityPayload{1, age, .2f, 0, actor.stable_id};
+            else if (kind == hs::vfx_payload::SourceTarget) payload = VfxLinkPayload{point, target, actor.stable_id, actor.stable_id ^ 0x10000000ull, age, .5f, 0};
+            else if (kind == hs::vfx_payload::GenericGameplayGeometry) payload = VfxGeometryPayload{{0,0,1}, 2, 1, 4, 30, age, 0};
             else continue;
             const auto seed = static_cast<std::uint32_t>(entry.effect_id ^ (entry.effect_id >> 32) ^ index);
             if (effect.input_mode == 0)

@@ -261,7 +261,6 @@ void ProduceTextureBatch(const fs::path& source_root,const fs::path& build_root)
         auto& action=actions[i];
         for(const auto& input:action.spec.inputs) all_inputs.push_back(input.path.generic_string());
         if(current[i]) {
-            ap::TouchActionResult(build_root/"Actions"/action.spec.namespace_path/"result.json");
             continue;
         }
         action.needs_cook=true;
@@ -357,7 +356,6 @@ void Produce(std::string_view mode, const fs::path& source_root,
     std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
 
     if (IsCurrent(build_root, spec, names)) {
-        ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
         return;
     }
 
@@ -385,7 +383,6 @@ void Produce(std::string_view mode, const fs::path& source_root,
         }
         snapshot.SetInputs(spec,frozen_inputs);
         if(IsCurrent(build_root,spec,names)) {
-            ap::TouchActionResult(build_root/"Actions"/spec.namespace_path/"result.json");
             ap::RemoveStage(input_stage);
             return;
         }

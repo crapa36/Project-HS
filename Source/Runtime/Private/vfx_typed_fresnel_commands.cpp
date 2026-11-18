@@ -20,15 +20,6 @@ bool FiniteTransform(const VfxTransform &transform) noexcept
 }
 }
 
-std::vector<VfxFresnelInput> BuildVfxTypedFresnelCommands(
-    const VfxImage &image,
-    const PreparedVfxFresnelRecipeView &recipes,
-    std::span<const VfxPersistentInput> inputs)
-{
-    std::vector<VfxFresnelInput> result;
-    AppendVfxTypedFresnelCommands(image, recipes, inputs, result);
-    return result;
-}
 
 void AppendVfxTypedFresnelCommands(const VfxImage &image,
     const PreparedVfxFresnelRecipeView &recipes,

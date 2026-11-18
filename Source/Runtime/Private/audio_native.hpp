@@ -27,7 +27,6 @@ template<class Voice> NativeAudioResult StopFlushVoice(Voice &voice) noexcept
 template<class Voice> NativeAudioResult SubmitPreparedVoice(Voice &voice,
     const XAUDIO2_VOICE_SENDS &sends, IXAudio2Voice *target, std::uint32_t channels,
     std::span<const float> matrix, const XAUDIO2_BUFFER &buffer,
-    std::uint64_t (*clock)() noexcept = nullptr, std::uint64_t *submit_qpc = nullptr,
     bool start = true) noexcept
 {
     if (const auto result = StopFlushVoice(voice); !result.Succeeded()) return result;
@@ -40,7 +39,6 @@ template<class Voice> NativeAudioResult SubmitPreparedVoice(Voice &voice,
         const auto applied = voice.SetOutputMatrix(target, 1, channels, matrix.data());
         if (FAILED(applied)) return {AudioNativeOperation::Matrix, applied};
     }
-    if (clock && submit_qpc) *submit_qpc = clock();
     const auto submitted = voice.SubmitSourceBuffer(&buffer);
     if (FAILED(submitted)) return {AudioNativeOperation::Submit, submitted};
     if (start)

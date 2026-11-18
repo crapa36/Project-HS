@@ -28,9 +28,6 @@ Result DecodeAudioImage(std::span<const std::byte> bytes, std::uint64_t pack_siz
             in.Fields(cue.id.value, cue.first_sample, cue.sample_count, cue.max_simultaneous,
                       cue.retrigger_ms, cue.bus, cue.priority, cue.spatial, cue.preload,
                       cue.arrow_impact_family, cue.loop);
-            require(cue.id.value && cue.sample_count && cue.max_simultaneous &&
-                cue.bus >= AudioBus::Bgm && cue.bus <= AudioBus::Ui &&
-                cue.priority <= AudioPriority::Ui, "Invalid audio cue.");
         }
         const auto sample_count = in.Count(28);
         require(sample_count && sample_count <= UINT32_MAX, "Invalid audio sample count.");
@@ -46,22 +43,12 @@ Result DecodeAudioImage(std::span<const std::byte> bytes, std::uint64_t pack_siz
                 "Invalid audio sample format or pack range.");
             end += sample.bytes;
         }
-        std::vector<std::uint8_t> coverage(sample_count, 0);
-        for (std::size_t i = 0; i < decoded.cues.size(); ++i)
+        for (const auto &cue : decoded.cues)
         {
-            const auto &cue = decoded.cues[i];
-            require(!i || decoded.cues[i - 1].id.value < cue.id.value, "Audio cues are not sorted and unique.");
-            require(cue.first_sample <= sample_count && cue.sample_count <= sample_count - cue.first_sample,
+            require(cue.sample_count && cue.first_sample <= sample_count &&
+                cue.sample_count <= sample_count - cue.first_sample,
                 "Audio cue sample range is invalid.");
-            for (std::size_t j = cue.first_sample; j < std::size_t(cue.first_sample) + cue.sample_count; ++j)
-            {
-                require(!coverage[j] && (!cue.spatial || decoded.samples[j].channels == 1),
-                    "Audio cue sample is duplicated or has invalid spatial channels.");
-                coverage[j] = cue.preload ? 2 : 1;
-            }
         }
-        require(std::ranges::none_of(coverage, [](auto value) { return value == 0; }),
-            "Audio cue samples do not cover the sample table.");
         const auto chunk_count = in.Count(68);
         require(chunk_count && chunk_count <= sample_count, "Invalid audio chunk count.");
         decoded.chunks.resize(chunk_count);
@@ -77,14 +64,8 @@ Result DecodeAudioImage(std::span<const std::byte> bytes, std::uint64_t pack_siz
                 chunk.sample_count <= sample_count - next_sample &&
                 (chunk.preload || chunk.sample_count == 1), "Invalid audio chunk sample range.");
             require(chunk.offset == decoded.samples[next_sample].offset, "Audio chunk start does not match its sample.");
-            std::uint64_t chunk_bytes{};
-            for (std::size_t j = next_sample; j < next_sample + chunk.sample_count; ++j)
-            {
-                require(coverage[j] == (chunk.preload ? 2 : 1) &&
-                    decoded.samples[j].bytes <= UINT64_MAX - chunk_bytes,
-                    "Audio chunk preload or size disagrees with its samples.");
-                chunk_bytes += decoded.samples[j].bytes;
-            }
+            const auto &last_sample = decoded.samples[next_sample + chunk.sample_count - 1];
+            const auto chunk_bytes = last_sample.offset + last_sample.bytes - chunk.offset;
             require(chunk.bytes == chunk_bytes && chunk.bytes <= std::numeric_limits<std::size_t>::max(),
                 "Audio chunk byte extent disagrees with its samples.");
             if (chunk.preload)

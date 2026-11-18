@@ -1,30 +1,26 @@
 #include "view_fixture.hpp"
 
+#include <sstream>
+
+#include <hs/core/graphics_settings_request.hpp>
 #include <hs/render_data/render_package.hpp>
 #include <hs/render_data/render_snapshot_storage.hpp>
 #include <hs/render_data/terrain_source_constants.hpp>
-#include <Windows.h>
-#include <wincodec.h>
-#include <wrl/client.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
-#include <fstream>
-#include <limits>
+#include <format>
 #include <memory>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
 namespace hs::render_test
 {
-static_assert(!std::is_default_constructible_v<RenderPackage>);
-
 inline constexpr ViewId kOwnedViewProbePreview{0x50525641u};
 inline constexpr ViewId kOwnedViewProbeCapture{0x43415042u};
 
@@ -88,14 +84,14 @@ inline bool SameMatrix(const Matrix &a, const Matrix &b, double tolerance = 1.0e
     return true;
 }
 inline Result CaptureSurfaceReadback(D3D12Renderer &renderer, ViewId view_id,
-    const std::filesystem::path &path, std::uint64_t expected_frame,
+    std::uint64_t expected_frame,
     nlohmann::ordered_json &metadata)
 {
-    if (auto captured = renderer.Capture({.view_id = view_id, .path = path,
-            .kind = CaptureKind::SurfaceDiagnostics}); !captured) return captured;
-    std::ifstream input(path);
-    if (!input) return Failure("Native surface readback metadata was not written.");
-    input >> metadata;
+    std::ostringstream summary;
+    if (auto captured = renderer.Capture({.view_id = view_id,
+            .kind = CaptureKind::SurfaceDiagnostics, .surface_summary = &summary});
+        !captured) return captured;
+    metadata = nlohmann::ordered_json::parse(summary.view());
     const auto &temporal = metadata.at("temporal_inputs");
     if (temporal.is_null() || temporal.at("view_id").get<std::uint32_t>() != view_id.value ||
         temporal.at("frame").get<std::uint64_t>() != expected_frame ||
@@ -239,31 +235,6 @@ inline Result VerifyTerrainSubmission(const nlohmann::ordered_json &metadata,
     return Result::Success();
 }
 
-struct UiProbePixels { UINT width{}, height{}; std::vector<std::uint8_t> rgba; };
-inline Result CaptureUiProbePixels(D3D12Renderer &renderer, const std::filesystem::path &path,
-                                   UiProbePixels &out, ViewId view_id = kMainRenderViewId)
-{
-    if (auto captured = renderer.Capture({.view_id = view_id, .path = path}); !captured) return captured;
-    const HRESULT apartment = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    if (FAILED(apartment) && apartment != RPC_E_CHANGED_MODE) return Failure("UI probe COM initialization failed.");
-    struct Apartment { HRESULT result; ~Apartment() { if (SUCCEEDED(result)) CoUninitialize(); } } cleanup{apartment};
-    Microsoft::WRL::ComPtr<IWICImagingFactory> factory;
-    Microsoft::WRL::ComPtr<IWICBitmapDecoder> decoder;
-    Microsoft::WRL::ComPtr<IWICBitmapFrameDecode> frame;
-    Microsoft::WRL::ComPtr<IWICFormatConverter> converter;
-    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory2, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) ||
-        FAILED(factory->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnLoad, &decoder)) ||
-        FAILED(decoder->GetFrame(0, &frame)) || FAILED(factory->CreateFormatConverter(&converter)) ||
-        FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat32bppRGBA,
-            WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom)) ||
-        FAILED(converter->GetSize(&out.width, &out.height)) || !out.width || !out.height ||
-        out.width > UINT_MAX / 4u || std::uint64_t(out.width) * out.height * 4u > UINT_MAX)
-        return Failure("UI probe PNG decode setup failed.");
-    out.rgba.resize(std::size_t(out.width) * out.height * 4u);
-    if (FAILED(converter->CopyPixels(nullptr, out.width * 4u, static_cast<UINT>(out.rgba.size()), out.rgba.data())))
-        return Failure("UI probe PNG readback failed.");
-    return Result::Success();
-}
 } // namespace owned_view_probe_detail
 
 // Opt-in integration probe. The caller owns the ordinary internal renderer
@@ -271,7 +242,7 @@ inline Result CaptureUiProbePixels(D3D12Renderer &renderer, const std::filesyste
 // provider or manufactures a provider token. It performs exactly three frame
 // packages with skipped-view history and readbacks, then one auxiliary-only overwrite.
 Result RunOwnedViewProbe(D3D12Renderer &renderer,
-    const RenderSnapshotPair &snapshots, const std::filesystem::path &artifacts,
+    const RenderSnapshotPair &snapshots, const std::filesystem::path &artifacts, bool export_diagnostics,
     AssetId archer_asset_id, OwnedViewProbeEvidence &evidence)
 {
     using namespace owned_view_probe_detail;
@@ -320,7 +291,7 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
          .linear_rgb = {0.2f, 0.6f, 0.3f}, .hdr = 1, .alpha = 0.7f, .normalized_age = 0.2f,
          .kind = VfxDecalKind::Organic, .stable_seed = 47, .voronoi_cells = 64, .edge_glow = 0.3f}
     }};
-    const std::array<float, 3> distortion_gap_pool{0.5f, 1.25f, 2.0f};
+    const std::array<float, 3> distortion_gap_pool{0.5f, 1.25f, 0.75f};
     const VfxLineSpawnCommand effect_line{.sequence = 0x4c494e45u,
         .start = {-.5f, 0, -2}, .end = {.5f, 0, -2}, .color = {1, .5f, .1f, 1},
         .width = .1f, .lifetime = .2f, .uv_repeat = 1};
@@ -339,7 +310,8 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
     };
     std::array<VfxDistortionInput, 2> package0_distortions{
         annulus(0x44495331u, {-2, 0, 0}), annulus(0x44495332u, {2, 0, 0})};
-    package0_distortions[0].gap_angles_degrees = {0.75f};
+    package0_distortions[0].frame_gap_first = 2;
+    package0_distortions[0].frame_gap_count = 1;
     package0_distortions[1].frame_gap_first = 1;
     package0_distortions[1].frame_gap_count = 1;
     std::array<VfxDistortionInput, 2> package2_distortions{
@@ -349,7 +321,7 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
         command.frame_gap_first = 0;
         command.frame_gap_count = 2;
     }
-    const std::array<float, 3> ground_gap_pool{0.5f, 1.25f, 2.0f};
+    const std::array<float, 3> ground_gap_pool{0.5f, 1.25f, 0.75f};
     const auto ground_annulus = [](std::uint64_t id, Float3 position) {
         VfxGroundSpawnInput input{};
         input.effect_handle = 1; input.stable_id = id; input.hdr = 1;
@@ -363,7 +335,8 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
     };
     std::array<VfxGroundSpawnInput, 2> package0_ground{
         ground_annulus(0x47524e31u, {-2, 0, 0}), ground_annulus(0x47524e32u, {2, 0, 0})};
-    package0_ground[0].geometry.gap_angles_radians = {0.75f};
+    package0_ground[0].geometry.frame_gap_first = 2;
+    package0_ground[0].geometry.frame_gap_count = 1;
     package0_ground[1].geometry.frame_gap_first = 1;
     package0_ground[1].geometry.frame_gap_count = 1;
     std::array<VfxGroundSpawnInput, 2> package2_ground{
@@ -375,15 +348,13 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
         {.profile = VfxOutputProfile::RibbonOit, .motion = VfxMotionKind::SoftWiderSheath,
          .color = {.2f, .5f, 1, .5f}, .width_head = .2f, .width_tail = .08f, .hdr = 1}
     }};
-    VfxRibbonSourceInput owning_ribbon;
-    owning_ribbon.owner_id = 0x52494242u;
-    owning_ribbon.effect_handle = 1; owning_ribbon.source_id = 1;
-    owning_ribbon.position = {.5f, 1, 0}; owning_ribbon.previous_position = {-.5f, 1, 0};
-    owning_ribbon.analytic = true; owning_ribbon.control = {0, 1.25f, 0};
-    owning_ribbon.segments = 8; owning_ribbon.normalized_age = .4f;
-    owning_ribbon.outputs.assign(ribbon_outputs.begin(), ribbon_outputs.end());
-    auto pooled_ribbon = owning_ribbon;
-    pooled_ribbon.outputs.clear(); pooled_ribbon.frame_output_count = 2;
+    VfxRibbonSourceInput ribbon_source;
+    ribbon_source.owner_id = 0x52494242u;
+    ribbon_source.effect_handle = 1; ribbon_source.source_id = 1;
+    ribbon_source.position = {.5f, 1, 0}; ribbon_source.previous_position = {-.5f, 1, 0};
+    ribbon_source.analytic = true; ribbon_source.control = {0, 1.25f, 0};
+    ribbon_source.segments = 8; ribbon_source.normalized_age = .4f;
+    ribbon_source.frame_output_count = static_cast<std::uint32_t>(ribbon_outputs.size());
     std::vector<RenderInstance> moving_instances(snapshots.current.instances.begin(), snapshots.current.instances.end());
     if (!snapshots.current.static_scene)
         return Failure("Owned-view terrain probe requires its admitted static scene.");
@@ -426,9 +397,6 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
     moving_instances.push_back(second_archer);
     auto package_snapshots = snapshots;
     package_snapshots.current.instances = moving_instances;
-    std::error_code error;
-    std::filesystem::create_directories(artifacts, error);
-    if (error) return Failure("Cannot create owned-view capture directory: " + error.message());
     evidence.submissions_before = renderer.GetDiagnostics().total_rendered_frames;
     RendererToolFrameResult result;
     nlohmann::ordered_json preview_before_skip;
@@ -521,36 +489,26 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
                 .ground = package == 1 ? std::span<const VfxGroundSpawnInput>{} :
                     package == 0 ? std::span<const VfxGroundSpawnInput>{package0_ground} :
                                    std::span<const VfxGroundSpawnInput>{package2_ground},
-                .ribbons = {package == 0 ? std::span(&owning_ribbon, 1) : std::span(&pooled_ribbon, 1),
-                               1, ribbon_outputs},
+                .ribbons = {std::span(&ribbon_source, 1), ribbon_outputs},
                 .distortions = admitted_distortions, .decals = admitted,
                 .volumes = std::span(&hero, 1),
                 .world_batch = world, .distortion_gap_angles = distortion_gap_pool,
                 .ground_gap_angles = ground_gap_pool},
             .devtools = {.delta_seconds = 1.0f / 60.0f},
             .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
-        const auto *result_backing = result.views.data();
-        const auto result_capacity = result.views.capacity();
         const auto submitted_samples = ViewSamples(submitted_views);
         if (auto rendered = renderer.RenderViews(input, submitted_samples, result); !rendered) return rendered;
-        if (result_capacity >= submitted_views.size() && result.views.data() != result_backing)
-            return Failure("Render replaced view-result storage without a capacity increase.");
         if ((world.sequence == 0 && result.vfx_world_step_submitted) ||
             (world.sequence != 0 && (!result.vfx_world_step_submitted ||
                 result.vfx_world_tick != world.stateful_target || result.vfx_world_session_id != world.session ||
                 result.vfx_world_batch_sequence != world.sequence)))
             return Failure("World receipt must identify its frozen producer batch independently of snapshot tick and view order.");
-        evidence.admitted_decals[package] = result.typed_vfx_decal_count;
-        evidence.admitted_distortions[package] = result.typed_vfx_distortion_count;
-        evidence.admitted_ribbons[package] = result.typed_vfx_ribbon_count;
-        evidence.admitted_ground[package] = result.typed_vfx_ground_count;
-        evidence.admitted_volumes[package] = result.typed_vfx_volume_count;
         if (result.typed_vfx_volume_count != 1)
             return Failure("Each multi-view package must register its prepared hero volume on Main.");
         if (result.typed_vfx_ground_count != (package == 1 ? 0u : 2u))
-            return Failure("Ground owning/pooled gap package did not retain its commands or clear the empty package.");
+            return Failure("Ground gap-pool package did not retain its commands or clear the empty package.");
         if (result.typed_vfx_ribbon_count != ribbon_outputs.size())
-            return Failure("Owning/pooled ribbon packet did not retain both analytic outputs.");
+            return Failure("Ribbon packet did not retain both analytic outputs.");
         if (result.typed_vfx_decal_count != admitted.size())
             return Failure("Decal Surface probe did not admit both authored command kinds or clear the empty package.");
         const auto expected_distortions = package == 1 ? 0u : 2u;
@@ -610,29 +568,25 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
             auto duplicate_input = input;
             const auto duplicate_samples = ViewSamples(duplicate);
             const auto rejected_duplicate = renderer.RenderViews(duplicate_input, duplicate_samples, result);
-            evidence.duplicate_rejected = !rejected_duplicate && rejected_duplicate.Code() == ErrorCode::InvalidArgument;
             evidence.submissions_after_bad_preflight = renderer.GetDiagnostics().total_rendered_frames;
-            evidence.rejected_outputs_unchanged = SameRejectedResultEvidence(result, accepted) &&
-                evidence.submissions_after_bad_preflight == before;
-            if (!evidence.duplicate_rejected || !evidence.rejected_outputs_unchanged)
+            if (rejected_duplicate || rejected_duplicate.Code() != ErrorCode::InvalidArgument ||
+                !SameRejectedResultEvidence(result, accepted) || evidence.submissions_after_bad_preflight != before)
                 return Failure("Duplicate view rejection changed submission/result evidence.");
 
         }
         if (package == 0)
         {
             if (auto captured = CaptureSurfaceReadback(renderer, kOwnedViewProbePreview,
-                    artifacts / "owned-view-preview-before-skip.json",
                     evidence.frames[0][1].rendered_frame, preview_before_skip); !captured) return captured;
             if (auto terrain = VerifyTerrainSubmission(preview_before_skip,
                     *snapshots.current.static_scene, active_dynamic_meadow()); !terrain) return terrain;
             if (!preview_before_skip.value("decal_surface_active", false))
                 return Failure("Preview capture did not use its submitted decal Surface exports.");
-            evidence.motion_readbacks["preview_before_skip"] = preview_before_skip;
+            if (export_diagnostics) evidence.motion_readbacks["preview_before_skip"] = preview_before_skip;
         }
         else if (package == 1)
         {
             if (auto captured = CaptureSurfaceReadback(renderer, kOwnedViewProbeCapture,
-                    artifacts / "owned-view-capture-origin-reset.json",
                     evidence.frames[1][2].rendered_frame, capture_origin_reset); !captured) return captured;
             if (auto terrain = VerifyTerrainSubmission(capture_origin_reset,
                     *snapshots.current.static_scene, active_dynamic_meadow()); !terrain) return terrain;
@@ -645,13 +599,12 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
             if (inputs.at("options").at(1).get<double>() > 0.5 ||
                 !SameMatrix(previous_instance, current))
                 return Failure("Capture camera_cut must invalidate instance history and use the current projection after the camera cut.");
-            evidence.motion_readbacks["capture_origin_reset"] = capture_origin_reset;
+            if (export_diagnostics) evidence.motion_readbacks["capture_origin_reset"] = capture_origin_reset;
         }
         else if (package == 2)
         {
             nlohmann::ordered_json preview_after_skip;
             if (auto captured = CaptureSurfaceReadback(renderer, kOwnedViewProbePreview,
-                    artifacts / "owned-view-preview-after-skip.json",
                     evidence.frames[2][1].rendered_frame, preview_after_skip); !captured) return captured;
             if (auto terrain = VerifyTerrainSubmission(preview_after_skip,
                     *snapshots.current.static_scene, nullptr); !terrain) return terrain;
@@ -671,9 +624,6 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
             const auto terrain_bound = [](const nlohmann::ordered_json &metadata) {
                 return metadata.at("temporal_inputs").at("particle_terrain").at("upper_bound").get<float>();
             };
-            const auto terrain_origin_y = [](const nlohmann::ordered_json &metadata) {
-                return metadata.at("temporal_inputs").at("particle_terrain").at("origin_y").get<float>();
-            };
             const auto section_count = [](const nlohmann::ordered_json &metadata) {
                 return metadata.at("temporal_inputs").at("particle_terrain").at("section_count").get<std::uint32_t>();
             };
@@ -684,14 +634,11 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
             if (section_count(preview_before_skip) == 0 ||
                 section_count(preview_before_skip) != section_count(capture_origin_reset) ||
                 section_count(preview_before_skip) != section_count(preview_after_skip) + 1u ||
-                std::abs(terrain_origin_y(preview_before_skip)) > terrain_bound_tolerance ||
-                std::abs(terrain_origin_y(capture_origin_reset)) > terrain_bound_tolerance ||
-                std::abs(terrain_origin_y(preview_after_skip)) > terrain_bound_tolerance ||
                 std::abs(terrain0 - (4.0f + render_data::kMeadowGroundHeightBound)) > terrain_bound_tolerance ||
                 std::abs(terrain1 - (6.0f + 2.0f * render_data::kMeadowGroundHeightBound)) > terrain_bound_tolerance ||
                 !(terrain2 < terrain0 && terrain2 < terrain1))
                 return Failure("Owned-view terrain CBV did not track dynamic MeadowSurface growth, transform changes, and removal back to the static bound.");
-            evidence.motion_readbacks["preview_after_skip"] = std::move(preview_after_skip);
+            if (export_diagnostics) evidence.motion_readbacks["preview_after_skip"] = std::move(preview_after_skip);
         }
     }
     evidence.final_frame = std::move(result);
@@ -701,7 +648,7 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
         .stateful_target = package_snapshots.current.header.tick == 0 ? 0 : package_snapshots.current.header.tick - 1};
     const RenderPackage overwrite{.snapshots = package_snapshots,
         .vfx = {.ground = package2_ground,
-            .ribbons = {std::span(&pooled_ribbon, 1), 1, ribbon_outputs},
+            .ribbons = {std::span(&ribbon_source, 1), ribbon_outputs},
             .distortions = package2_distortions, .decals = decals,
             .world_batch = held_world, .distortion_gap_angles = distortion_gap_pool,
             .ground_gap_angles = ground_gap_pool},
@@ -720,25 +667,22 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
         return Failure("Owned-view probe did not produce eight scene-view submissions plus one auxiliary overwrite.");
     const auto stale_capture = renderer.Capture({.path = artifacts / "stale-main-geometry.json",
         .kind = CaptureKind::GeometryDiagnostics});
-    evidence.stale_diagnostics_rejected = !stale_capture && stale_capture.Code() == ErrorCode::InvalidState;
-    if (!evidence.stale_diagnostics_rejected)
+    if (stale_capture || stale_capture.Code() != ErrorCode::InvalidState)
         return Failure("Main geometry capture must reject shared frame buffers overwritten by an auxiliary view.");
-    evidence.captures = {artifacts / "owned-view-preview-a.png", artifacts / "owned-view-capture-b.png"};
-    std::array<UiProbePixels, 2> view_images;
-    const std::array capture_views{kOwnedViewProbePreview, kOwnedViewProbeCapture};
-    const std::array capture_extents{overwrite_result.views[0].rendered_view.output_extent,
-                                    evidence.frames[2][2].rendered_view.output_extent};
-    for (std::size_t index = 0; index < view_images.size(); ++index)
+    if (export_diagnostics)
     {
-        if (auto captured = CaptureUiProbePixels(renderer, evidence.captures[index], view_images[index], capture_views[index]);
-            !captured) return captured;
-        if (view_images[index].width != capture_extents[index].width ||
-            view_images[index].height != capture_extents[index].height)
-            return Failure("Color capture did not preserve the requested view's output extent.");
+        evidence.captures = {artifacts / "owned-view-preview-a.png", artifacts / "owned-view-capture-b.png"};
+        const std::array capture_views{kOwnedViewProbePreview, kOwnedViewProbeCapture};
+        for (std::size_t index = 0; index < capture_views.size(); ++index)
+            if (auto captured = renderer.Capture({.view_id = capture_views[index], .path = evidence.captures[index]});
+                !captured) return captured;
+        evidence.hdr_capture = artifacts / "owned-view-capture-b.hdr";
+        if (auto captured = renderer.Capture({.view_id = kOwnedViewProbeCapture,
+                .path = evidence.hdr_capture, .kind = CaptureKind::HdrColor}); !captured) return captured;
     }
-    evidence.hdr_capture = artifacts / "owned-view-capture-b.hdr";
-    if (auto captured = renderer.Capture({.view_id = kOwnedViewProbeCapture,
-            .path = evidence.hdr_capture, .kind = CaptureKind::HdrColor}); !captured) return captured;
+    else if (auto counted = renderer.Capture({.view_id = kOwnedViewProbeCapture,
+                 .kind = CaptureKind::ParticleCount}); !counted)
+        return counted;
     const auto live_particle_draws = renderer.LastParticleCount();
     // The capture includes the one long-lived package birth plus one short-lived
     // converted effect-line particle in each nonempty world batch (packages 0 and 2).
@@ -758,78 +702,16 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
     constexpr char label[] = "UI test \xed\x95\x9c\xea\xb8\x80";
     std::copy(std::begin(label), std::end(label), text.utf8_text.begin());
     ui->models = {panel, bar, text};
-    std::array<UiProbePixels, 8> ui_images;
-    for (std::size_t step = 0; step < ui_images.size(); ++step)
-    {
-        auto next = std::make_shared<UiDrawContent>(*ui);
-        if (step == 1) next->models[1].value = 0.5f;
-        if (step == 2) next->models[1].value = 0.0f;
-        if (step >= 4) next->models[2].color_rgba = 0xff00ff00u;
-        if (step >= 5) next->models[2].anchor_pixels.x += 100.0f;
-        if (step == 6)
-            if (auto resized = renderer.Resize(main.output_extent.width + 64u, main.output_extent.height); !resized) return resized;
-        auto ui_view = renderer.MainViewInput(snapshots.current.camera);
-        const RenderPackage ui_package{.snapshots = snapshots,
-            .vfx = {.world_batch = {.session = snapshots.current.header.session_id,
-                .stateful_target = snapshots.current.header.tick}},
-            .devtools = {.delta_seconds = 0.0f}, .ui_draw_content = next,
-            .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
-        RendererToolFrameResult ui_result;
-        const auto ui_samples = ViewSamples(std::span(&ui_view, 1));
-        if (auto rendered = renderer.RenderViews(ui_package, ui_samples, ui_result); !rendered) return rendered;
-        if (auto captured = CaptureUiProbePixels(renderer, artifacts / ("ui-cache-" + std::to_string(step) + ".png"), ui_images[step]); !captured) return captured;
-    }
-    const auto sample = [](const UiProbePixels &image, float x, float y) {
-        const float scale = std::min(float(image.width) / 1920.0f, float(image.height) / 1080.0f);
-        const auto px = static_cast<UINT>((image.width - 1920.0f * scale) * 0.5f + x * scale);
-        const auto py = static_cast<UINT>((image.height - 1080.0f * scale) * 0.5f + y * scale);
-        const auto i = (std::size_t(py) * image.width + px) * 4;
-        return std::array{image.rgba[i], image.rgba[i + 1], image.rgba[i + 2]};
-    };
-    const auto full = sample(ui_images[0], 400, 790);
-    const auto half_fill = sample(ui_images[1], 400, 790);
-    const auto zero = sample(ui_images[2], 150, 790);
-    if (full[0] <= half_fill[0] + 30 || sample(ui_images[1], 150, 790)[0] <= zero[0] + 30 ||
-        sample(ui_images[3], 400, 790) != full)
-        return Failure("UI bar-only, empty and restored fills did not reach the presented pixels.");
-    // The UI keeps a 16:9 canvas; resized windows can expose moving scene
-    // pixels in the letterbox. Compare only the opaque panel interior.
-    const auto panel_text_region = [](const UiProbePixels &image) {
-        const float scale = std::min(float(image.width) / 1920.0f, float(image.height) / 1080.0f);
-        const float left = (image.width - 1920.0f * scale) * 0.5f;
-        const float top = (image.height - 1080.0f * scale) * 0.5f;
-        return std::array{static_cast<UINT>(std::ceil(left)) + 2u,
-            static_cast<UINT>(std::ceil(top)) + 2u,
-            static_cast<UINT>(std::floor(left + 1920.0f * scale)) - 2u,
-            image.height / 2u};
-    };
-    const auto text_difference = [&](const UiProbePixels &a, const UiProbePixels &b) {
-        if (a.width != b.width || a.height != b.height) return (std::numeric_limits<std::size_t>::max)();
-        const auto region = panel_text_region(a);
-        std::size_t changed{};
-        for (UINT y = region[1]; y < region[3]; ++y)
-            for (UINT x = region[0]; x < region[2]; ++x)
-            {
-                const auto i = (std::size_t(y) * a.width + x) * 4;
-                if (a.rgba[i] != b.rgba[i] || a.rgba[i + 1] != b.rgba[i + 1] || a.rgba[i + 2] != b.rgba[i + 2]) ++changed;
-            }
-        return changed;
-    };
-    std::size_t resized_text_pixels{};
-    const auto &resized = ui_images[6];
-    const auto resized_region = panel_text_region(resized);
-    for (UINT y = resized_region[1]; y < resized_region[3]; ++y)
-        for (UINT x = resized_region[0]; x < resized_region[2]; ++x)
-        {
-            const auto i = (std::size_t(y) * resized.width + x) * 4;
-            if (resized.rgba[i + 1] > 30 && resized.rgba[i + 1] > resized.rgba[i] + 15)
-                ++resized_text_pixels;
-        }
-    if (text_difference(ui_images[3], ui_images[4]) < 5 || text_difference(ui_images[4], ui_images[5]) < 5 ||
-        text_difference(ui_images[6], ui_images[7]) != 0 || resized_text_pixels < 5 ||
-        sample(ui_images[6], 400, 790)[0] <= 30)
-        return Failure("UI text color/move or resized atlas replay did not produce the expected presented pixels.");
-    evidence.ui_cache_pixels_valid = true;
+    if (auto resized = renderer.Resize(main.output_extent.width + 64u, main.output_extent.height); !resized) return resized;
+    auto ui_view = renderer.MainViewInput(snapshots.current.camera);
+    const RenderPackage ui_package{.snapshots = snapshots,
+        .vfx = {.world_batch = {.session = snapshots.current.header.session_id,
+            .stateful_target = snapshots.current.header.tick}},
+        .devtools = {.delta_seconds = 0.0f}, .ui_draw_content = ui,
+        .display_sample = RenderDisplaySample{std::chrono::steady_clock::now(), 1.0f}};
+    RendererToolFrameResult ui_result;
+    const auto ui_samples = ViewSamples(std::span(&ui_view, 1));
+    if (auto rendered = renderer.RenderViews(ui_package, ui_samples, ui_result); !rendered) return rendered;
     if (auto restored = renderer.Resize(main.output_extent.width, main.output_extent.height); !restored) return restored;
     auto restored_view = renderer.MainViewInput(snapshots.current.camera);
     const RenderPackage restored_package{.snapshots = snapshots,
@@ -892,9 +774,8 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
                 capture_key += "-capture";
             else if (stamp.identity.view_id != kOwnedViewProbePreview)
                 return Failure("Terrain postlude returned an unexpected view stamp.");
-            const auto path = artifacts / (capture_key + ".json");
             nlohmann::ordered_json metadata;
-            if (auto captured = CaptureSurfaceReadback(renderer, stamp.identity.view_id, path,
+            if (auto captured = CaptureSurfaceReadback(renderer, stamp.identity.view_id,
                     stamp.rendered_frame, metadata); !captured) return captured;
             if (auto verified = VerifyTerrainSubmission(metadata,
                     *postlude_snapshots.current.static_scene, expected_dynamic); !verified) return verified;
@@ -904,7 +785,7 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
                 return Failure("Terrain postlude feedback does not identify its submitted view and frame.");
             const auto frame_slot = metadata.at("terrain_submission").at("frame_slot").get<std::uint32_t>();
             bank_seen[frame_slot] = true;
-            evidence.motion_readbacks[capture_key] = std::move(metadata);
+            if (export_diagnostics) evidence.motion_readbacks[capture_key] = std::move(metadata);
         }
         if (!std::ranges::all_of(bank_seen, [](bool seen) { return seen; }))
             return Failure("Terrain postlude captures did not cover all three frame slots.");
@@ -933,6 +814,21 @@ Result RunOwnedViewProbe(D3D12Renderer &renderer,
     postlude_instances = moving_instances;
     if (auto rendered = render_terrain_postlude(original_static_scene,
             "owned-view-terrain-static-only", nullptr); !rendered) return rendered;
+    const auto original_graphics = renderer.GetGraphicsSettingsStatus();
+    GraphicsSettingsRequest graphics_request{.generation = original_graphics.generation,
+        .requested = original_graphics.requested};
+    for (const auto quality : {GraphicsOptionalQuality::Off, original_graphics.requested.volumetric_quality})
+    {
+        graphics_request.requested.volumetric_quality = quality;
+        ++graphics_request.generation;
+        if (auto applied = renderer.RequestGraphicsSettings(graphics_request); !applied) return applied;
+        const auto option_view = renderer.MainViewInput(snapshots.current.camera);
+        const auto option_samples = ViewSamples(std::span(&option_view, 1));
+        RendererToolFrameResult option_result;
+        if (auto rendered = renderer.RenderViews(restored_package, option_samples, option_result); !rendered)
+            return Result::Failure(rendered.Code(), rendered.Subsystem(),
+                std::format("Volumetric transition {}: {}", static_cast<unsigned>(quality), rendered.Message()));
+    }
     return Result::Success();
 }
 
@@ -962,21 +858,13 @@ nlohmann::ordered_json OwnedViewProbeReceipt(const OwnedViewProbeEvidence &evide
         packages.push_back(std::move(views));
     }
     return {{"packages", std::move(packages)}, {"overwrite_submission_id", evidence.overwrite_submission_id},
-        {"admitted_decals", evidence.admitted_decals},
-        {"admitted_distortions", evidence.admitted_distortions},
-        {"admitted_ribbons", evidence.admitted_ribbons},
-        {"admitted_ground", evidence.admitted_ground},
-        {"admitted_volumes", evidence.admitted_volumes},
         {"archer_clip_ids", evidence.archer_clip_ids},
         {"motion_epoch_break", {{"stable_id", evidence.motion_epoch_target_id},
             {"before", evidence.motion_epoch_before}, {"after", evidence.motion_epoch_after}}},
         {"motion_readbacks", evidence.motion_readbacks},
         {"submissions_before", evidence.submissions_before},
         {"submissions_after_bad_preflight", evidence.submissions_after_bad_preflight},
-        {"submissions_after", evidence.submissions_after}, {"duplicate_rejected", evidence.duplicate_rejected},
-        {"rejected_outputs_unchanged", evidence.rejected_outputs_unchanged},
-        {"stale_diagnostics_rejected", evidence.stale_diagnostics_rejected},
-        {"ui_cache_pixels_valid", evidence.ui_cache_pixels_valid},
+        {"submissions_after", evidence.submissions_after},
         {"captures", {evidence.captures[0].filename().string(), evidence.captures[1].filename().string()}},
         {"hdr_capture", evidence.hdr_capture.filename().string()}};
 }

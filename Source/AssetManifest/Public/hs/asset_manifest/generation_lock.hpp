@@ -5,11 +5,10 @@
 
 namespace hs
 {
-// Cooperating readers/GC lock an existing manifest without modifying it.
-// Mutation locks use one stable file at the build root, never an atomic pointer.
-// The OS releases locks on process death; no PID/TTL cleanup or write access to
-// an installed Generation is needed. Direct edits and power-loss durability
-// remain outside this cooperative contract.
+// Readers/GC coordinate through ProductSet lease files; root mutation locks use
+// one stable file at the build root, never an atomic pointer. The OS releases
+// locks on process death. Direct edits and power-loss durability remain outside
+// this cooperative contract.
 class GenerationFileLock
 {
 public:

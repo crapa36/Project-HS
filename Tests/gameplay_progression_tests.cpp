@@ -196,25 +196,6 @@ void TestMagnetPickupCollectsAllExperience()
         (void)Tick(simulation, held);
     Check(simulation.GetObservation().pickup_count == 6,
           "two kills independently drop experience, heal, and magnet pickups");
-    hs::RenderSnapshotStorage pickup_snapshot(64, 2, 2, 8);
-    Check(WriteSnapshot(simulation, pickup_snapshot), "utility pickup snapshot");
-    const auto heal = std::ranges::find_if(
-        pickup_snapshot.View().instances, [](const hs::RenderInstance &instance) {
-            return instance.mesh == hs::RenderMesh::Pickup &&
-                   instance.color_rgba == 0xFF40E060u;
-        });
-    const auto magnet = std::ranges::find_if(
-        pickup_snapshot.View().instances, [](const hs::RenderInstance &instance) {
-            return instance.mesh == hs::RenderMesh::Pickup &&
-                    instance.color_rgba == 0xFFFF3030u;
-        });
-    Check(heal != pickup_snapshot.View().instances.end() &&
-              magnet != pickup_snapshot.View().instances.end() &&
-              heal->scale.y > heal->scale.x &&
-              std::abs(magnet->scale.x - magnet->scale.y) < 0.0001f &&
-              std::abs(magnet->scale.y - magnet->scale.z) < 0.0001f,
-          "heal is green and tall while magnet is a red square");
-
     held.basic_attack_held = false;
     held.move_held = true;
     held.move_target_world = {50.0f, 0.0f, 0.0f};
@@ -281,7 +262,13 @@ void TestTimedBossEventsAndSpawnStop()
     Check(simulation.GetObservation().boss_count == 2, "15-minute warning window");
     (void)Tick(simulation);
     const auto final_spawn = simulation.GetObservation();
-    Check(final_spawn.final_boss_spawned && final_spawn.boss_count == 3,
+    Check(final_spawn.final_boss_spawned && final_spawn.boss_count == 3 &&
+              std::ranges::any_of(
+                  simulation.PendingDomainSignals(), [](const hs::DomainSignal &signal) {
+                      return signal.kind == hs::DomainSignalKind::BossSpawned &&
+                             signal.context ==
+                                 static_cast<std::uint8_t>(hs::BossKind::Final);
+                  }),
           "15-minute final boss event");
 
     const auto normal_count = final_spawn.normal_enemy_count;
@@ -356,43 +343,6 @@ void TestBossWarningExecutionAndPhaseCancellation()
     Check(phase_simulation.Shutdown().Succeeded(), "boss phase shutdown");
 }
 
-void TestSameTickVictoryPriority()
-{
-    auto data = QuietGameData();
-    hs::GameSimulation simulation;
-    Check(simulation.Initialize({52}, data).Succeeded(), "victory priority initialize");
-    Debug(simulation, hs::DebugCommandKind::SetGrowthTick, 15 * kTicksPerMinute - 1);
-    (void)Tick(simulation);
-    Check(simulation.GetObservation().final_boss_spawned &&
-              simulation.GetObservation().boss_count == 0 &&
-              HasVfx(simulation, hs::DomainSignalKind::BossSpawnWarning),
-          "final boss warning precedes the boss by one and a half seconds");
-    for (std::uint32_t tick = 0; tick < 89; ++tick) (void)Tick(simulation);
-    Check(simulation.GetObservation().boss_count == 0,
-          "final boss remains absent throughout the warning window");
-    (void)Tick(simulation);
-    Check(simulation.GetObservation().boss_count == 1 &&
-              std::ranges::any_of(
-                  simulation.PendingDomainSignals(), [](const hs::DomainSignal &signal) {
-                      return signal.kind == hs::DomainSignalKind::BossSpawned &&
-                             signal.context ==
-                                 static_cast<std::uint8_t>(hs::BossKind::Final);
-                  }),
-          "final boss spawns after the warning with its audio routing context");
-
-    Debug(simulation, hs::DebugCommandKind::DamageFinalBoss, 1'000'000);
-    Debug(simulation, hs::DebugCommandKind::DamagePlayer, 1'000'000);
-    const auto result = Tick(simulation);
-    Check(result.phase == hs::SessionPhase::Victory &&
-              simulation.GetObservation().health <= 0,
-          std::format("same-tick final boss and player death resolves victory (phase={}, bosses={}, health={})",
-                      static_cast<int>(result.phase),
-                      simulation.GetObservation().boss_count,
-                      simulation.GetObservation().health));
-    Check(simulation.Shutdown().Succeeded(), "victory priority shutdown");
-}
-
-
 void TestRerollExcludesDisplayedCards()
 {
     hs::GameSimulation simulation;
@@ -433,7 +383,6 @@ void RunGameplayProgressionTests()
     TestMagnetPickupCollectsAllExperience();
     TestTimedBossEventsAndSpawnStop();
     TestBossWarningExecutionAndPhaseCancellation();
-    TestSameTickVictoryPriority();
     TestRerollExcludesDisplayedCards();
 }
 

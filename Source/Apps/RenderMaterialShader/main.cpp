@@ -6,7 +6,6 @@
 #include "../AssetPipeline/dxc_process.hpp"
 #include "../AssetPipeline/render_shader_binding_inputs.hpp"
 #include "../AssetPipeline/shader_source_snapshot.hpp"
-#include "coated_dfg_cooker.hpp"
 #include "material_graph_parser.hpp"
 #include "../../../Content/Shaders/decal_surface_abi.hlsli"
 #include <hs/core/cooked_format.hpp>
@@ -78,7 +77,7 @@ void AddSharedRendererShaderInputs(ap::ActionSpec &spec,const fs::path &source_r
         "Content/Shaders/scene_hlod_sampling.hlsli", "Content/Shaders/texture_streaming.hlsli", "Content/Shaders/entity_surface.hlsli",
         "Content/Shaders/shadow_filter.hlsli", "Content/Shaders/environment_wind.hlsli",
         "Content/Shaders/meadow_surface.hlsli", "Content/Shaders/grass_deformation.hlsli",
-        "Content/Shaders/particle_collision.hlsli", "Content/Shaders/terrain_page_abi.hlsli",
+        "Content/Shaders/frame_constants.hlsli", "Content/Shaders/particle_bindings.hlsli", "Content/Shaders/terrain_page_abi.hlsli",
         "Content/Shaders/terrain_histogram_abi.hlsli"})
         if(std::ranges::none_of(spec.inputs,[&](const auto &input) { return input.logical_id==relative; }))
             spec.inputs.push_back(ap::HashInput(relative,source_root/relative));
@@ -143,17 +142,9 @@ void RunDxc(const fs::path &dxc, const fs::path &source_root,
     fs::remove(diagnostics);
 }
 
-bool IsCharacterTranslucentProgram(const ProgramOutput &program)
-{
-    constexpr std::array<std::wstring_view, 6> entries{
-        L"LayeredTranslucencyPeelFrontPS", L"LayeredTranslucencyGatherExitDepthPS", L"LayeredTranslucencyAccumulateUnpeeledPS",
-        L"LayeredTranslucencyCompositeFrontPS", L"LayeredTranslucencyCompositeLayerPS", L"CharacterTranslucentPS"};
-    return std::ranges::find(entries, program.entry) != entries.end();
-}
+enum class ShaderFamily { SurfacePasses, TranslucencyDiagnostics, ScreenReflections };
 
-enum class ShaderFamily { Preintegrated, TranslucencyDiagnostics, ScreenReflections };
-
-void ProducePreintegration(const fs::path &source_root, const fs::path &build_root,
+void ProduceMaterialPasses(const fs::path &source_root, const fs::path &build_root,
                            const fs::path &dxc, ShaderFamily family)
 {
     const bool translucency_diagnostics = family == ShaderFamily::TranslucencyDiagnostics;
@@ -164,10 +155,10 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
     ap::MakeDirectory(build_root);
     ap::RequireRegularFile(dxc);
     ap::ActionSpec spec;
-    spec.action_id = "render.shader.bsdf-preintegrate";
-    spec.recipe_id = "project-hs.render.bsdf-preintegrate";
+    spec.action_id = "render.shader.surface-passes";
+    spec.recipe_id = "project-hs.render.surface-passes";
     spec.recipe_version = 14;
-    spec.namespace_path = "render/shader/bsdf-preintegrate";
+    spec.namespace_path = "render/shader/surface-passes";
     if (ssr)
     {
         spec.action_id = "render.shader.screen-reflections";
@@ -179,19 +170,16 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
     {
         spec.action_id = "render.shader.translucency-diagnostics";
         spec.recipe_id = "project-hs.render.translucency-diagnostics-ps";
-        spec.recipe_version = 1;
+        spec.recipe_version = 2;
         spec.namespace_path = "render/shader/translucency-diagnostics";
     }
     PreparedMaterialInputs materials(source_root);
-    const auto generated = DeferredContextInclude(spec, source_root, materials);
+    const auto generated = translucency_diagnostics ? std::string{} : DeferredContextInclude(spec, source_root, materials);
     const auto sidecar_layout = rd::ComputeMaterialSidecarLayout(AddSurfaceReflectionInputs(spec, source_root, materials));
     const auto character_context = ssr ? std::string{} : CharacterContextInclude(spec, source_root, materials);
-    spec.inputs.push_back(ap::HashInput("Schemas/material_graph.schema.json",
-                                      source_root / "Schemas/material_graph.schema.json"));
     if (!ssr)
     {
-    for (const auto *relative : {"Content/Shaders/bsdf_preintegrate.hlsl",
-                                 "Content/Shaders/bsdf_metallic_roughness.hlsli",
+    for (const auto *relative : {"Content/Shaders/bsdf_metallic_roughness.hlsli",
                                  "Content/Shaders/bsdf_layers.hlsli",
                                  "Content/Shaders/material_surface.hlsli",
                                  "Content/Shaders/material_terrain.hlsli",
@@ -209,9 +197,11 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                                  "Content/Shaders/vfx_screen_overlay.hlsl",
                                  "Content/Shaders/adaptive_shading.hlsl",
                                  "Content/Shaders/project_hs.hlsl",
+                                 "Content/Shaders/layered_translucency.hlsl",
                                 "Content/Shaders/environment.hlsli",
                                 "Content/Shaders/probe_ibl.hlsli",
                                 "Content/Shaders/light_list.hlsli",
+                                "Content/Shaders/light_list_abi.hlsli",
                                  "Content/Shaders/shadow_data.hlsli",
                                  "Content/Shaders/local_shadow.hlsli", "Content/Shaders/local_shadow_abi.hlsli",
 
@@ -250,8 +240,6 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                                           dxc.parent_path() / library));
     std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
     std::vector outputs{
-        ProgramOutput{"render/shader/bsdf_preintegrate_cs.dxil", "bsdf_preintegrate_cs.dxil",
-                      "Content/Shaders/bsdf_preintegrate.hlsl", L"main", L"cs_6_0"},
         ProgramOutput{"render/shader/deferred_ps.dxil", "deferred_ps.dxil",
                       "Content/Shaders/project_hs.hlsl", L"DeferredPS", L"ps_6_0"},
         ProgramOutput{"render/shader/sss_horizontal_cs.dxil", "sss_horizontal_cs.dxil",
@@ -279,20 +267,19 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
         ProgramOutput{"render/shader/adaptive_shading_rate_cs.dxil", "adaptive_shading_rate_cs.dxil",
                       "Content/Shaders/adaptive_shading.hlsl", L"AdaptiveShadingRateCS", L"cs_6_0"},
         ProgramOutput{"render/shader/layered_translucency_peel_front_ps.dxil", "layered_translucency_peel_front_ps.dxil",
-                      "Content/Shaders/project_hs.hlsl", L"LayeredTranslucencyPeelFrontPS", L"ps_6_0"},
+                      "Content/Shaders/layered_translucency.hlsl", L"LayeredTranslucencyPeelFrontPS", L"ps_6_0"},
         ProgramOutput{"render/shader/layered_translucency_gather_exit_depth_ps.dxil", "layered_translucency_gather_exit_depth_ps.dxil",
-                      "Content/Shaders/project_hs.hlsl", L"LayeredTranslucencyGatherExitDepthPS", L"ps_6_0"},
+                      "Content/Shaders/layered_translucency.hlsl", L"LayeredTranslucencyGatherExitDepthPS", L"ps_6_0"},
         ProgramOutput{"render/shader/layered_translucency_accumulate_unpeeled_ps.dxil", "layered_translucency_accumulate_unpeeled_ps.dxil",
-                      "Content/Shaders/project_hs.hlsl", L"LayeredTranslucencyAccumulateUnpeeledPS", L"ps_6_0"},
+                      "Content/Shaders/layered_translucency.hlsl", L"LayeredTranslucencyAccumulateUnpeeledPS", L"ps_6_0"},
         ProgramOutput{"render/shader/layered_translucency_composite_front_ps.dxil", "layered_translucency_composite_front_ps.dxil",
-                      "Content/Shaders/project_hs.hlsl", L"LayeredTranslucencyCompositeFrontPS", L"ps_6_0"},
+                      "Content/Shaders/layered_translucency.hlsl", L"LayeredTranslucencyCompositeFrontPS", L"ps_6_0"},
         ProgramOutput{"render/shader/layered_translucency_composite_layer_ps.dxil", "layered_translucency_composite_layer_ps.dxil",
-                      "Content/Shaders/project_hs.hlsl", L"LayeredTranslucencyCompositeLayerPS", L"ps_6_0"}
+                      "Content/Shaders/layered_translucency.hlsl", L"LayeredTranslucencyCompositeLayerPS", L"ps_6_0"}
         };
     if (ssr)
     {
         std::erase_if(outputs, [](const auto &program) { return !program.id.starts_with("render/shader/ssr_"); });
-        Require(outputs.size() == 5, "screen reflections recipe must contain exactly five SSR entries");
     }
     else
         std::erase_if(outputs, [](const auto &program) { return program.id.starts_with("render/shader/ssr_"); });
@@ -302,11 +289,10 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
             return !program.id.starts_with("render/shader/layered_translucency_") ||
                 !program.profile.starts_with(L"ps_");
         });
-        Require(outputs.size() == 5, "hero work recipe must contain exactly the five existing Hero PS entries");
         for (auto &program : outputs)
         {
-            program.id.insert(program.id.size() - 5, "_translucency_diagnostics");
             program.filename.insert(program.filename.size() - 5, "_translucency_diagnostics");
+            program.id = "diagnostics/shader/" + program.filename;
         }
     }
     if (!translucency_diagnostics && !ssr)
@@ -316,7 +302,7 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
             ProgramOutput{"render/shader/character_visibility_ps.dxil", "character_visibility_ps.dxil", "Content/Shaders/visibility_buffer.hlsl", L"CharacterVisibilityPS", L"ps_6_0"},
             ProgramOutput{"render/shader/character_resolve_cs.dxil", "character_resolve_cs.dxil", "Content/Shaders/visibility_buffer.hlsl", L"CharacterSurfaceResolveCS", L"cs_6_0"},
             ProgramOutput{"render/shader/character_shadow_ps.dxil", "character_shadow_ps.dxil", "Content/Shaders/project_hs.hlsl", L"CharacterShadowPS", L"ps_6_0"},
-            ProgramOutput{"render/shader/character_translucent_ps.dxil", "character_translucent_ps.dxil", "Content/Shaders/project_hs.hlsl", L"CharacterTranslucentPS", L"ps_6_0"}})
+            ProgramOutput{"render/shader/character_translucent_ps.dxil", "character_translucent_ps.dxil", "Content/Shaders/layered_translucency.hlsl", L"CharacterTranslucentPS", L"ps_6_0"}})
             outputs.push_back(program);
     }
     const auto result_path = build_root / "Actions" / spec.namespace_path / "result.json";
@@ -328,7 +314,7 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
             ap::UpstreamProduct ignored;
             if (result.ActionKeyValue() == ap::ActionKey(spec) &&
                 result.ActionId() == spec.action_id &&
-                result.ProductCount() == outputs.size() + 2u * static_cast<std::size_t>(!translucency_diagnostics && !ssr))
+                result.ProductCount() == outputs.size() + static_cast<std::size_t>(!translucency_diagnostics && !ssr))
             {
                 bool valid = true;
                 for (const auto &output : outputs)
@@ -337,15 +323,12 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
                 }
                 if (!translucency_diagnostics && !ssr)
                 {
-                    valid &= result.ReadProductBytes("render/lighting/coated_ggx_dfg.dds", ignored).size() ==
-                        148u + 256u * 256u * 8u;
                     const auto abi = result.ReadProductBytes(rd::SurfaceLayout::abi_product, ignored);
                     valid &= abi.size() == 4 && static_cast<unsigned char>(abi[0]) == rd::SurfaceLayout::version &&
                         abi[1] == 0 && abi[2] == 0 && abi[3] == 0;
                 }
                 if (valid)
                 {
-                    ap::TouchActionResult(result_path);
                     return;
                 }
             }
@@ -357,30 +340,28 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
     {
         const auto source_snapshot = hs::shader_content::CreateShaderSourceSnapshot(spec.inputs, stage);
         const auto include_path = stage / "deferred_materials.generated.hlsli";
-        ap::WriteBytes(include_path, std::as_bytes(std::span(generated.data(), generated.size())));
+        if (!generated.empty())
+            ap::WriteBytes(include_path, std::as_bytes(std::span(generated.data(), generated.size())));
         const auto character_include_path = stage / "character_materials.generated.hlsli";
-        ap::WriteBytes(character_include_path, std::as_bytes(std::span(character_context.data(), character_context.size())));
+        if (!character_context.empty())
+            ap::WriteBytes(character_include_path, std::as_bytes(std::span(character_context.data(), character_context.size())));
         std::vector<ap::Product> products;
         for (const auto &program : outputs)
         {
             const auto output = stage / program.filename;
-            const auto define = program.id.starts_with("render/shader/character_") || IsCharacterTranslucentProgram(program)
+            const bool translucent = program.source_relative == "Content/Shaders/layered_translucency.hlsl";
+            const auto define = program.id.starts_with("render/shader/character_") || translucent
                 ? std::wstring_view{L"-DHS_GENERATED_CHARACTER_MATERIAL=1"}
-                : program.entry != L"main" ? std::wstring_view{L"-DHS_GENERATED_DEFERRED_MATERIALS=1"} : std::wstring_view{};
+                : std::wstring_view{L"-DHS_GENERATED_DEFERRED_MATERIALS=1"};
             RunDxc(dxc, source_snapshot, stage, output, program.source_relative,
                    program.entry, program.profile, define,
                    {.sidecar_planes = sidecar_layout.plane_count, .translucency_diagnostics = translucency_diagnostics,
-                    .character_translucent_domain = IsCharacterTranslucentProgram(program)});
+                    .character_translucent_domain = translucent});
             Require(ValidDxil(output), "DXC did not produce a DXIL container");
             products.push_back(ap::HashProduct(program.id, program.filename, output));
         }
         if (!translucency_diagnostics && !ssr)
         {
-            const auto dfg = hs::material_content::CookCoatedDfgDds();
-            const auto output = stage / "coated_ggx_dfg.dds";
-            ap::WriteBytes(output, std::span<const std::byte>(dfg.data(), dfg.size()));
-            products.push_back(ap::HashProduct("render/lighting/coated_ggx_dfg.dds",
-                output.filename().string(), output));
             const std::array<std::byte, 4> abi{
                 std::byte(rd::SurfaceLayout::version & 0xffu), std::byte((rd::SurfaceLayout::version >> 8u) & 0xffu),
                 std::byte((rd::SurfaceLayout::version >> 16u) & 0xffu), std::byte((rd::SurfaceLayout::version >> 24u) & 0xffu)};
@@ -389,8 +370,8 @@ void ProducePreintegration(const fs::path &source_root, const fs::path &build_ro
             products.push_back(ap::HashProduct(std::string(rd::SurfaceLayout::abi_product),
                 abi_path.filename().string(), abi_path));
         }
-        fs::remove(include_path);
-        fs::remove(character_include_path);
+        if (!generated.empty()) fs::remove(include_path);
+        if (!character_context.empty()) fs::remove(character_include_path);
         ap::RemoveStage(source_snapshot);
         ap::Publish(build_root, spec, stage, std::move(products));
     }
@@ -416,18 +397,14 @@ void ProduceParameters(std::string_view name, const fs::path &source_root,
     ap::MakeDirectory(build_root);
 
     const auto material_relative = "ContentSource/Materials/" + std::string(name) + ".json";
-    const auto schema_relative = decal ? "Schemas/decal_material_graph.schema.json" : "Schemas/material_graph.schema.json";
     const auto material_path = source_root / material_relative;
-    const auto schema_path = source_root / schema_relative;
     ap::RequireRegularFile(material_path);
-    ap::RequireRegularFile(schema_path);
     const auto material_text = ap::ReadBytes(material_path);
     const auto prepared = decal ? hs::material_content::ParsePreparedDecalMaterial(name, material_text) :
         hs::material_content::ParseMaterialDefinition(name, material_text).prepared;
     const auto &graph = prepared.Graph();
     const std::span<const rd::MaterialParameterDefinition> parameters =
         graph.parameters;
-    rd::ValidateMaterialParameters(parameters);
 
     const std::string product_id = "render/material/" + std::string(name) +
                                    "/parameters.rpkg";
@@ -438,8 +415,6 @@ void ProduceParameters(std::string_view name, const fs::path &source_root,
     spec.namespace_path = "render/material/" + std::string(name) + "/parameters";
     spec.inputs.push_back({material_relative, material_path,
         ap::Sha256Bytes(std::as_bytes(std::span(material_text.data(), material_text.size())))});
-    spec.inputs.push_back(ap::HashInput(schema_relative, schema_path));
-    if (decal) spec.inputs.push_back(ap::HashInput("Schemas/material_graph.schema.json", source_root / "Schemas/material_graph.schema.json"));
     std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
 
     const auto result_path = build_root / "Actions" / spec.namespace_path / "result.json";
@@ -463,7 +438,6 @@ void ProduceParameters(std::string_view name, const fs::path &source_root,
                         rd::MaterialParameterLayoutHash(parameters) &&
                     std::ranges::equal(decoded, parameters))
                 {
-                    ap::TouchActionResult(result_path);
                     return;
                 }
             }
@@ -541,7 +515,7 @@ void ProduceDecalSurface(const fs::path &source_root, const fs::path &build_root
     for (std::size_t ordinal = 0; ordinal < reflections.size(); ++ordinal)
         generated += "    case " + std::to_string(ordinal) + "u: return HsDecalEvaluate_" + std::to_string(ordinal) + "(ctx);\n";
     generated += "    default: return HsMaterialMakeSurfaceClosure(ctx.sampled_base_color, ctx.normal, ctx.sampled_roughness, 0.0, 1.0, 0.0);\n    }\n}\n";
-    for (const auto *relative : {"Schemas/decal_material_graph.schema.json", "Schemas/material_graph.schema.json", "Content/Shaders/decal_surface.hlsl",
+    for (const auto *relative : {"Content/Shaders/decal_surface.hlsl",
         "Content/Shaders/material_surface.hlsli", "Content/Shaders/material_parameters.hlsli", "Content/Shaders/surface_metadata.hlsli",
         "Content/Shaders/render_binding_contract.hlsli", "Content/Shaders/decal_surface_abi.hlsli"})
         spec.inputs.push_back(ap::HashInput(relative, source_root / relative));
@@ -570,7 +544,7 @@ void ProduceDecalSurface(const fs::path &source_root, const fs::path &build_root
                     valid = valid && material.receivers == expected.receivers &&
                         material.parameter_layout_hash == expected.parameter_layout_hash;
                 }
-                if (valid) { ap::TouchActionResult(result_path); return; }
+                if (valid) { return; }
             }
         }
         catch (const std::exception &) { /* Rebuild invalid current output. */ }
@@ -622,9 +596,8 @@ void ProduceHero(std::string_view name, const fs::path &source_root,
     ap::ActionSpec spec;
     spec.action_id = "render.shader." + std::string(name);
     spec.recipe_id = "project-hs.render.character-material-interface";
-    spec.recipe_version = 2;
+    spec.recipe_version = 3;
     spec.namespace_path = namespace_path;
-    const ap::ActionResultSnapshot shaders(build_root, "render/shader/bsdf-preintegrate");
     std::vector<rd::MaterialProgramSource> programs;
     for (const auto &[id, kind] : std::array{
         std::pair{"render/shader/character_scene_ps.dxil", rd::MaterialProgramKind::CharacterScenePS},
@@ -634,9 +607,6 @@ void ProduceHero(std::string_view name, const fs::path &source_root,
         std::pair{"render/shader/character_translucent_ps.dxil", rd::MaterialProgramKind::CharacterTranslucentPS}})
     {
         if ((kind == rd::MaterialProgramKind::CharacterTranslucentPS) != translucent) continue;
-        ap::UpstreamProduct upstream;
-        Require(ValidDxilBytes(shaders.ReadProductBytes(id, upstream)), "Shared Hero program is not DXIL");
-        spec.upstream.push_back(std::move(upstream));
         programs.push_back({id, kind});
     }
     rd::MaterialSurfaceLayout surface{reflection.capability_mask, reflection.varying_mask};
@@ -661,7 +631,7 @@ void ProduceHero(std::string_view name, const fs::path &source_root,
                 ap::UpstreamProduct ignored;
                 const auto bytes = result.ReadProductBytes(material_id, ignored);
                 if (std::ranges::equal(std::as_bytes(std::span(bytes.data(), bytes.size())), package))
-                { ap::TouchActionResult(result_path); return; }
+                { return; }
             }
         }
         catch (const std::exception &) { /* Rebuild invalid current output. */ }
@@ -731,16 +701,16 @@ void Produce(std::string_view name, const fs::path &source_root,
         outputs.push_back({namespace_path + "_resolve.dxil", stem + "_resolve.dxil",
                            "Content/Shaders/visibility_buffer.hlsl", L"SurfaceResolveCS",
                            L"cs_6_0"});
-        outputs.push_back({namespace_path + "_probe_capture.dxil", stem + "_probe_capture.dxil",
+        outputs.push_back({"lighting/producer/" + stem + "_probe_capture.dxil", stem + "_probe_capture.dxil",
                            "Content/Shaders/local_probe_capture.hlsl",
                            masked ? L"LocalProbeMaskedCapturePS" : L"LocalProbeOpaqueCapturePS", L"ps_6_0"});
-        outputs.push_back({namespace_path + "_probe_shadow.dxil", stem + "_probe_shadow.dxil",
+        outputs.push_back({"lighting/producer/" + stem + "_probe_shadow.dxil", stem + "_probe_shadow.dxil",
                            "Content/Shaders/local_probe_capture.hlsl", L"CaptureStaticShadowPS", L"ps_6_0"});
         if(terrain)
         {
-            outputs.push_back({"render/shader/local_probe_capture_source_base_vs.dxil", "local_probe_capture_source_base_vs.dxil",
+            outputs.push_back({"lighting/producer/local_probe_capture_source_base_vs.dxil", "local_probe_capture_source_base_vs.dxil",
                                "Content/Shaders/local_probe_capture.hlsl", L"LocalProbeCaptureSourceBaseVS", L"vs_6_0"});
-            outputs.push_back({"render/shader/local_probe_capture_sky_ps.dxil", "local_probe_capture_sky_ps.dxil",
+            outputs.push_back({"lighting/producer/local_probe_capture_sky_ps.dxil", "local_probe_capture_sky_ps.dxil",
                                "Content/Shaders/local_probe_capture.hlsl", L"LocalProbeSkyCapturePS", L"ps_6_0"});
         }
     }
@@ -752,9 +722,9 @@ void Produce(std::string_view name, const fs::path &source_root,
     for (std::size_t index = 0; index < baseline_count; ++index)
     {
         const auto &baseline = outputs[index];
-        const bool samples = baseline.id.ends_with("_scene.dxil") || baseline.id.ends_with("_resolve.dxil") ||
-            baseline.id.ends_with("_probe_capture.dxil") || (masked &&
-            (baseline.id.ends_with("_visibility.dxil") || baseline.id.ends_with("_shadow.dxil")));
+        const bool samples = baseline.id.starts_with("render/shader/") &&
+            (baseline.id.ends_with("_scene.dxil") || baseline.id.ends_with("_resolve.dxil") ||
+             (masked && (baseline.id.ends_with("_visibility.dxil") || baseline.id.ends_with("_shadow.dxil"))));
         if (!samples) continue;
         auto variant = baseline;
         variant.id.insert(variant.id.size() - 5u, "_feedback");
@@ -767,21 +737,21 @@ void Produce(std::string_view name, const fs::path &source_root,
     ap::ActionSpec spec;
     spec.action_id = "render.shader." + std::string(name);
     spec.recipe_id = "project-hs.render.material-shader";
-    spec.recipe_version = terrain ? 11 : 10;
+    spec.recipe_version = terrain ? 12 : 11;
     spec.namespace_path = namespace_path;
     spec.inputs.push_back(SemanticInput(
         "material/" + std::string(name) + "/shader-ir", material_path,
         std::as_bytes(std::span<const char>(generated.data(), generated.size()))));
     const auto sidecar_mask = AddSurfaceReflectionInputs(spec, source_root, materials);
     const auto sidecar_layout = rd::ComputeMaterialSidecarLayout(sidecar_mask);
-    for (const auto *relative : {"Schemas/material_graph.schema.json",
-                                 "Content/Shaders/project_hs.hlsl",
+    for (const auto *relative : {"Content/Shaders/project_hs.hlsl",
                                  "Content/Shaders/local_probe_capture.hlsl",
                                  "Content/Shaders/local_probe_draw.hlsli",
                                   "Content/Shaders/environment.hlsli",
                                   "Content/Shaders/probe_ibl.hlsli",
                                   "Content/Shaders/shadow_data.hlsli",
                                   "Content/Shaders/light_list.hlsli",
+                                  "Content/Shaders/light_list_abi.hlsli",
                                   "Content/Shaders/local_shadow.hlsli", "Content/Shaders/local_shadow_abi.hlsli",
 
                                    "Content/Shaders/material_surface.hlsli",
@@ -836,7 +806,6 @@ void Produce(std::string_view name, const fs::path &source_root,
                 }
                 if (valid)
                 {
-                    ap::TouchActionResult(result_path);
                     return;
                 }
             }
@@ -885,11 +854,7 @@ int wmain(int argc, wchar_t **argv)
     fs::path source_root, build_root, dxc;
     std::string name;
     ap::Json action_id = nullptr;
-    bool preintegrate = false;
-    bool translucency_diagnostics = false;
-    bool ssr = false;
-    bool parameters = false;
-    bool decal_surface = false;
+    std::wstring_view mode;
     try
     {
         for (int i = 1; i < argc; ++i)
@@ -901,16 +866,9 @@ int wmain(int argc, wchar_t **argv)
                 build_root = argv[i];
             else if (arg == L"--dxc" && dxc.empty() && ++i < argc)
                 dxc = argv[i];
-            else if (arg == L"--bsdf-preintegrate" && !preintegrate)
-                preintegrate = true;
-            else if (arg == L"--translucency-diagnostics" && !translucency_diagnostics)
-                translucency_diagnostics = true;
-            else if (arg == L"--screen-reflections" && !ssr)
-                ssr = true;
-            else if (arg == L"--decal-surface" && !decal_surface)
-                decal_surface = true;
-            else if (arg == L"--parameters" && !parameters)
-                parameters = true;
+            else if (mode.empty() && (arg == L"--surface-passes" || arg == L"--translucency-diagnostics" ||
+                     arg == L"--screen-reflections" || arg == L"--decal-surface" || arg == L"--parameters"))
+                mode = arg;
             else if (arg == L"--name" && name.empty() && ++i < argc)
             {
                 const std::wstring_view value = argv[i];
@@ -924,16 +882,11 @@ int wmain(int argc, wchar_t **argv)
             else
                 throw std::runtime_error("hs_render_material_shader: invalid command line");
         }
-        const bool valid_mode =
-            (!ssr && !translucency_diagnostics && parameters && !preintegrate && !decal_surface && !name.empty() && dxc.empty()) ||
-            (!ssr && !translucency_diagnostics && preintegrate && !parameters && !decal_surface && name.empty() && !dxc.empty()) ||
-            (!ssr && !translucency_diagnostics && decal_surface && !parameters && !preintegrate && name.empty() && !dxc.empty()) ||
-            (!ssr && !translucency_diagnostics && !preintegrate && !decal_surface && !parameters && !name.empty() && !dxc.empty()) ||
-            (!ssr && translucency_diagnostics && !parameters && !preintegrate && !decal_surface && name.empty() && !dxc.empty()) ||
-            (ssr && !translucency_diagnostics && !parameters && !preintegrate && !decal_surface && name.empty() && !dxc.empty());
+        const bool valid_mode = name.empty() ? !mode.empty() && mode != L"--parameters" && !dxc.empty()
+            : mode.empty() || (mode == L"--parameters" && dxc.empty());
         Require(valid_mode && !source_root.empty() && !build_root.empty(),
-                "usage: hs_render_material_shader (--name <archetype> --dxc <absolute> | --parameters --name <archetype> | --bsdf-preintegrate | --translucency-diagnostics | --screen-reflections | --decal-surface --dxc <absolute>) --source-root <absolute> --build-root <absolute>");
-        if (parameters)
+                "usage: hs_render_material_shader (--name <archetype> [--dxc <absolute>] | --parameters --name <archetype> | --surface-passes | --translucency-diagnostics | --screen-reflections | --decal-surface --dxc <absolute>) --source-root <absolute> --build-root <absolute>");
+        if (mode == L"--parameters")
         {
             if (hs::material_content::IsAuthoredMaterialName(name) ||
                 hs::material_content::IsDecalMaterialName(name))
@@ -941,28 +894,28 @@ int wmain(int argc, wchar_t **argv)
             ProduceParameters(name, source_root.lexically_normal(),
                               build_root.lexically_normal());
         }
-        else if (decal_surface)
+        else if (mode == L"--decal-surface")
         {
             action_id = "render.shader.decal-surface";
             ProduceDecalSurface(source_root.lexically_normal(), build_root.lexically_normal(), dxc.lexically_normal());
         }
-        else if (ssr)
+        else if (mode == L"--screen-reflections")
         {
             action_id = "render.shader.screen-reflections";
-            ProducePreintegration(source_root.lexically_normal(), build_root.lexically_normal(),
+            ProduceMaterialPasses(source_root.lexically_normal(), build_root.lexically_normal(),
                                   dxc.lexically_normal(), ShaderFamily::ScreenReflections);
         }
-        else if (translucency_diagnostics)
+        else if (mode == L"--translucency-diagnostics")
         {
             action_id = "render.shader.translucency-diagnostics";
-            ProducePreintegration(source_root.lexically_normal(), build_root.lexically_normal(),
+            ProduceMaterialPasses(source_root.lexically_normal(), build_root.lexically_normal(),
                                   dxc.lexically_normal(), ShaderFamily::TranslucencyDiagnostics);
         }
-        else if (preintegrate)
+        else if (mode == L"--surface-passes")
         {
-            action_id = "render.shader.bsdf-preintegrate";
-            ProducePreintegration(source_root.lexically_normal(), build_root.lexically_normal(),
-                                  dxc.lexically_normal(), ShaderFamily::Preintegrated);
+            action_id = "render.shader.surface-passes";
+            ProduceMaterialPasses(source_root.lexically_normal(), build_root.lexically_normal(),
+                                  dxc.lexically_normal(), ShaderFamily::SurfacePasses);
         }
         else
         {
@@ -977,8 +930,7 @@ int wmain(int argc, wchar_t **argv)
     {
         ap::ReportFailure("hs_render_material_shader", error.what(),
                           {{"action_id", action_id}, {"name", name},
-                           {"bsdf_preintegrate", preintegrate}, {"translucency_diagnostics", translucency_diagnostics}, {"screen_reflections", ssr},
-                           {"parameters", parameters}, {"decal_surface", decal_surface},
+                           {"mode", std::string(mode.begin(), mode.end())},
                            {"source_root", ap::DiagnosticPath(source_root)},
                            {"build_root", ap::DiagnosticPath(build_root)},
                            {"dependency", {{"dxc", ap::DiagnosticPath(dxc)}}}});

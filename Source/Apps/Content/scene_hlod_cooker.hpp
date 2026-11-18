@@ -40,9 +40,9 @@ struct SceneHlodCookOptions
     std::uint32_t max_group_pages{32};
     // Bounded refinement for conservative geometry error used by runtime LOD.
     std::uint64_t error_refinement_budget{4096};
-    // Zero selects the bounded TaskSystem default; one keeps qualification serial.
+    // Zero selects the bounded TaskSystem default; one keeps error measurement serial.
     std::uint32_t error_worker_count{};
-    GeometryErrorChecks error_checks;
+    GeometryErrorCheckMode error_checks{GeometryErrorCheckMode::Normal};
 };
 
 struct CookedSceneHlod

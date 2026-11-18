@@ -1,4 +1,5 @@
 #include "vfx_typed_ballistic_commands.hpp"
+#include <hs/render_data/vfx_payload_ids.hpp>
 #include "vfx_workspace_size.hpp"
 #include <hs/render_data/render_snapshot_values.hpp>
 #include <algorithm>
@@ -13,7 +14,6 @@ namespace hs::runtime_detail
 namespace
 {
 consteval std::uint64_t Hash64(std::string_view s){std::uint64_t h=14695981039346656037ull;for(unsigned char c:s){h^=c;h*=1099511628211ull;}return h;}
-consteval std::uint32_t Hash(std::string_view s){std::uint32_t h=2166136261u;for(unsigned char c:s){h^=c;h*=16777619u;}return h;}
 constexpr auto kMultishotRetargetEffect=Hash64("particle.upgrade.retarget");
 constexpr auto kRicochetBleedExtendEffect=Hash64("particle.upgrade.ricochet.bleed_extend");
 std::uint32_t Mix(std::uint32_t v){v^=v>>16;v*=0x7feb352du;v^=v>>15;v*=0x846ca68bu;return v^(v>>16);}
@@ -68,7 +68,7 @@ bool Emit(const VfxBallisticRecipe &r,std::uint32_t source_seed,std::uint32_t co
 }
 void AppendPersistentStatusShardCommands(const VfxImage &image,
  std::span<const VfxPersistentInput> inputs,std::span<const std::size_t> selected_indices,
- bool use_selection,Tick current_tick,std::vector<ParticleSpawnCommand> &result)
+ Tick current_tick,std::vector<ParticleSpawnCommand> &result)
 {
  const auto append_owner=[&](const VfxPersistentInput &input)
  {
@@ -91,19 +91,13 @@ void AppendPersistentStatusShardCommands(const VfxImage &image,
    Emit(r,SourceSeed(r,input.stable_seed),r.count,current_tick,current_tick,0,center,{0,1,0},1,0,lifetime,0,result);
   }
  };
- if(use_selection)
+ for(const auto index:selected_indices)
  {
-  for(const auto index:selected_indices)
-  {
-   if(index>=inputs.size())throw std::out_of_range("persistent VFX owner index is out of range");
-   append_owner(inputs[index]);
-  }
+  if(index>=inputs.size())throw std::out_of_range("persistent VFX owner index is out of range");
+  append_owner(inputs[index]);
  }
- else for(const auto &input:inputs)append_owner(input);
 }
 }
-std::vector<ParticleSpawnCommand> BuildVfxTypedBallisticCommands(const VfxImage &image,VfxEventView inputs)
-{std::vector<ParticleSpawnCommand> result;AppendVfxTypedBallisticCommands(image,inputs,result);return result;}
 void PrepareVfxTypedBallisticBursts(const VfxImage &image,VfxEventView inputs,
  std::vector<VfxPreparedBallisticBurst> &plans)
 {
@@ -113,10 +107,10 @@ void PrepareVfxTypedBallisticBursts(const VfxImage &image,VfxEventView inputs,
   if(input.effect_handle==0||static_cast<std::uint32_t>(input.quality)>2)continue;const auto range=EffectRecipes(image,input.effect_handle);
   if(!range.count||image.ballistic_recipes[range.first].persistent_status)continue;
   Float3 center{},normal{0,1,0};float scale=1,radius=0;bool projectile_geometry=false;std::uint32_t payload_kind{};
-  if(const auto *point=std::get_if<VfxPointPayload>(&input.payload)){center=point->position;normal=point->normal;scale=point->authored_scale;payload_kind=Hash("PointEventPayload");}
-  else if(std::holds_alternative<VfxContextPayload>(input.payload)){center={input.world_transform[12],input.world_transform[13],input.world_transform[14]};payload_kind=Hash("PresentationContextPayload");}
-  else if(const auto *projectile=std::get_if<VfxProjectilePayload>(&input.payload)){if(!Finite(projectile->velocity)||!std::isfinite(projectile->hitbox_radius)||projectile->hitbox_radius<=0||std::hypot(projectile->velocity.x,projectile->velocity.y,projectile->velocity.z)<=.0001f)continue;center={input.world_transform[12],input.world_transform[13],input.world_transform[14]};normal=projectile->velocity;projectile_geometry=true;payload_kind=Hash("ProjectilePayload");}
-  else if(const auto *circle=std::get_if<VfxCirclePayload>(&input.payload)){if(circle->inner_radius!=0||!std::isfinite(circle->radius)||circle->radius<=0)continue;center=circle->center;radius=circle->radius;payload_kind=Hash("CircleAreaPayload");}
+  if(const auto *point=std::get_if<VfxPointPayload>(&input.payload)){center=point->position;normal=point->normal;scale=point->authored_scale;payload_kind=hs::vfx_payload::PointEvent;}
+  else if(std::holds_alternative<VfxContextPayload>(input.payload)){center={input.world_transform[12],input.world_transform[13],input.world_transform[14]};payload_kind=hs::vfx_payload::PresentationContext;}
+  else if(const auto *projectile=std::get_if<VfxProjectilePayload>(&input.payload)){if(!Finite(projectile->velocity)||!std::isfinite(projectile->hitbox_radius)||projectile->hitbox_radius<=0||std::hypot(projectile->velocity.x,projectile->velocity.y,projectile->velocity.z)<=.0001f)continue;center={input.world_transform[12],input.world_transform[13],input.world_transform[14]};normal=projectile->velocity;projectile_geometry=true;payload_kind=hs::vfx_payload::Projectile;}
+  else if(const auto *circle=std::get_if<VfxCirclePayload>(&input.payload)){if(circle->inner_radius!=0||!std::isfinite(circle->radius)||circle->radius<=0)continue;center=circle->center;radius=circle->radius;payload_kind=hs::vfx_payload::CircleArea;}
   else continue;
   if(!Finite(center)||!Finite(normal)||!std::isfinite(std::hypot(normal.x,normal.y,normal.z))||!std::isfinite(scale)||scale<=0)continue;
   if(image.ballistic_recipes[range.first].payload_kind!=payload_kind)continue;
@@ -176,23 +170,8 @@ void AppendVfxPreparedBallisticBursts(std::span<const VfxPreparedBallisticBurst>
   if(event_emitted&&emitted_event_indices)emitted_event_indices->push_back(event_index);
  }
 }
-void AppendVfxTypedBallisticCommands(const VfxImage &image,VfxEventView inputs,
- std::vector<ParticleSpawnCommand> &result,std::vector<std::size_t> *emitted_event_indices)
-{
- std::vector<VfxPreparedBallisticBurst> plans;
- PrepareVfxTypedBallisticBursts(image,inputs,plans);
- AppendVfxPreparedBallisticBursts(plans,result,emitted_event_indices);
-}
-void BuildVfxTypedBallisticCommands(const VfxImage &image,VfxEventView inputs,std::vector<ParticleSpawnCommand> &result)
-{AppendVfxTypedBallisticCommands(image,inputs,result);}
-std::vector<ParticleSpawnCommand> BuildVfxPersistentStatusShardCommands(const VfxImage &image,std::span<const VfxPersistentInput> inputs,Tick current_tick)
-{std::vector<ParticleSpawnCommand> result;BuildVfxPersistentStatusShardCommands(image,inputs,current_tick,result);return result;}
-void BuildVfxPersistentStatusShardCommands(const VfxImage &image,std::span<const VfxPersistentInput> inputs,Tick current_tick,std::vector<ParticleSpawnCommand> &result)
-{
- AppendPersistentStatusShardCommands(image,inputs,{},false,current_tick,result);
-}
 void AppendVfxSelectedPersistentStatusShardCommands(const VfxImage &image,
  std::span<const VfxPersistentInput> owners,std::span<const std::size_t> indices,
  Tick current_tick,std::vector<ParticleSpawnCommand> &output)
-{AppendPersistentStatusShardCommands(image,owners,indices,true,current_tick,output);}
+{AppendPersistentStatusShardCommands(image,owners,indices,current_tick,output);}
 }

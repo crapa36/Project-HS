@@ -7,6 +7,8 @@
 #include <utility>
 #ifdef HS_DEVELOPMENT_TOOLS
 #include <hs/asset_manifest/selected_generation.hpp>
+#include <hs/core/sha256_digest.hpp>
+#include <limits>
 #endif
 
 namespace hs::shipping
@@ -35,7 +37,7 @@ Result LoadPreparedContent(const std::filesystem::path &directory,
     if (auto result = DecodeAudioImage(bytes, candidate.owner->Size(), candidate.audio); !result) return result;
     if (auto result = PrepareAudio(candidate.audio.View(), *candidate.owner, candidate.prepared_audio); !result) return result;
     if (auto result = read(ShippingTable::Renderer); !result) return result;
-    if (auto result = render_data::DecodeRendererCatalog(bytes, candidate.owner->Size(), candidate.renderer); !result) return result;
+    if (auto result = render_data::DecodeVerifiedRendererCatalog(bytes, candidate.owner->Size(), candidate.renderer); !result) return result;
     std::array<std::vector<std::byte>, 2> vfx;
     for (std::size_t i = 0; i < vfx.size(); ++i)
         if (auto result = ReadRange(*candidate.owner, info.vfx[i], vfx[i]); !result) return result;
@@ -48,14 +50,6 @@ Result LoadPreparedContent(const std::filesystem::path &directory,
 }
 
 #ifdef HS_DEVELOPMENT_TOOLS
-Result LoadPreparedVfx(const SelectedGeneration &generation, VfxImageData &output)
-{
-    std::filesystem::path path, program;
-    if (auto result = generation.Require("vfx/particle_effects.hsbin", path); !result) return result;
-    if (auto result = generation.Require("vfx/vfx_program.hsbin", program); !result) return result;
-    return LoadVfxImage(path, program, output);
-}
-
 Result LoadPreparedContent(SelectedGeneration generation, PreparedContent &output)
 {
     PreparedContent candidate;
@@ -66,7 +60,25 @@ Result LoadPreparedContent(SelectedGeneration generation, PreparedContent &outpu
     if (auto result = LoadSimulationRules(path, *candidate.simulation, &candidate.content_hash); !result) return result;
     if (auto result = candidate.generation->Require("game-data/presentation-catalog", path); !result) return result;
     if (auto result = LoadPresentationCatalog(path, candidate.presentation, &candidate.content_hash); !result) return result;
-    if (auto result = LoadPreparedVfx(*candidate.generation, candidate.vfx); !result) return result;
+    constexpr std::array vfx_products{"vfx/particle_effects.hsbin", "vfx/vfx_program.hsbin"};
+    std::array<std::vector<std::byte>, vfx_products.size()> vfx;
+    for (std::size_t i = 0; i < vfx.size(); ++i)
+    {
+        const auto id = vfx_products[i];
+        if (auto result = candidate.generation->Require(id, path); !result) return result;
+        const auto entry = candidate.generation->product_digests.find(id);
+        const auto digest = entry == candidate.generation->product_digests.end()
+            ? std::nullopt : ParseSha256Digest(entry->second);
+        if (!digest)
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX product lacks a valid digest.");
+        ShippedContentOwner file;
+        if (auto result = ShippedContentOwner::Open(path, file); !result) return result;
+        if (file.Size() > std::numeric_limits<std::uint32_t>::max() + std::uint64_t(sizeof(CookedParticleEffectsHeader)))
+            return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX product is too large.");
+        vfx[i].resize(static_cast<std::size_t>(file.Size()));
+        if (auto result = file.ReadVerified(0, vfx[i], *digest); !result) return result;
+    }
+    if (auto result = DecodeVfxImage(vfx[0], vfx[1], candidate.vfx); !result) return result;
     if (!candidate.vfx.has_required_sprite_bindings)
         return Result::Failure(ErrorCode::InvalidArgument, "ShippingImage", "VFX omits required sprite bindings.");
     if (auto result = PrepareAudio(candidate.generation->product_paths, candidate.prepared_audio); !result) return result;

@@ -279,10 +279,7 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
     const std::string product_id = "render/material/" + std::string(name) + ".rpkg";
     const auto material_relative = "ContentSource/Materials/" + std::string(name) + ".json";
     const auto material_path = source_root / material_relative;
-    const auto schema_relative = "Schemas/material_graph.schema.json";
-    const auto schema_path = source_root / schema_relative;
     ap::RequireRegularFile(material_path);
-    ap::RequireRegularFile(schema_path);
     const auto material_text = ap::ReadBytes(material_path);
     const auto definition = hs::material_content::ParseMaterialDefinition(
         name, material_text);
@@ -297,7 +294,6 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
     UpstreamProducts upstream_products(build_root);
     spec.inputs.push_back(StructuralMaterialInput("material/" + std::string(name) + "/package-structure",
                                                   material_path, material_text));
-    spec.inputs.push_back(ap::HashInput(schema_relative, schema_path));
 
     const std::string parameter_namespace = "render/material/" + std::string(name) + "/parameters";
     const std::string parameter_id = parameter_namespace + ".rpkg";
@@ -340,7 +336,6 @@ void ProduceStandaloneMaterial(std::string_view name, const fs::path &source_roo
         for (const auto &texture : definition.prepared.Graph().textures)
             upstream_products.Verify(texture.product_id.substr(0, texture.product_id.size() - 5),
                 texture.product_id);
-        ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
         return;
     }
 
@@ -581,20 +576,16 @@ void Produce(std::string_view name, const fs::path &source_root,
         std::ranges::find(rd::kEnvironmentMaterialNames, name) - rd::kEnvironmentMaterialNames.begin());
     const auto material_name = rd::kAuthoredMaterialNames[rd::EnvironmentGeometryMaterialOrdinal(geometry_ordinal)];
     const bool masked = hs::material_content::IsMaskedEnvironmentMaterial(name);
-    const auto schema_relative = "Schemas/material_graph.schema.json";
-    const auto schema_path = source_root / schema_relative;
-    ap::RequireRegularFile(schema_path);
     ap::ActionSpec spec;
     spec.action_id = "render." + std::string(name);
     spec.recipe_id = "project-hs.render.environment";
     spec.recipe_version = 17;
     spec.namespace_path = "render/" + std::string(name);
-    spec.inputs.push_back(ap::HashInput(schema_relative, schema_path));
     UpstreamProducts upstream_products(build_root);
     std::vector<UpstreamSource> upstream_sources;
     hs::geometry_content::GeometryHierarchyCookOptions hierarchy_options;
     if (exhaustive_geometry_error)
-        hierarchy_options.error_checks.mode = hs::geometry_content::GeometryErrorCheckMode::Exhaustive;
+        hierarchy_options.error_checks = hs::geometry_content::GeometryErrorCheckMode::Exhaustive;
     spec.inputs.push_back(HierarchyContractInput(source_root, name, hierarchy_options));
     std::vector<PackageInput> packages;
     packages.reserve(3);
@@ -689,7 +680,6 @@ void Produce(std::string_view name, const fs::path &source_root,
     {
         for (const auto &source : upstream_sources)
             upstream_products.Verify(source.name_space, source.product_id);
-        ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
         return;
     }
 

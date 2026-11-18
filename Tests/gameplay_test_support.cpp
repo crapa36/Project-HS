@@ -1,22 +1,33 @@
 #include <hs/game_rules/simulation_rules_io.hpp>
 #include "gameplay_test_support.hpp"
 #include <hs/presentation/process_scene.hpp>
-#include "test_generation_paths.hpp"
+#include "../Source/Apps/AssetPipeline/action.hpp"
+#include <hs/core/process_info.hpp>
 #include <hs/presentation/presentation_catalog_io.hpp>
 
 #include <algorithm>
 #include <array>
-#include <filesystem>
 #include <ranges>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+
+namespace ap = hs::asset_pipeline;
 
 namespace gameplay_test
 {
 
-hs::SettingsData test_settings;
-hs::PresentationUiState test_ui;
-std::optional<hs::UiCommand> last_ui_command;
+template <typename Value, typename Decode>
+Value LoadGameData(std::string_view id, Decode decode)
+{
+    ap::ActionResultSnapshot snapshot(hs::CurrentExecutableDirectory().parent_path(), id);
+    ap::UpstreamProduct dependency;
+    const auto bytes = snapshot.ReadProductBytes(id, dependency);
+    Value loaded;
+    Check(decode(std::as_bytes(std::span(bytes.data(), bytes.size())), loaded), id);
+    return loaded;
+}
 
 void Check(bool condition, std::string_view message)
 {
@@ -31,30 +42,17 @@ void Check(const hs::Result &result, std::string_view message)
     Check(result.Succeeded(), message);
 }
 
-const hs::SimulationRules &DefaultSimulationRules()
+static const hs::SimulationRules &DefaultSimulationRules()
 {
-    static const auto data = [] {
-        hs::SimulationRules loaded;
-        Check(hs::LoadSimulationRules(
-                  test_generation::ProductPath("game-data/simulation-rules"),
-                  loaded).Succeeded(),
-              "load selected simulation rules");
-        return loaded;
-    }();
+    static const auto data = LoadGameData<hs::SimulationRules>(
+        "game-data/simulation-payload", hs::DecodeSimulationRules);
     return data;
 }
 
-const TestContent &DefaultContent()
+const hs::PresentationCatalog &DefaultPresentation()
 {
-    static const auto data = [] {
-        TestContent loaded;
-        loaded.simulation_rules = DefaultSimulationRules();
-        Check(hs::LoadPresentationCatalog(
-                  test_generation::ProductPath("game-data/presentation-catalog"),
-                  loaded.presentation).Succeeded(),
-              "load selected presentation catalog");
-        return loaded;
-    }();
+    static const auto data = LoadGameData<hs::PresentationCatalog>(
+        "game-data/presentation-payload", hs::DecodePresentationCatalog);
     return data;
 }
 
@@ -92,31 +90,13 @@ hs::TickResult TickEdge(hs::GameSimulation &simulation, hs::GameAction action,
                         hs::EdgeKind kind, hs::Sequence &sequence,
                         const hs::HeldInputState &held)
 {
-    if (kind == hs::EdgeKind::Pressed && action == hs::GameAction::CharacterPage)
-    {
-        test_ui.page = simulation.GetObservation().phase == hs::SessionPhase::Playing
-                           ? hs::UiPage::CharacterOverview
-                           : hs::UiPage::Root;
-        test_ui.loadout_source_slot = 0xFF;
-    }
-    if (kind == hs::EdgeKind::Pressed && action == hs::GameAction::Pause)
-    {
-        const auto phase = simulation.GetObservation().phase;
-        if ((phase == hs::SessionPhase::Paused && test_ui.page == hs::UiPage::PauseSettings) ||
-            (phase == hs::SessionPhase::MainMenu && test_ui.page != hs::UiPage::Root))
-        {
-            test_ui.page = hs::UiPage::Root;
-            return Tick(simulation, held);
-        }
-        test_ui.page = hs::UiPage::Root;
-    }
     if (action == hs::GameAction::BasicAttack && kind == hs::EdgeKind::Pressed &&
         simulation.GetObservation().phase != hs::SessionPhase::Playing)
     {
+        hs::PresentationUiState ui;
         const auto interaction = hs::ResolveUiInteraction(
-            simulation.GetObservation(), test_ui, test_settings, held.cursor_normalized);
+            simulation.GetObservation(), ui, hs::SettingsData{}, held.cursor_normalized);
         if (interaction.gameplay_action) simulation.ApplyUiAction(*interaction.gameplay_action);
-        last_ui_command = interaction.runtime_command;
     }
     const std::array edges{hs::ActionEdge{++sequence, action, kind}};
     return Tick(simulation, held, edges);
@@ -134,7 +114,7 @@ bool WriteSnapshot(hs::GameSimulation &simulation, hs::RenderSnapshotStorage &sn
 {
     auto read = simulation.BorrowTickReadView();
     static const hs::SettingsData settings;
-    return hs::ProjectTick(read.View(), DefaultContent().presentation, test_ui,
+    return hs::ProjectTick(read.View(), DefaultPresentation(), {},
         settings, snapshot, hs::ProcessSceneView(hs::BuildProcessSceneAtLaunch(read.View(), {}))).Succeeded();
 }
 

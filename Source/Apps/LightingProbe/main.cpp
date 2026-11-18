@@ -1,4 +1,5 @@
 #include "../AssetPipeline/action.hpp"
+#include "coated_dfg_cooker.hpp"
 #include "radiance_hdr.hpp"
 #include "../Content/bake_sampling.hpp"
 
@@ -355,7 +356,7 @@ void Produce(const fs::path &sourceRoot,const fs::path &buildRoot)
                 (void)ap::ReadActionResult(buildRoot,kNamespace,kProduct,ignored,path);
                 const auto existing=ap::ReadBytes(path);
                 (void)rd::ReadLightingProbePackage(std::as_bytes(std::span(existing.data(),existing.size())),hs::MakeAssetId(kProduct));
-                ap::TouchActionResult(resultPath); return;
+                return;
             }
         }
         catch(const std::exception &) { /* Invalid immutable/current result is rebuilt by the normal action. */ }
@@ -380,25 +381,27 @@ int wmain(int argc,wchar_t **argv)
 int main(int argc,char **argv)
 #endif
 {
-    fs::path sourceRoot,buildRoot; bool produce=false;
+    fs::path sourceRoot,buildRoot,mode;
+    constexpr auto usage = "usage: hs_lighting_probe (--produce --source-root <absolute> | --coated-dfg) --build-root <absolute>";
     try
     {
         for(int i=1;i<argc;++i)
         {
             const fs::path arg(argv[i]);
-            if(arg=="--produce" && !produce) produce=true;
+            if((arg=="--produce" || arg=="--coated-dfg") && mode.empty()) mode=arg;
             else if(arg=="--source-root" && sourceRoot.empty() && ++i<argc) sourceRoot=argv[i];
             else if(arg=="--build-root" && buildRoot.empty() && ++i<argc) buildRoot=argv[i];
-            else throw std::runtime_error("usage: hs_lighting_probe --produce --source-root <absolute> --build-root <absolute>");
+            else throw std::runtime_error(usage);
         }
-        Require(produce && !sourceRoot.empty() && !buildRoot.empty(),
-                "usage: hs_lighting_probe --produce --source-root <absolute> --build-root <absolute>");
-        Produce(sourceRoot.lexically_normal(),buildRoot.lexically_normal()); return 0;
+        Require(!mode.empty() && buildRoot.is_absolute() && (mode=="--produce" ? sourceRoot.is_absolute() : sourceRoot.empty()), usage);
+        if(mode=="--coated-dfg") hs::lighting_probe::ProduceCoatedDfg(buildRoot.lexically_normal());
+        else Produce(sourceRoot.lexically_normal(),buildRoot.lexically_normal());
+        return 0;
     }
     catch(const std::exception &error)
     {
         ap::ReportFailure("hs_lighting_probe", error.what(),
-                          {{"action_id", "render.lighting.default_probe"}, {"produce", produce},
+                          {{"action_id", mode=="--coated-dfg" ? "render.lighting.coated-dfg" : "render.lighting.default_probe"},
                            {"source_root", ap::DiagnosticPath(sourceRoot)}, {"build_root", ap::DiagnosticPath(buildRoot)}});
         return 1;
     }

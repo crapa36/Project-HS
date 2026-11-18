@@ -13,18 +13,12 @@
 
 namespace hs::runtime_detail
 {
-struct VfxVisibleMoteAdmission
-{
-    std::size_t requested_rows{}, admitted_rows{};
-    bool budget_limited{};
-};
-
 template <typename HeldBytesFn>
-VfxVisibleMoteAdmission PrepareVisibleMoteOutputs(const VfxImage &image, VfxSessionState &session,
+bool PrepareVisibleMoteOutputs(const VfxImage &image, VfxSessionState &session,
     VfxPersistentSparkState &persistent_sparks, std::span<const VfxPersistentInput> persistent,
     double display_tick, Tick ground_tick, float interpolation, std::size_t retained_flash_count,
     std::size_t required_suffix, std::vector<VfxFlashSpawnInput> &visible_flashes,
-    VfxMoteBurstSelection typed_birth_selection, HeldBytesFn &&measure_held_bytes)
+    bool typed_birth_budget_limited, HeldBytesFn &&measure_held_bytes)
 {
     using namespace vfx_retained_size;
     auto &active_flashes = session.decoded.flashes;
@@ -54,11 +48,7 @@ VfxVisibleMoteAdmission PrepareVisibleMoteOutputs(const VfxImage &image, VfxSess
         display_tick, visible_flashes, &quota);
     AppendVfxPersistentMoteCommands(image, persistent, visible_flashes, &quota);
 
-    return {
-        Add(typed_birth_selection.requested_decorative_rows, quota.requested_rows),
-        Add(typed_birth_selection.admitted_decorative_rows, quota.admitted_rows),
-        quota.requested_rows > quota.admitted_rows ||
-            typed_birth_selection.requested_decorative_rows > typed_birth_selection.admitted_decorative_rows};
+    return quota.budget_limited || typed_birth_budget_limited;
 }
 
 struct VfxVisibleFireAdmission

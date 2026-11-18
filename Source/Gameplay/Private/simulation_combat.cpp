@@ -1186,7 +1186,6 @@ void GameSimulation::SimulationWorld::ReleaseChargedShot()
 void GameSimulation::SimulationWorld::CastAttackPhase()
 {
     CastBasicAttack();
-    auto boss_actions_timing = Measure(SimulationTimingId::ScheduledBossActions);
     if(combat_state.boss_actions_dirty)
     {
         std::ranges::sort(combat_state.boss_actions,[](const BossAction &a,const BossAction &b) {
@@ -1313,8 +1312,6 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
     combat_state.boss_actions.erase(combat_state.boss_actions.begin(),
                        combat_state.boss_actions.begin() + boss_actions_executed);
     if(combat_state.boss_actions.empty()) combat_state.next_boss_schedule_sequence=0;
-    boss_actions_timing.Finish();
-    auto scheduled_actions_timing = Measure(SimulationTimingId::ScheduledActions);
     if(combat_state.scheduled_actions_dirty)
     {
         std::ranges::sort(combat_state.scheduled_actions,[](const ScheduledAction &a,const ScheduledAction &b) {
@@ -1567,7 +1564,6 @@ void GameSimulation::SimulationWorld::CastAttackPhase()
 
 void GameSimulation::SimulationWorld::MovementPhase()
 {
-    auto player_timing = Measure(SimulationTimingId::PlayerMovement);
     actors.player.previous_position = actors.player.position;
     actors.player.tick_motion.Reset(actors.player.position);
     const auto stationary_attack = current_input.held.basic_attack_held ||
@@ -1699,13 +1695,12 @@ void GameSimulation::SimulationWorld::MovementPhase()
         const auto target_cell = navigation.player_navigation.Cell(actors.player.move_target);
         if (!direct_path && target_cell != navigation.player_navigation_target)
         {
-            auto navigation_timing = Measure(SimulationTimingId::NavigationQuery);
             navigation.player_navigation.RebuildFlow(actors.player.move_target);
             navigation.player_navigation_target = target_cell;
         }
         const auto waypoint = direct_path
                                   ? actors.player.move_target
-                                  : TimedNavigationWaypoint(navigation.player_navigation,actors.player.position,
+                                  : navigation.player_navigation.NextWaypoint(actors.player.position,
                                                                    actors.player.move_target);
         const auto delta = Subtract(waypoint, actors.player.position);
         const auto charge_multiplier = actors.player.charging
@@ -1768,8 +1763,6 @@ void GameSimulation::SimulationWorld::MovementPhase()
     actors.player_position_history[tick % actors.player_position_history.size()] =
         actors.player.position;
 
-    player_timing.Finish();
-    auto enemies_timing = Measure(SimulationTimingId::EnemyMovement);
     for (auto enemy : actors.enemies)
     {
         if (enemy.life.dead) continue;
@@ -1841,8 +1834,6 @@ void GameSimulation::SimulationWorld::MovementPhase()
             enemy.motion.velocity = {};
         }
     }
-    enemies_timing.Finish();
-    auto projectiles_timing = Measure(SimulationTimingId::ProjectileMovement);
     for (auto projectile : actors.projectiles)
     {
         if (projectile.combat.dead) continue;
@@ -1864,7 +1855,6 @@ void GameSimulation::SimulationWorld::MovementPhase()
 
 void GameSimulation::SimulationWorld::SpatialGridPhase()
 {
-    auto build_timing = Measure(SimulationTimingId::SeparationBuild);
     // Keep pair order, but avoid striding through large actor records for every pair.
     auto &positions = combat_state.separation_positions;
     positions.resize(actors.enemies.size());
@@ -1907,8 +1897,6 @@ void GameSimulation::SimulationWorld::SpatialGridPhase()
     };
 
     rebuild(false);
-    build_timing.Finish();
-    auto separation_timing = Measure(SimulationTimingId::SeparationSolve);
     constexpr std::array<std::pair<int, int>, 4> kForwardNeighbors{{
         {1, 0}, {-1, 1}, {0, 1}, {1, 1},
     }};
@@ -1954,8 +1942,6 @@ void GameSimulation::SimulationWorld::SpatialGridPhase()
         enemy.motion.tick_motion.final_position = enemy.motion.position;
     }
     // Separation uses final centers once; only projectile collision needs swept bounds.
-    separation_timing.Finish();
-    auto swept_timing = Measure(SimulationTimingId::SweptGridBuild);
     rebuild(true);
     combat_state.enemy_grid.MarkBuilt(tick,actors.enemies.StructuralGeneration());
 }
@@ -2848,7 +2834,6 @@ void GameSimulation::SimulationWorld::ExplodeProjectile(ProjectileRow projectile
 
 void GameSimulation::SimulationWorld::CollisionHitPhase()
 {
-    auto projectile_timing = Measure(SimulationTimingId::ProjectileCollision);
     const auto initial_projectile_count = actors.projectiles.size();
     for (std::size_t projectile_index = 0;
          projectile_index < initial_projectile_count; ++projectile_index)
@@ -3094,8 +3079,6 @@ void GameSimulation::SimulationWorld::CollisionHitPhase()
         }
     }
 
-    projectile_timing.Finish();
-    auto area_timing = Measure(SimulationTimingId::AreaCollision);
     struct PendingFireArea
     {
         Float2 position{};
@@ -3647,7 +3630,6 @@ void GameSimulation::SimulationWorld::ApplyBurn(EnemyRow enemy, float attack, bo
 
 void GameSimulation::SimulationWorld::DamageStatusPhase()
 {
-    auto status_timing = Measure(SimulationTimingId::StatusUpdate);
     if (tick < actors.player.pickup_reward_until)
         RecordRelicEffect(RelicKind::PickupReward,
                           UpgradeEffectMetric::EffectActiveTicks);
@@ -3718,8 +3700,6 @@ void GameSimulation::SimulationWorld::DamageStatusPhase()
         }
     }
 
-    status_timing.Finish();
-    auto damage_timing = Measure(SimulationTimingId::DamageFlush);
     combat_state.combat.SortByTargetAndSequence();
     const auto sorted_count = combat_state.combat.commands.size();
     std::uint64_t resolved_target{};

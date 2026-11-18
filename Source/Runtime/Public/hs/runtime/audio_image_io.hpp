@@ -17,6 +17,7 @@ struct AudioImageData
     [[nodiscard]] AudioImage View() const noexcept { return {cues, samples, chunks}; }
 };
 
+// The shipping reader verifies the audio table digest before decoding.
 [[nodiscard]] Result DecodeAudioImage(std::span<const std::byte> bytes,
                                       std::uint64_t pack_size, AudioImageData &output);
 }

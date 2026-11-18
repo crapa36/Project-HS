@@ -11,22 +11,6 @@
 namespace hs::runtime_detail
 {
 
-struct VfxTypedGroundCommand
-{
-    ParticleSpawnCommand command;
-    bool additive{};
-    std::uint64_t stable_id{}; // Identity of the gameplay owner, not a generated particle ID.
-    VfxEffectHandle effect_handle{kInvalidVfxEffectHandle};
-    std::uint8_t source_visual_kind{0xff};
-    float edge_width_world{};
-    float normalized_age{};
-    float lifetime01{};
-    VfxGroundMotion motion;
-    std::uint32_t gradient_row{};
-    float hdr{};
-    VfxGroundGeometry geometry;
-};
-
 // Birth-time compatibility layers that the typed builder actually accepted.
 // These facts filter matching legacy emitters before DrawCommand construction.
 struct VfxGroundBirthSuppressionFacts
@@ -49,33 +33,9 @@ struct VfxGroundEventAdmission
     const VfxImage &image, const VfxEventInput &input) noexcept;
 
 // Builders require an immutable prepared and admitted image; live events and owners remain mutable.
-// Converts authored persistent CircleAreaPayload boundaries and interior fills.
-// Callers retain the owner identity and world-space edge width alongside the
-// legacy spawn command until the renderer's exact-ring path consumes them.
-[[nodiscard]] std::vector<VfxTypedGroundCommand> BuildVfxTypedGroundCommands(
-    const VfxImage &image,
-    std::span<const VfxPersistentInput> inputs,
-    Tick current_tick);
-void AppendVfxTypedGroundCommands(const VfxImage &image,
-    std::span<const VfxPersistentInput> inputs, Tick current_tick,
-    std::vector<VfxTypedGroundCommand> &result);
-void AppendVfxTypedGroundCommands(const VfxImage &image,
-    std::span<const VfxPersistentInput> inputs, Tick current_tick,
-    std::vector<VfxGroundSpawnInput> &result);
 void AppendVfxTypedGroundCommands(const VfxImage &image,
     std::span<const VfxPersistentInput> inputs, Tick current_tick,
     std::vector<VfxGroundSpawnInput> &result, std::vector<float> &frame_gap_angles);
-
-[[nodiscard]] std::vector<VfxTypedGroundCommand> BuildVfxTypedEventGroundCommands(
-    const VfxImage &image,
-    VfxEventView inputs,
-    double current_tick);
-void AppendVfxTypedEventGroundCommands(const VfxImage &image,
-    VfxEventView inputs, double current_tick,
-    std::vector<VfxTypedGroundCommand> &result);
-void AppendVfxTypedEventGroundCommands(const VfxImage &image,
-    VfxEventView inputs, double current_tick,
-    std::vector<VfxGroundSpawnInput> &result);
 void AppendVfxTypedEventGroundCommands(const VfxImage &image,
     VfxEventView inputs, double current_tick,
     std::vector<VfxGroundSpawnInput> &result, std::vector<float> &frame_gap_angles);

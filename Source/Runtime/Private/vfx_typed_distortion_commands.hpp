@@ -7,12 +7,6 @@
 namespace hs::runtime_detail
 {
 // Image recipe ranges and effect-wide fields must be immutable and admitted.
-[[nodiscard]] std::vector<VfxDistortionInput> BuildVfxTypedDistortionCommands(
-    const VfxImage &image, VfxEventView events,
-    std::span<const VfxPersistentInput> persistent, double current_tick);
-void AppendVfxTypedDistortionCommands(const VfxImage &image, VfxEventView events,
-    std::span<const VfxPersistentInput> persistent, double current_tick,
-    std::vector<VfxDistortionInput> &result);
 // The caller clears/reuses this frame pool only after its previous Render call returned.
 void RebuildVfxTypedDistortionCommands(const VfxImage &image, VfxEventView events,
     std::span<const VfxPersistentInput> persistent, double current_tick,

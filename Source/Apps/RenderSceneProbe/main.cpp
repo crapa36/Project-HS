@@ -140,11 +140,10 @@ std::uint64_t Revision(rd::SceneProbeRevisionDomain domain,const Identities &ide
 class Products
 {
   public:
-    Products(const fs::path &buildRoot,std::string_view resultList):root_(buildRoot)
+    Products(const fs::path &buildRoot,std::string_view resultList)
     {
         const auto actions=(buildRoot/"Actions").lexically_normal(); ap::RequireDirectory(actions);
         std::istringstream lines{std::string(resultList)};
-        std::set<std::string> selected;
         for(std::string line;std::getline(lines,line);)
         {
             if(!line.empty() && line.back()=='\r') line.pop_back();
@@ -156,25 +155,24 @@ class Products
                 std::ranges::none_of(relative,[](const fs::path &part){return part==".." || part==".";}),
                 "native DAG ActionResult escapes the build Actions directory");
             const auto expected=relative.generic_string();
-            if(!selected.insert(expected).second) continue;
-            Require(selected.size()<=4096,"native DAG contains too many Action results");
-            // The snapshot checks that namespace_path matches this native-DAG
-            // path, owns its parsed metadata and verifies each selected payload.
-            snapshots_.try_emplace(expected,root_,expected);
+            const auto [snapshot,inserted]=snapshots_.try_emplace(expected,buildRoot,expected);
+            if(!inserted) continue;
+            Require(snapshots_.size()<=4096,"native DAG contains too many Action results");
+            for(const auto id:snapshot->second.ProductIds())
+            {
+                const auto [owner,unique]=owners_.try_emplace(id,&*snapshot);
+                if(!unique) owner->second=nullptr;
+            }
         }
-        Require(!selected.empty(),"native DAG result list is empty");
+        Require(!snapshots_.empty(),"native DAG result list is empty");
     }
     void Read(std::string_view id,std::string_view expectedNamespace,Identities &closure)
     {
         const std::string key(id);
-        auto snapshot=snapshots_.end();
-        for(auto candidate=snapshots_.begin();candidate!=snapshots_.end();++candidate)
-            if(candidate->second.HasProduct(key))
-            {
-                Require(snapshot==snapshots_.end(),"upstream logical product has multiple producer namespaces: "+key);
-                snapshot=candidate;
-            }
-        Require(snapshot!=snapshots_.end(),"required upstream product has no selected ActionResult: "+key);
+        const auto owner=owners_.find(id);
+        Require(owner!=owners_.end(),"required upstream product has no selected ActionResult: "+key);
+        const auto *snapshot=owner->second;
+        Require(snapshot!=nullptr,"upstream logical product has multiple producer namespaces: "+key);
         Require(expectedNamespace.empty() || snapshot->first==expectedNamespace,"upstream product namespace disagrees with producer contract");
         if(const auto existing=verified_.find(key);existing!=verified_.end())
         { AddClosure(key,closure); return; }
@@ -208,8 +206,9 @@ class Products
         const auto &entry=verified_.at(id); closure[id]=entry.upstream.digest;
         for(const auto &dependency:entry.dependencies) AddClosure(dependency,closure);
     }
-    fs::path root_;
-    std::map<std::string,ap::ActionResultSnapshot> snapshots_;
+    using Snapshots=std::map<std::string,ap::ActionResultSnapshot>;
+    Snapshots snapshots_;
+    std::map<std::string_view,const Snapshots::value_type *> owners_;
     std::map<std::string,Entry> verified_;
     std::set<std::string> visiting_;
 };
@@ -222,7 +221,8 @@ void Produce(const fs::path &sourceRoot,const fs::path &buildRoot,const fs::path
     spec.recipe_id="project-hs.render.scene-probe"; spec.recipe_version=1; spec.namespace_path=kNamespace;
     const auto sourcePath=sourceRoot/"ContentSource/Lighting/local_probes.json";
     const auto sourceBytes=ap::ReadBytes(sourcePath);
-    spec.inputs.push_back({"ContentSource/Lighting/local_probes.json",sourcePath,ap::Sha256Bytes(Bytes(sourceBytes))});
+    const auto sourceDigest=ap::Sha256Bytes(Bytes(sourceBytes));
+    spec.inputs.push_back({"ContentSource/Lighting/local_probes.json",sourcePath,sourceDigest});
     auto source=ParseSource(sourceBytes);
     spec.inputs.push_back(ap::HashInput("Schemas/scene_probe.schema.json",sourceRoot/"Schemas/scene_probe.schema.json"));
     Require(resultList.is_absolute(),"native DAG result-list path must be absolute");
@@ -251,7 +251,7 @@ void Produce(const fs::path &sourceRoot,const fs::path &buildRoot,const fs::path
     products.Read(kArenaLayout,"game-data/simulation-payload",lights);
     // This package contains layout only; native capture hashes the actual
     // runtime instances, LightViews, material state and shader products.
-    layout["ContentSource/Lighting/local_probes.json"]=ap::Sha256Bytes(Bytes(sourceBytes));
+    layout["ContentSource/Lighting/local_probes.json"]=sourceDigest;
     source.description.revisions={Revision(rd::SceneProbeRevisionDomain::Environment,environment),
         Revision(rd::SceneProbeRevisionDomain::Material,materials),Revision(rd::SceneProbeRevisionDomain::Light,lights),
         Revision(rd::SceneProbeRevisionDomain::StaticLayout,layout)};
@@ -265,7 +265,6 @@ void Produce(const fs::path &sourceRoot,const fs::path &buildRoot,const fs::path
     source.description.material_dependency=index("render/material/terrain.rpkg");
     source.description.light_dependency=index(kArenaLayout); source.description.static_layout_dependency=index(kArenaLayout);
     products.Append(spec); std::ranges::sort(spec.inputs,{},&ap::Input::logical_id);
-    std::ranges::sort(spec.upstream,{},&ap::UpstreamProduct::logical_id);
     const auto resultPath=buildRoot/"Actions"/kNamespace/"result.json";
     if(fs::exists(resultPath) && fs::exists(resultPath.parent_path()/"result.d"))
     {
@@ -276,7 +275,7 @@ void Produce(const fs::path &sourceRoot,const fs::path &buildRoot,const fs::path
             {
                 ap::UpstreamProduct ignored; fs::path path;
                 current.ReadProduct(kProduct,ignored,path);
-                ap::TouchActionResult(resultPath); return;
+                return;
             }
         }
         catch(const std::exception &) { /* Invalid current immutable product is rebuilt by the normal Action. */ }

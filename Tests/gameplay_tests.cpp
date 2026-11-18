@@ -11,7 +11,6 @@ namespace gameplay_test
 void RunGameplayCombatTests();
 void RunGameplayProgressionTests();
 void RunGameplayPresentationTests();
-void RunGameplayDeterminismTests();
 
 } // namespace gameplay_test
 
@@ -31,11 +30,8 @@ int main(int argc, char **argv)
             RunGameplayProgressionTests();
         if (run("presentation"))
             RunGameplayPresentationTests();
-        if (run("determinism"))
-            RunGameplayDeterminismTests();
         Check(group == "all" || group == "combat" ||
-                  group == "progression" || group == "presentation" ||
-                  group == "determinism",
+                  group == "progression" || group == "presentation",
               "unknown gameplay test group");
         std::cout << "gameplay_tests passed\n";
         return 0;

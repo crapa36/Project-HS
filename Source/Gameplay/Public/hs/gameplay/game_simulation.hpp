@@ -31,7 +31,6 @@ struct SimulationConfig
     SimulationScenarioPolicy scenario{};
     // Recorded/test sessions publish checksums; ordinary play can request them explicitly.
     bool capture_checksums{true};
-    bool capture_timings{false};
     // Session-start switch for optional upgrade/relic synergy detail. Fixed balance
     // aggregates and gameplay state are collected identically in either mode.
     bool capture_detailed_balance{true};
@@ -82,7 +81,6 @@ class GameSimulation
     [[nodiscard]] const SimulationRules &Rules() const noexcept;
     [[nodiscard]] SessionProbe GetSessionProbe() const;
     [[nodiscard]] SimulationDiagnostics GetDiagnostics() const;
-    [[nodiscard]] SimulationTimingDiagnostics GetTimingDiagnostics() const;
     [[nodiscard]] SimulationObservation GetObservation() const;
     [[nodiscard]] ScopedTickReadView BorrowTickReadView() const;
     [[nodiscard]] Result ApplyDebugCommand(const DebugCommand &command);

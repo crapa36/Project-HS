@@ -3,7 +3,6 @@
 #include <hs/gameplay/game_simulation.hpp>
 #include "navigation_grid.hpp"
 #include <hs/core/cooked_format.hpp>
-#include <hs/core/fixed_step_clock.hpp>
 
 #include "cast_runtime.hpp"
 #include "balance_observer.hpp"
@@ -487,57 +486,6 @@ struct GameSimulation::SimulationWorld
     std::uint8_t selection_input_guard_frames{};
     bool selection_waiting_for_release{};
     SimulationPhaseId pipeline_phase{SimulationPhaseId::GameplayHash};
-
-#ifdef HS_DEVELOPMENT_TOOLS
-    mutable SimulationTimingDiagnostics timings;
-    class TimingScope
-    {
-      public:
-        explicit TimingScope(SimulationTimingSample *sample) noexcept : sample_(sample)
-        { if (sample_) started_ = FixedStepClock::Clock::now(); }
-        ~TimingScope() noexcept { Finish(); }
-        TimingScope(const TimingScope &) = delete;
-        TimingScope &operator=(const TimingScope &) = delete;
-        void Finish() noexcept
-        {
-            if (!sample_) return;
-            const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                FixedStepClock::Clock::now() - started_).count();
-            sample_->nanoseconds += static_cast<std::uint64_t>(std::max<std::int64_t>(elapsed, 0));
-            ++sample_->calls;
-            sample_ = nullptr;
-        }
-      private:
-        SimulationTimingSample *sample_{};
-        FixedStepClock::Clock::time_point started_{};
-    };
-    [[nodiscard]] TimingScope Measure(SimulationTimingId id) const noexcept
-    {
-        return TimingScope(config.capture_timings && timings.captured
-            ? &timings.scopes[static_cast<std::size_t>(id)] : nullptr);
-    }
-    void ResetTimings() noexcept
-    {
-        if (!config.capture_timings) { timings.tick = tick; return; }
-        const auto calibration = timings.empty_scope_calibration;
-        timings = {};
-        timings.tick = tick;
-        timings.captured = config.capture_timings;
-        timings.empty_scope_calibration = calibration;
-    }
-#else
-    class TimingScope
-    {
-      public:
-        void Finish() noexcept {}
-    };
-    [[nodiscard]] TimingScope Measure(SimulationTimingId) const noexcept { return {}; }
-#endif
-    Float2 TimedNavigationWaypoint(NavigationGrid &grid, Float2 from, Float2 target) const
-    {
-        auto timing = Measure(SimulationTimingId::NavigationQuery);
-        return grid.NextWaypoint(from, target);
-    }
 
     struct ObservationState
     {

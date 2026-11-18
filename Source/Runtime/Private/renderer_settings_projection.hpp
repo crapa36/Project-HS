@@ -50,7 +50,7 @@ void UpdateGraphicsTelemetry(GraphicsSettingsUiModel &model,
                              const RendererDiagnosticsSnapshot &diagnostics, bool validation);
 #endif
 [[nodiscard]] std::shared_ptr<const GraphicsSettingsUiModel> RendererGraphicsReceipt(
-    const D3D12Renderer &renderer, const GraphicsSettings &graphics, std::uint64_t generation,
+    D3D12Renderer &renderer, const GraphicsSettings &graphics, std::uint64_t generation,
     HWND window_handle, bool validation);
 
 } // namespace hs

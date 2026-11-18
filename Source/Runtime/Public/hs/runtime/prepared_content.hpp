@@ -34,5 +34,4 @@ struct PreparedContent
 [[nodiscard]] Result LoadPreparedContent(const std::filesystem::path &directory,
                                          const ShippingImageInfo &, PreparedContent &);
 [[nodiscard]] Result LoadPreparedContent(SelectedGeneration generation, PreparedContent &);
-[[nodiscard]] Result LoadPreparedVfx(const SelectedGeneration &, VfxImageData &);
 }

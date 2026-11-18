@@ -79,75 +79,61 @@ void Maps(const Json &entry, std::uint32_t slices, std::uint32_t rows)
 }
 }
 
-void ValidateVfxTextures(const Json &spec, const std::filesystem::path &root)
+void ValidateVfxTexture(const Json &entry, const std::filesystem::path &path)
 {
-    std::set<std::string> assets;
-    for (const auto &[id, entry] : spec.at("libraries").at("texture_catalog").items())
+    try
     {
-        try
-        {
-            const auto asset = entry.at("runtime_asset").get<std::string>();
-            constexpr auto prefix = "Content/Textures/VFX/";
-            const std::filesystem::path filename(asset.substr(std::min(asset.size(), std::char_traits<char>::length(prefix))));
-            if (!asset.starts_with(prefix) || filename.empty() || filename.has_parent_path() ||
-                filename.extension() != ".dds" || asset.find('\\') != std::string::npos ||
-                asset.find(':') != std::string::npos || !assets.insert(asset).second)
-                throw std::runtime_error("Invalid or duplicate runtime asset path");
-            const auto directory = std::filesystem::weakly_canonical(root / "ContentSource/Textures/VFX");
-            const auto path = std::filesystem::weakly_canonical(directory / filename);
-            if (path.parent_path() != directory) throw std::runtime_error("Texture path escapes source directory");
-            std::ifstream input(path, std::ios::binary | std::ios::ate);
-            if (!input) throw std::runtime_error("Cannot open source texture: " + path.string());
-            const auto length = input.tellg();
-            if (length < 148 || static_cast<std::uint64_t>(length) > 512ull * 1024 * 1024)
-                throw std::runtime_error("DDS input ceiling or truncated header");
-            input.seekg(0);
-            std::vector<std::byte> bytes(static_cast<std::size_t>(length));
-            if (!input.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
-                throw std::runtime_error("Cannot read DDS bytes");
-            const auto decoded = render_data::DecodeDdsTexture(bytes);
-            const auto &shape = decoded.description;
-            const auto format = shape.format;
-            const auto preferred = Format(entry.at("runtime_format_preferred").get<std::string>());
-            const auto development = entry.contains("runtime_format_development") ?
-                Format(entry.at("runtime_format_development").get<std::string>()) : preferred;
-            const auto role = std::ranges::find(asset_pipeline::kVfxTextureSpecs,
-                filename.stem().string(), &asset_pipeline::VfxTextureSpec::name);
-            if (role == std::end(asset_pipeline::kVfxTextureSpecs) || role->masks ||
-                development != role->description.format || format != development)
-                throw std::runtime_error("DDS format is not supported by the runtime package");
-            render_data::ValidateDdsTextureRole(decoded,
-                role->volume ? render_data::DdsTextureRole::VfxVolume : render_data::DdsTextureRole::VfxTexture,
-                role->description);
-            const auto color = entry.at("color_space").get<std::string>();
-            if (color != "linear_data" && color != "signed_linear_data" && color != "linear_hdr" && color != "linear_scalar_data")
-                throw std::runtime_error("VFX data must be linear");
-            const auto type = entry.value("resource_type", std::string("Texture2D"));
-            const bool volume = type == "Texture3D", array = type == "Texture2DArray";
-            if (!volume && !array && type != "Texture2D") throw std::runtime_error("Unsupported texture resource type");
-            const auto &dimensions = entry.at("dimensions");
-            if (!dimensions.is_array() || dimensions.size() != (volume || array ? 3u : 2u)) throw std::runtime_error("Invalid texture dimensions");
-            auto width = Unsigned(dimensions[0]), height = Unsigned(dimensions[1]);
-            auto depth = volume ? Unsigned(dimensions[2]) : 1u;
-            const auto slices = array ? Unsigned(dimensions[2]) : 1u;
-            if (!width || !height || !depth || !slices || width > 16384 || height > 16384 || depth > 2048 || slices > 2048 ||
-                shape.width != width || shape.height != height || decoded.depth != (volume ? depth : 0) ||
-                decoded.dimension != (volume ? 4u : 3u) || shape.array_size != slices ||
-                decoded.caps[1] != (volume ? 0x200000u : 0u) || (volume && !(decoded.flags & 0x800000)))
-                throw std::runtime_error("DDS resource dimensions differ from catalog");
-            const auto policy = entry.at("mips").get<std::string>();
-            std::uint32_t mip_count = 1;
-            if (policy == "full_chain" || policy == "full_chain_per_slice" || policy == "full_chain_vector_average")
-                for (auto axis = std::max({width, height, depth}); axis > 1; axis >>= 1) ++mip_count;
-            else if (policy != "none" && policy != "none_baseline") throw std::runtime_error("Unknown mip policy");
-            if (shape.mip_count != mip_count)
-                throw std::runtime_error("Incomplete DDS mip chain");
-            Maps(entry, slices, shape.height);
-        }
-        catch (const std::exception &error)
-        {
-            throw std::runtime_error("VFX texture " + id + ": " + error.what());
-        }
+        std::ifstream input(path, std::ios::binary | std::ios::ate);
+        if (!input) throw std::runtime_error("Cannot open source texture: " + path.string());
+        const auto length = input.tellg();
+        if (length < 148 || static_cast<std::uint64_t>(length) > 512ull * 1024 * 1024)
+            throw std::runtime_error("DDS input ceiling or truncated header");
+        input.seekg(0);
+        std::vector<std::byte> bytes(static_cast<std::size_t>(length));
+        if (!input.read(reinterpret_cast<char *>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
+            throw std::runtime_error("Cannot read DDS bytes");
+        const auto decoded = render_data::DecodeDdsTexture(bytes);
+        const auto &shape = decoded.description;
+        const auto format = shape.format;
+        const auto preferred = Format(entry.at("runtime_format_preferred").get<std::string>());
+        const auto development = entry.contains("runtime_format_development") ?
+            Format(entry.at("runtime_format_development").get<std::string>()) : preferred;
+        const auto role = std::ranges::find(asset_pipeline::kVfxTextureSpecs,
+            path.stem().string(), &asset_pipeline::VfxTextureSpec::name);
+        if (role == std::end(asset_pipeline::kVfxTextureSpecs) || role->masks ||
+            development != role->description.format || format != development)
+            throw std::runtime_error("DDS format is not supported by the runtime package");
+        render_data::ValidateDdsTextureRole(decoded,
+            role->volume ? render_data::DdsTextureRole::VfxVolume : render_data::DdsTextureRole::VfxTexture,
+            role->description);
+        const auto color = entry.at("color_space").get<std::string>();
+        if (color != "linear_data" && color != "signed_linear_data" && color != "linear_hdr" && color != "linear_scalar_data")
+            throw std::runtime_error("VFX data must be linear");
+        const auto type = entry.value("resource_type", std::string("Texture2D"));
+        const bool volume = type == "Texture3D", array = type == "Texture2DArray";
+        if (!volume && !array && type != "Texture2D") throw std::runtime_error("Unsupported texture resource type");
+        const auto &dimensions = entry.at("dimensions");
+        if (!dimensions.is_array() || dimensions.size() != (volume || array ? 3u : 2u)) throw std::runtime_error("Invalid texture dimensions");
+        auto width = Unsigned(dimensions[0]), height = Unsigned(dimensions[1]);
+        auto depth = volume ? Unsigned(dimensions[2]) : 1u;
+        const auto slices = array ? Unsigned(dimensions[2]) : 1u;
+        if (!width || !height || !depth || !slices || width > 16384 || height > 16384 || depth > 2048 || slices > 2048 ||
+            shape.width != width || shape.height != height || decoded.depth != (volume ? depth : 0) ||
+            decoded.dimension != (volume ? 4u : 3u) || shape.array_size != slices ||
+            decoded.caps[1] != (volume ? 0x200000u : 0u) || (volume && !(decoded.flags & 0x800000)))
+            throw std::runtime_error("DDS resource dimensions differ from catalog");
+        const auto policy = entry.at("mips").get<std::string>();
+        std::uint32_t mip_count = 1;
+        if (policy == "full_chain" || policy == "full_chain_per_slice" || policy == "full_chain_vector_average")
+            for (auto axis = std::max({width, height, depth}); axis > 1; axis >>= 1) ++mip_count;
+        else if (policy != "none" && policy != "none_baseline") throw std::runtime_error("Unknown mip policy");
+        if (shape.mip_count != mip_count)
+            throw std::runtime_error("Incomplete DDS mip chain");
+        Maps(entry, slices, shape.height);
+    }
+    catch (const std::exception &error)
+    {
+        throw std::runtime_error("VFX texture " + path.filename().string() + ": " + error.what());
     }
 }
 }

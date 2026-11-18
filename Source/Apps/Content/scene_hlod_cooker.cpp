@@ -509,6 +509,9 @@ private:
                         auto &row = rows[index];
                         try
                         {
+                            if (error_checks == GeometryErrorCheckMode::Normal &&
+                                row.fine.size() == row.coarse.size())
+                                continue; // Simplify's fallback is an exact expanded-input copy.
                             row.measured = MeasureGeometryError(
                                 row.fine, row.coarse, {}, error_budget, error_checks);
                         }

@@ -2,7 +2,12 @@
 #define NOMINMAX
 #endif
 
-#include "content_cooker.hpp"
+#include "particle_effect_cooker.hpp"
+#include "content_json.hpp"
+#include "../AssetPipeline/action.hpp"
+
+#include <hs/core/cooked_format.hpp>
+#include <hs/core/cooked_particle_effects.hpp>
 
 #include <DirectXTex.h>
 #include <Windows.h>
@@ -32,8 +37,7 @@ T ParseEnum(std::string_view value, const std::array<std::pair<std::string_view,
     return found->second;
 }
 
-bool WriteCookedParticleEffects(const std::filesystem::path &path, const Json &document,
-                                std::vector<ParticleSpriteSource> &sprite_sources, std::string &error_message)
+void WriteCookedParticleEffects(const std::filesystem::path &path, const Json &document)
 {
     constexpr std::array<std::pair<std::string_view, hs::ParticleShape>, 5> shapes{
         {std::pair{std::string_view{"point"}, hs::ParticleShape::Point},
@@ -95,7 +99,6 @@ bool WriteCookedParticleEffects(const std::filesystem::path &path, const Json &d
     std::vector<hs::CookedParticleSprite> cooked_sprites;
     std::unordered_map<std::string, hs::ParticleSprite> sprite_indices;
     std::unordered_map<std::uint64_t, std::string> sprite_hashes;
-    sprite_sources.clear();
     const auto &sprites = RequireArray(document, "particles", "$", "sprites");
     if (sprites.size() > std::numeric_limits<hs::ParticleSprite>::max())
         ThrowValidationError("particles", "$/sprites", "too many sprites");
@@ -103,9 +106,8 @@ bool WriteCookedParticleEffects(const std::filesystem::path &path, const Json &d
     {
         const auto sprite_path = "$/sprites/" + std::to_string(index);
         RequireExactKeys(sprites[index], "particles", {"id", "file", "frames"});
-        ParticleSpriteSource sprite;
-        sprite.id = RequireString(sprites[index], "particles", sprite_path, "id");
-        sprite.file = RequireString(sprites[index], "particles", sprite_path, "file");
+        const auto id = RequireString(sprites[index], "particles", sprite_path, "id");
+        RequireString(sprites[index], "particles", sprite_path, "file");
         const auto &frames=RequireArray(sprites[index], "particles", sprite_path, "frames");
         if(frames.size()!=2) ThrowValidationError("particles", sprite_path, "invalid sprite frame dimensions");
         const auto dimension=[&](const Json &value) {
@@ -116,16 +118,15 @@ bool WriteCookedParticleEffects(const std::filesystem::path &path, const Json &d
             if(number<1 || number>255) ThrowValidationError("particles", sprite_path, "invalid sprite frame dimensions");
             return static_cast<std::uint8_t>(number);
         };
-        sprite.frame_columns=dimension(frames[0]);
-        sprite.frame_rows=dimension(frames[1]);
-        if (!sprite_indices.emplace(sprite.id, static_cast<hs::ParticleSprite>(index)).second)
+        const auto frame_columns = dimension(frames[0]);
+        const auto frame_rows = dimension(frames[1]);
+        if (!sprite_indices.emplace(id, static_cast<hs::ParticleSprite>(index)).second)
             ThrowValidationError("particles", sprite_path, "invalid or duplicate sprite");
-        const auto sprite_hash = hs::MakeAssetId("particle_sprite." + sprite.id).value;
-        if (!sprite_hashes.emplace(sprite_hash, sprite.id).second)
+        const auto sprite_hash = hs::MakeAssetId("particle_sprite." + id).value;
+        if (!sprite_hashes.emplace(sprite_hash, id).second)
             ThrowValidationError("particles", sprite_path, "sprite hash collision");
         cooked_sprites.push_back(
-            {sprite_hash, static_cast<hs::ParticleSprite>(index), sprite.frame_columns, sprite.frame_rows});
-        sprite_sources.push_back(std::move(sprite));
+            {sprite_hash, static_cast<hs::ParticleSprite>(index), frame_columns, frame_rows});
     }
     std::unordered_map<std::uint64_t, std::string> hashes;
     const auto &effects = RequireArray(document, "particles", "$", "effects");
@@ -158,8 +159,8 @@ bool WriteCookedParticleEffects(const std::filesystem::path &path, const Json &d
             if (sprite == sprite_indices.end())
                 ThrowValidationError("particles", base + "/sprite", "unknown sprite");
             definition.line_sprite = sprite->second;
-            definition.line_frame_columns = sprite_sources[sprite->second].frame_columns;
-            definition.line_frame_rows = sprite_sources[sprite->second].frame_rows;
+            definition.line_frame_columns = cooked_sprites[sprite->second].frame_columns;
+            definition.line_frame_rows = cooked_sprites[sprite->second].frame_rows;
             definition.line_uv_repeat =
                 static_cast<float>(RequireNumber(effects[effect_index], "particles", base, "uv_repeat"));
             definition.line_scroll_speed =
@@ -212,8 +213,8 @@ bool WriteCookedParticleEffects(const std::filesystem::path &path, const Json &d
                 if (sprite == sprite_indices.end())
                     ThrowValidationError("particles", emitter_path + "/sprite", "unknown sprite");
                 emitter.sprite = sprite->second;
-                emitter.frame_columns = sprite_sources[sprite->second].frame_columns;
-                emitter.frame_rows = sprite_sources[sprite->second].frame_rows;
+                emitter.frame_columns = cooked_sprites[sprite->second].frame_columns;
+                emitter.frame_rows = cooked_sprites[sprite->second].frame_rows;
                 emitter.shape =
                     ParseEnum(RequireString(source, "particles", emitter_path, "shape"), shapes, emitter_path);
                 emitter.velocity =
@@ -326,31 +327,32 @@ bool WriteCookedParticleEffects(const std::filesystem::path &path, const Json &d
     hs::CookedParticleEffectsHeader header;
     header.effect_count = static_cast<std::uint32_t>(definitions.size());
     header.emitter_count = static_cast<std::uint32_t>(emitters.size());
-    header.sprite_count = static_cast<std::uint32_t>(sprite_sources.size());
+    header.sprite_count = static_cast<std::uint32_t>(cooked_sprites.size());
     header.schema_hash = hs::kParticleEffectsSchemaHash;
     header.payload_hash = hs::Fnv1a64(payload);
     std::vector<std::byte> file(sizeof(header) + payload.size());
     std::memcpy(file.data(), &header, sizeof(header));
     std::memcpy(file.data() + sizeof(header), payload.data(), payload.size());
-    return AtomicWrite(path, file, error_message);
+    asset_pipeline::WriteBytes(path, file);
 }
 
-bool WriteVfxMaskArray(const std::filesystem::path &path, std::span<const ParticleSpriteSource> sprites,
-                       const std::filesystem::path &source_textures, std::string &error_message)
+bool WriteVfxMaskArray(const std::filesystem::path &path, std::span<const std::string> filenames,
+                       const std::map<std::string, std::string> &png_bytes, std::string &error_message)
 {
     DirectX::ScratchImage masks;
-    auto result = masks.Initialize2D(DXGI_FORMAT_R8_UNORM, 512, 512, sprites.size(), 1);
+    auto result = masks.Initialize2D(DXGI_FORMAT_R8_UNORM, 512, 512, filenames.size(), 1);
     if (FAILED(result))
     {
         error_message = "cannot allocate VFX mask array";
         return false;
     }
-    for (std::size_t slice = 0; slice < sprites.size(); ++slice)
+    for (std::size_t slice = 0; slice < filenames.size(); ++slice)
     {
         DirectX::TexMetadata metadata;
         DirectX::ScratchImage source;
-        const auto source_path = source_textures / sprites[slice].file;
-        result = DirectX::LoadFromWICFile(source_path.c_str(), DirectX::WIC_FLAGS_NONE, &metadata, source);
+        const auto &bytes = png_bytes.at(filenames[slice]);
+        result = DirectX::LoadFromWICMemory(reinterpret_cast<const std::uint8_t *>(bytes.data()), bytes.size(),
+                                            DirectX::WIC_FLAGS_NONE, &metadata, source);
         DirectX::ScratchImage rgba;
         if (SUCCEEDED(result))
             result = DirectX::Convert(source.GetImages(), source.GetImageCount(), source.GetMetadata(),
@@ -359,7 +361,7 @@ bool WriteVfxMaskArray(const std::filesystem::path &path, std::span<const Partic
         auto *output = masks.GetImage(0, slice, 0);
         if (FAILED(result) || !input || !output || metadata.width != 512 || metadata.height != 512)
         {
-            error_message = "invalid VFX mask: " + source_path.string();
+            error_message = "invalid VFX mask: " + filenames[slice];
             return false;
         }
         for (std::size_t row = 0; row < 512; ++row)
@@ -382,12 +384,6 @@ bool WriteVfxMaskArray(const std::filesystem::path &path, std::span<const Partic
         return false;
     }
     return true;
-}
-
-bool WriteVfxMaskArray(const std::filesystem::path &path, std::span<const ParticleSpriteSource> sprites,
-                       std::string &error_message)
-{
-    return WriteVfxMaskArray(path, sprites, paths::VfxTextures(), error_message);
 }
 
 } // namespace hs::content

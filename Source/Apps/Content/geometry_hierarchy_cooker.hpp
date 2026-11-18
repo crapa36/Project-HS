@@ -16,7 +16,7 @@ struct GeometryHierarchyCookOptions
     float reduction_ratio{0.5f};
     std::uint32_t max_page_triangles{4096};
     std::uint32_t max_page_meshlets{64};
-    GeometryErrorChecks error_checks;
+    GeometryErrorCheckMode error_checks{GeometryErrorCheckMode::Normal};
 };
 
 struct CookedGeometryHierarchy

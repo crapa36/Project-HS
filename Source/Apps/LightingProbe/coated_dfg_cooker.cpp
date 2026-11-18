@@ -1,4 +1,6 @@
 #include "coated_dfg_cooker.hpp"
+#include "../AssetPipeline/action.hpp"
+#include "../Content/bake_sampling.hpp"
 
 #include <DirectXPackedVector.h>
 
@@ -9,7 +11,7 @@
 #include <stdexcept>
 #include <vector>
 
-namespace hs::material_content
+namespace hs::lighting_probe
 {
 namespace
 {
@@ -21,7 +23,6 @@ namespace
 // ZW use the same integrand multiplied by full coat Fresnel at NoL.
 constexpr std::uint32_t kExtent = 256;
 constexpr std::uint32_t kSamples = 4096;
-constexpr double kInvU32 = 1.0 / 4294967296.0;
 constexpr double kPi = 3.141592653589793238462643383279502884;
 
 struct Vec3
@@ -31,7 +32,7 @@ struct Vec3
 
 struct Sample
 {
-    double radius{}, cos_phi{}, sin_phi{};
+    double disk_x{}, disk_y{}, upper_y{};
 };
 
 struct KahanSum
@@ -59,14 +60,10 @@ Vec3 Normalize(Vec3 value)
     return {value.x/length, value.y/length, value.z/length};
 }
 
-std::uint32_t ReverseBits(std::uint32_t bits) noexcept
+double FifthPower(double value) noexcept
 {
-    bits = (bits << 16u) | (bits >> 16u);
-    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xaaaaaaaau) >> 1u);
-    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xccccccccu) >> 2u);
-    bits = ((bits & 0x0f0f0f0fu) << 4u) | ((bits & 0xf0f0f0f0u) >> 4u);
-    bits = ((bits & 0x00ff00ffu) << 8u) | ((bits & 0xff00ff00u) >> 8u);
-    return bits;
+    const double square = value * value;
+    return square * square * value;
 }
 
 std::array<Sample, kSamples> MakeSamples()
@@ -75,8 +72,10 @@ std::array<Sample, kSamples> MakeSamples()
     for (std::uint32_t i = 0; i < kSamples; ++i)
     {
         const double u = (static_cast<double>(i) + 0.5) / kSamples;
-        const double phi = 2.0 * kPi * (ReverseBits(i) * kInvU32);
-        samples[i] = {std::sqrt(u), std::cos(phi), std::sin(phi)};
+        const double phi = 2.0 * kPi * hs::content::RadicalInverse(i);
+        const double radius = std::sqrt(u);
+        const double x = radius * std::cos(phi);
+        samples[i] = {x, radius * std::sin(phi), std::sqrt(std::max(0.0, 1.0 - x*x))};
     }
     return samples;
 }
@@ -117,10 +116,8 @@ std::array<double, 4> IntegrateTexel(double no_v, double roughness,
 
     for (const auto &sample : samples)
     {
-        const double disk_x = sample.radius * sample.cos_phi;
-        double disk_y = sample.radius * sample.sin_phi;
-        disk_y = (1.0 - interpolation) * std::sqrt(std::max(0.0, 1.0 - disk_x * disk_x)) +
-            interpolation * disk_y;
+        const double disk_x = sample.disk_x;
+        const double disk_y = (1.0 - interpolation) * sample.upper_y + interpolation * sample.disk_y;
         const double z = std::sqrt(std::max(0.0, 1.0 - disk_x*disk_x - disk_y*disk_y));
         const Vec3 stretched_normal{
             disk_x*tangent_one.x + disk_y*tangent_two.x + z*stretched_view.x,
@@ -140,8 +137,8 @@ std::array<double, 4> IntegrateTexel(double no_v, double roughness,
         const double light_denominator = no_l + std::sqrt(alpha_squared +
             (1.0 - alpha_squared) * no_l * no_l);
         const double weight = 2.0 * no_l / light_denominator;
-        const double q_view = std::pow(1.0 - view_half, 5.0);
-        const double q_light = std::pow(1.0 - no_l, 5.0);
+        const double q_view = FifthPower(1.0 - view_half);
+        const double q_light = FifthPower(1.0 - no_l);
         const double coat_fresnel = 0.04 + 0.96 * q_light;
         accumulated[0].Add(weight * (1.0 - q_view));
         accumulated[1].Add(weight * q_view);
@@ -153,8 +150,6 @@ std::array<double, 4> IntegrateTexel(double no_v, double roughness,
     return {accumulated[0].value * inverse_samples, accumulated[1].value * inverse_samples,
             accumulated[2].value * inverse_samples, accumulated[3].value * inverse_samples};
 }
-} // namespace
-
 std::vector<std::byte> CookCoatedDfgDds()
 {
     constexpr std::size_t header_size = 148;
@@ -190,4 +185,23 @@ std::vector<std::byte> CookCoatedDfgDds()
         }
     return bytes;
 }
-} // namespace hs::material_content
+} // namespace
+
+void ProduceCoatedDfg(const std::filesystem::path &build_root)
+{
+    namespace ap = hs::asset_pipeline;
+    constexpr auto id = "render/lighting/coated_ggx_dfg.dds";
+    constexpr auto filename = "coated_ggx_dfg.dds";
+    const ap::ActionSpec spec{.action_id = "render.lighting.coated-dfg",
+        .recipe_id = "project-hs.render.coated-dfg", .recipe_version = 1,
+        .namespace_path = "render/lighting/coated-dfg"};
+    const auto stage = ap::CreateStage(build_root / "Actions" / spec.namespace_path);
+    try
+    {
+        ap::WriteBytes(stage / filename, CookCoatedDfgDds());
+        ap::Publish(build_root, spec, stage, {ap::HashProduct(id, filename, stage / filename)});
+    }
+    catch (...) { ap::RemoveStageAfterFailure(stage); throw; }
+    ap::RemoveStage(stage);
+}
+} // namespace hs::lighting_probe

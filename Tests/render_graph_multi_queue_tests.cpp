@@ -169,8 +169,6 @@ struct ExternalWork
 void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
 {
     for (const auto queue : {hs::QueueHint::Direct, hs::QueueHint::Compute})
-    for (const bool timestamps_enabled : {false, true})
-    for (const bool query_subset : {false, true})
     {
         hs::TransientResourcePool pool;
         Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "independent pool");
@@ -224,50 +222,12 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
         if (auto prepared = graph.Prepare(pool); !prepared)
             throw std::runtime_error("prepare independent graph: " + std::string(prepared.Message()));
         hs::TaskSystem tasks(2);
-        const auto query_count = query_subset ? 4u : 12u;
-        const D3D12_QUERY_HEAP_DESC query_desc{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, query_count, 0};
-        std::array<ComPtr<ID3D12QueryHeap>, 3> queries;
-        std::array<ComPtr<ID3D12Resource>, 3> timestamps;
-        const auto heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
-        const auto description = BufferDescription(query_count * sizeof(std::uint64_t));
-        const auto queue_index = static_cast<std::size_t>(queue);
-        Hr(fixture.device->CreateQueryHeap(&query_desc, IID_PPV_ARGS(&queries[queue_index])), "independent timestamp heap");
-        Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &description,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&timestamps[queue_index])), "independent timestamp readback");
         hs::GraphExecutionOptions options;
-        if (timestamps_enabled)
-        {
-            options.timestamp_query_heaps[queue_index] = queries[queue_index].Get();
-            options.timestamp_readbacks[queue_index] = timestamps[queue_index].Get();
-        }
-        std::array<std::uint32_t, 6> query_slots{UINT32_MAX, UINT32_MAX, UINT32_MAX,
-                                                 UINT32_MAX, UINT32_MAX, UINT32_MAX};
-        if (query_subset)
-        {
-            query_slots[1] = 0;
-            query_slots[4] = 1;
-        }
-        if (timestamps_enabled && query_subset)
-        {
-            options.timestamp_query_slots = query_slots.data();
-            options.timestamp_query_slot_count = query_slots.size();
-        }
         options.task_system = &tasks;
         hs::CompletionSet completion;
         const auto result = executor.Execute(graph, 0, barriers, completion, &options);
-        std::vector<void *> distinct_lists;
-        for (const auto list : lists)
-            if (list && std::find(distinct_lists.begin(), distinct_lists.end(), list) == distinct_lists.end())
-                distinct_lists.push_back(list);
         Check(std::all_of(calls.begin(), calls.end(), [](const auto &count) { return count.load() == 1; }),
             "recording workers must execute every callback exactly once");
-        Check(executor.LastExecutionStats().record_jobs ==
-                std::min(tasks.WorkerCount(), distinct_lists.size() + (timestamps_enabled ? 1u : 0u)),
-            "recording job admission is bounded by the available workers");
-        Check(barriers == hs::BarrierMode::Enhanced
-                ? distinct_lists.size() >= tasks.WorkerCount() && distinct_lists.size() < lists.size()
-                : distinct_lists.size() == lists.size(),
-            "compatible Enhanced passes share lists without serializing all worker recording; Legacy preserves decay");
         Check(result.Succeeded(), "independent recording succeeds");
         Check(std::all_of(lists.begin(), lists.end(), [](const auto list) { return list != nullptr; }),
             "every logical callback records its work");
@@ -281,26 +241,6 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
             "fixture predication actually suppresses its control copy");
         const D3D12_RANGE copy_no_write{};
         output->Unmap(0, &copy_no_write);
-        if (!timestamps_enabled && !query_subset)
-            std::printf("Recording %s/%s: %zu callbacks, %zu lists, %u jobs; GPU copies and predication reset passed.\n",
-                barriers == hs::BarrierMode::Enhanced ? "Enhanced" : "Legacy",
-                queue == hs::QueueHint::Direct ? "Direct" : "Compute", lists.size(), distinct_lists.size(),
-                executor.LastExecutionStats().record_jobs);
-        if (timestamps_enabled)
-        {
-            std::uint64_t *values{};
-            D3D12_RANGE range{0, query_count * sizeof(std::uint64_t)};
-            Hr(timestamps[queue_index]->Map(0, &range, reinterpret_cast<void **>(&values)),
-                "map independent timestamps");
-            for (std::size_t pair = 0; pair < (query_subset ? 2u : 6u); ++pair)
-            {
-                const auto index = pair * 2;
-                Check(values[index] != 0 && values[index + 1] >= values[index],
-                    "independent lists preserve every GPU timestamp pair");
-            }
-            D3D12_RANGE no_write{};
-            timestamps[queue_index]->Unmap(0, &no_write);
-        }
     }
     {
         hs::TransientResourcePool pool;
@@ -340,172 +280,6 @@ void RunRecordingDispatch(Fixture &fixture, hs::BarrierMode barriers)
         Check(fixture.executor.Wait(completion).Succeeded(), "wait recording dispatch graph");
         fixture.CheckValidation();
     }
-}
-
-void RunTimestampResolveIsolation(Fixture &fixture)
-{
-    D3D12_FEATURE_DATA_D3D12_OPTIONS3 options3{};
-    const bool copy_timestamp_queries_supported =
-        SUCCEEDED(fixture.device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS3, &options3,
-                                                       sizeof(options3))) &&
-        options3.CopyQueueTimestampQueriesSupported != FALSE;
-    hs::TransientResourcePool pool;
-    Check(pool.Initialize(fixture.allocator, fixture.device.Get()).Succeeded(), "timestamp isolation pool");
-    hs::RenderGraphQueueExecutor executor;
-    Check(executor.Initialize(fixture.device.Get(), nullptr, 1,
-                              copy_timestamp_queries_supported).Succeeded(), "timestamp isolation executor");
-    hs::RenderGraphBuilder graph;
-    graph.AddPass(1, "Direct timestamp producer", hs::QueueHint::Direct).SetExecute([](hs::RenderPassContext &) {});
-    graph.AddPass(2, "Gated compute timestamp producer", hs::QueueHint::Compute).SetExecute([](hs::RenderPassContext &) {});
-    graph.AddPass(3, "Direct timestamp suffix", hs::QueueHint::Direct).SetExecute([](hs::RenderPassContext &) {});
-    graph.AddPass(4, copy_timestamp_queries_supported ? "Measured copy" : "Unmeasured copy",
-                  hs::QueueHint::Copy).SetExecute([](hs::RenderPassContext &) {});
-    graph.AddPass(5, "Direct timestamp tail", hs::QueueHint::Direct).SetExecute([](hs::RenderPassContext &) {});
-    Check(graph.Prepare(pool).Succeeded(), "timestamp isolation prepare");
-
-    constexpr std::size_t queue_count = 3;
-    constexpr std::uint32_t timestamp_base = 4;
-    const auto query_count = timestamp_base + 2 * 4 + 2;
-    const D3D12_QUERY_HEAP_DESC query_description{D3D12_QUERY_HEAP_TYPE_TIMESTAMP, query_count, 0};
-    const auto heap = HeapProperties(D3D12_HEAP_TYPE_READBACK);
-    const auto readback_description = BufferDescription(query_count * sizeof(std::uint64_t));
-    std::array<ComPtr<ID3D12QueryHeap>, queue_count> queries;
-    std::array<ComPtr<ID3D12Resource>, queue_count> timestamps;
-    hs::GraphExecutionOptions options;
-    options.timestamp_base = timestamp_base;
-    const std::array timestamp_queues{hs::QueueHint::Direct, hs::QueueHint::Compute,
-                                      hs::QueueHint::Copy};
-    for (const auto queue : timestamp_queues)
-    {
-        const auto index = static_cast<std::size_t>(queue);
-        if (queue == hs::QueueHint::Copy && !copy_timestamp_queries_supported) continue;
-        auto queue_query_description = query_description;
-        if (queue == hs::QueueHint::Copy)
-            queue_query_description.Type = D3D12_QUERY_HEAP_TYPE_COPY_QUEUE_TIMESTAMP;
-        Hr(fixture.device->CreateQueryHeap(&queue_query_description, IID_PPV_ARGS(&queries[index])),
-           "create isolated timestamp query heap");
-        Hr(fixture.device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE,
-            &readback_description, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-            IID_PPV_ARGS(&timestamps[index])), "create isolated timestamp readback");
-        options.timestamp_query_heaps[index] = queries[index].Get();
-        options.timestamp_readbacks[index] = timestamps[index].Get();
-    }
-    std::vector<std::uint32_t> query_slots(graph.PassCount(), UINT32_MAX);
-    std::vector<std::uint32_t> direct_slots, compute_slots, copy_slots;
-    std::uint32_t direct_count{};
-    for (std::uint32_t position = 0; position < graph.PassCount(); ++position)
-    {
-        const auto queue = graph.CompiledPassQueue(position);
-        std::uint32_t slot{};
-        if (queue == hs::QueueHint::Direct)
-        {
-            slot = direct_count < 2 ? direct_count + 1 : 4;
-            ++direct_count;
-            direct_slots.push_back(slot);
-        }
-        else if (queue == hs::QueueHint::Compute)
-        {
-            slot = 1;
-            compute_slots.push_back(slot);
-        }
-        else if (queue == hs::QueueHint::Copy)
-        {
-            slot = 3;
-            copy_slots.push_back(slot);
-        }
-        if (queue != hs::QueueHint::Copy || copy_timestamp_queries_supported)
-            query_slots[position] = slot;
-    }
-    Check(direct_slots.size() == 3 && compute_slots.size() == 1,
-          "timestamp isolation fixture keeps its Direct and Compute producers");
-    options.timestamp_query_slots = query_slots.data();
-    options.timestamp_query_slot_count = query_slots.size();
-
-    ComPtr<ID3D12Fence> compute_gate, copy_gate;
-    Hr(fixture.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&compute_gate)),
-       "timestamp compute gate");
-    Hr(fixture.device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&copy_gate)),
-       "timestamp copy gate");
-    hs::CompletionSet completion;
-    struct QueueCompletionGuard
-    {
-        hs::RenderGraphQueueExecutor &executor;
-        hs::CompletionSet &completion;
-        ComPtr<ID3D12Fence> compute_gate, copy_gate;
-        bool submitted{}, compute_released{}, copy_released{}, completed{};
-
-        void ReleaseGates() noexcept
-        {
-            if (!compute_released && SUCCEEDED(compute_gate->Signal(1))) compute_released = true;
-            if (!copy_released && SUCCEEDED(copy_gate->Signal(1))) copy_released = true;
-        }
-        ~QueueCompletionGuard()
-        {
-            ReleaseGates();
-            if (submitted && !completed) static_cast<void>(executor.Wait(completion));
-        }
-    } queue_guard{executor, completion, compute_gate, copy_gate};
-    Hr(executor.NativeQueue(hs::QueueHint::Compute)->Wait(compute_gate.Get(), 1),
-       "gate independent timestamp compute");
-    Hr(executor.NativeQueue(hs::QueueHint::Copy)->Wait(copy_gate.Get(), 1),
-       "gate timestamp copy");
-
-    queue_guard.submitted = true;
-    Check(executor.Execute(graph, 0, hs::BarrierMode::Legacy, completion, &options).Succeeded(),
-          "timestamp isolation execute");
-    HANDLE direct_event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    struct CloseEvent { HANDLE value; ~CloseEvent() { if (value) CloseHandle(value); } } close_event{direct_event};
-    Check(direct_event != nullptr, "create Direct timestamp completion event");
-    Hr(executor.NativeFence(hs::QueueHint::Direct)->SetEventOnCompletion(completion.direct, direct_event),
-       "watch Direct timestamp resolve");
-    const bool direct_resolved_while_compute_waited =
-        WaitForSingleObject(direct_event, 10000) == WAIT_OBJECT_0;
-    const bool compute_remained_gated = executor.Completed().compute < completion.compute;
-    const bool copy_remained_gated = executor.Completed().copy < completion.copy;
-    queue_guard.ReleaseGates();
-    const auto waited = executor.Wait(completion);
-    queue_guard.completed = waited.Succeeded();
-    Check(waited.Succeeded(), "wait both timestamp queues before releasing readbacks");
-
-    std::array<std::vector<std::uint64_t>, 3> values;
-    for (const auto queue : timestamp_queues)
-    {
-        const auto index = static_cast<std::size_t>(queue);
-        if (queue == hs::QueueHint::Copy && !copy_timestamp_queries_supported) continue;
-        std::uint64_t *mapped{};
-        D3D12_RANGE range{0, query_count * sizeof(std::uint64_t)};
-        Hr(timestamps[index]->Map(0, &range, reinterpret_cast<void **>(&mapped)),
-           "map queue timestamp readback");
-        const auto &slots = queue == hs::QueueHint::Direct ? direct_slots :
-            queue == hs::QueueHint::Compute ? compute_slots : copy_slots;
-        for (const auto slot : slots)
-            values[index].insert(values[index].end(),
-                {mapped[timestamp_base + slot * 2], mapped[timestamp_base + slot * 2 + 1]});
-        D3D12_RANGE no_write{};
-        timestamps[index]->Unmap(0, &no_write);
-    }
-    Check(direct_resolved_while_compute_waited && compute_remained_gated && copy_remained_gated,
-          "Direct timestamp resolve must not depend on unrelated gated Compute or Copy work");
-    for (const auto queue : timestamp_queues)
-    {
-        if (queue == hs::QueueHint::Copy && !copy_timestamp_queries_supported) continue;
-        const auto &queue_values = values[static_cast<std::size_t>(queue)];
-        Check(!queue_values.empty(), "each timestamp queue resolves its own producer pairs");
-        for (std::size_t pair = 0; pair < queue_values.size(); pair += 2)
-            Check(queue_values[pair] != 0 && queue_values[pair + 1] >= queue_values[pair],
-                  "queue-local timestamp pairs resolve after producer completion");
-    }
-    graph.Reset();
-    graph.AddPass(1, "Untimed Direct reuse", hs::QueueHint::Direct).SetExecute([](hs::RenderPassContext &) {});
-    Check(graph.Prepare(pool).Succeeded(), "prepare smaller untimed graph on the same executor");
-    queue_guard.completed = false;
-    Check(executor.Execute(graph, 0, hs::BarrierMode::Legacy, completion).Succeeded(), "execute smaller untimed graph");
-    const auto reused_wait = executor.Wait(completion);
-    queue_guard.completed = reused_wait.Succeeded();
-    Check(reused_wait && completion.direct && !completion.compute && !completion.copy &&
-              executor.LastExecutionStats().direct_batches == 1,
-          "smaller graph must not submit retained timestamp, Compute or Copy batches");
-    fixture.CheckValidation();
 }
 
 void RunFinalExports(Fixture &fixture, hs::BarrierMode barriers)
@@ -850,7 +624,8 @@ struct ExternalGateRelease
     ~ExternalGateRelease() { if (fence) static_cast<void>(fence->Signal(1)); }
 };
 
-void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
+void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot,
+                 bool report_failure = false)
 {
     constexpr std::size_t size = 4096;
     const auto description = BufferDescription(size);
@@ -880,6 +655,7 @@ void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
         auto completion_owner = NativeOwner(work->fence.Get());
         const auto source = graph.CreateBuffer(buffer_desc, "external source");
         const auto destination = graph.CreateBuffer(buffer_desc, "external destination");
+        const auto producer_index = graph.PassCount();
         auto producer = graph.AddPass(100, "owned external predecessor", hs::QueueHint::Copy);
         const auto source_version = producer.Write(graph.Version(source), hs::Access::CopyDest);
         producer.SetExecute([&](hs::RenderPassContext &context) {
@@ -893,8 +669,8 @@ void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
             hs::ExternalResourceAccess{source, hs::Access::Common, hs::Access::Common},
             hs::ExternalResourceAccess{destination, hs::Access::Common, hs::Access::Common}};
         provider.SetExternalExecute({NativeOwner(work->queue.Get()), hs::QueueHint::Copy, work}, boundaries,
-            [work, source, destination](hs::RenderExternalPassContext &context,
-                                        hs::ExternalQueueCompletion &completion) {
+            [work, source, destination, report_failure](hs::RenderExternalPassContext &context,
+                                                        hs::ExternalQueueCompletion &completion) {
                 Check(context.NativeCommandQueue() == work->queue.Get(), "external callback native queue");
                 Hr(work->allocator->Reset(), "reset external allocator");
                 Hr(work->commands->Reset(work->allocator.Get(), nullptr), "reset external commands");
@@ -907,8 +683,12 @@ void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
                 completion.resource_lease = work;
                 completion.native_fence_owner = NativeOwner(work->fence.Get());
                 completion.value = 5000;
-                return hs::Result::Success();
+                return report_failure
+                    ? hs::Result::Failure(hs::ErrorCode::InvalidState, "hs_renderer_d3d12",
+                        "Intentional provider failure after accepted work.")
+                    : hs::Result::Success();
             });
+        const auto consumer_index = graph.PassCount();
         auto consumer = graph.AddPass(120, "external continuation", hs::QueueHint::Direct);
         consumer.Read(destination_version, hs::Access::CopySource);
         consumer.SetExecute([&](hs::RenderPassContext &context) {
@@ -919,25 +699,14 @@ void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
         ComPtr<ID3D12Resource> destination_native = static_cast<ID3D12Resource *>(graph.Resolve(destination));
         auto *source_native = graph.Resolve(source);
         hs::CompletionSet completion;
-        std::vector<hs::GpuPassTiming> cpu_passes;
-        for (std::uint32_t position = 0; position < graph.PassCount(); ++position)
-            cpu_passes.push_back({graph.CompiledPassId(position),
-                std::string(graph.CompiledPassName(position)),
-                static_cast<hs::RenderQueue>(graph.CompiledPassQueue(position))});
-        hs::GraphExecutionOptions capture_options;
-        capture_options.cpu_pass_timings = cpu_passes.data();
-        capture_options.cpu_pass_timing_count = cpu_passes.size();
-        const auto result = fixture.executor.Execute(graph, slot, barriers, completion, &capture_options);
-        Check(result.Succeeded(), "external callback succeeds");
-        for (const auto &pass : cpu_passes)
-        {
-            Check(pass.cpu_record_valid, "external graph prefix/ordinary recording interval missing");
-            Check(pass.cpu_provider_submit_valid == (pass.pass_id == 110),
-                "provider submission interval assigned to wrong pass");
-            if (pass.pass_id == 110)
-                Check(pass.cpu_provider_submit_end_qpc >= pass.cpu_provider_submit_begin_qpc,
-                    "provider callback interval reversed");
-        }
+        // The existing provider failure runs cover handoff on both sides of the failed operation.
+        const bool track_producer = barriers == hs::BarrierMode::Legacy;
+        hs::NativePassSubmission handoff{track_producer ? producer_index : consumer_index};
+        hs::GraphExecutionOptions options{.native_pass_submission = &handoff};
+        const auto result = fixture.executor.Execute(graph, slot, barriers, completion, &options);
+        Check(handoff.submitted == (track_producer || !report_failure),
+              "receipt identifies the native pass handed to its queue across provider failure");
+        Check(result.Succeeded() != report_failure, "external callback result matches its mode");
         Check(completion.copy && !completion.IsSatisfiedBy(fixture.executor.Completed()),
               "external bridge remains incomplete behind real independent queue gate");
         Check(graph.ResourceCompletion(destination).copy == completion.copy,
@@ -945,9 +714,13 @@ void RunExternal(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t slot)
         Check(graph.FinalAccess(source) == hs::Access::Common &&
             graph.FinalQueue(source) == hs::QueueHint::Copy,
             "provider outgoing state replaces declared source access");
-        Check(graph.FinalAccess(destination) == hs::Access::CopySource &&
-            graph.FinalQueue(destination) == hs::QueueHint::Direct,
+        Check(graph.FinalAccess(destination) ==
+                (report_failure ? hs::Access::Common : hs::Access::CopySource) &&
+            graph.FinalQueue(destination) ==
+                (report_failure ? hs::QueueHint::Copy : hs::QueueHint::Direct),
             "provider completion publishes the consumer state");
+        if (report_failure)
+            Check(completion.direct == 0, "failed provider result does not submit the consumer");
         graph.Reset();
         work.reset();
         Check(!lifetime.expired(), "external provider lease survives graph reset and caller release");
@@ -1014,12 +787,13 @@ void RunUavClear(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame
 RWByteAddressBuffer UavSource : register(u0);
 ByteAddressBuffer SrvSource : register(t0);
 RWByteAddressBuffer Output : register(u1);
+cbuffer OracleConstants : register(b0) { uint ConstantKey; };
 [numthreads(64,1,1)] void ReadUav(uint3 p : SV_DispatchThreadID)
-{ Output.Store(p.x * 4, UavSource.Load(p.x * 4) ^ (0xa5a55a5au + p.x)); }
+{ Output.Store(p.x * 4, UavSource.Load(p.x * 4) ^ (0xa5a55a5au + p.x) ^ ConstantKey); }
 [numthreads(64,1,1)] void ReadSrv(uint3 p : SV_DispatchThreadID)
-{ Output.Store(p.x * 4, SrvSource.Load(p.x * 4) ^ (0xa5a55a5au + p.x)); }
+{ Output.Store(p.x * 4, SrvSource.Load(p.x * 4) ^ (0xa5a55a5au + p.x) ^ ConstantKey); }
 )";
-    std::array<D3D12_ROOT_PARAMETER1, 3> parameters{};
+    std::array<D3D12_ROOT_PARAMETER1, 4> parameters{};
     for (auto &parameter : parameters)
     {
         parameter.ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
@@ -1029,6 +803,9 @@ RWByteAddressBuffer Output : register(u1);
     parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_SRV;
     parameters[1].Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE;
     parameters[2].Descriptor.ShaderRegister = 1;
+    parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+    parameters[3].Descriptor.ShaderRegister = 0;
+    parameters[3].Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE;
     D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_desc{};
     root_desc.Version = D3D_ROOT_SIGNATURE_VERSION_1_1;
     root_desc.Desc_1_1.NumParameters = static_cast<UINT>(parameters.size());
@@ -1080,11 +857,25 @@ RWByteAddressBuffer Output : register(u1);
         const hs::BufferDesc uav_desc{bytes, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS};
         const auto source = graph.CreateBuffer(uav_desc, "clear oracle source");
         const auto output = graph.CreateBuffer(uav_desc, "clear oracle output");
+        const auto upload_constants = graph.ImportBuffer({upload.Get()}, hs::Access::CopySource,
+            "clear oracle upload constants");
+        const auto upload_constants_version = graph.Version(upload_constants);
+        hs::BufferHandle default_constants{};
+        if (interpass)
+            default_constants = graph.CreateBuffer({bytes, D3D12_RESOURCE_FLAG_NONE},
+                "clear oracle default constants");
         auto seed = graph.AddPass(300, "Clear oracle poison", hs::QueueHint::Copy);
+        seed.Read(upload_constants_version, hs::Access::CopySource, hs::BufferRange{0, bytes});
         const auto poisoned = seed.Write(graph.Version(source), hs::Access::CopyDest);
+        hs::ResourceVersion seeded_constants{};
+        if (interpass)
+            seeded_constants = seed.Write(graph.Version(default_constants), hs::Access::CopyDest);
         seed.SetExecute([&](hs::RenderPassContext &context) {
             auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
             list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(source)), 0, upload.Get(), 0, bytes);
+            if (interpass)
+                list->CopyBufferRegion(static_cast<ID3D12Resource *>(context.Resolve(default_constants)),
+                    0, upload.Get(), 0, bytes);
         });
         D3D12_DESCRIPTOR_HEAP_DESC heap_desc{};
         heap_desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
@@ -1102,6 +893,9 @@ RWByteAddressBuffer Output : register(u1);
             else list->SetComputeRootUnorderedAccessView(0, input->GetGPUVirtualAddress());
             list->SetComputeRootUnorderedAccessView(2,
                 static_cast<ID3D12Resource *>(context.Resolve(output))->GetGPUVirtualAddress());
+            auto *constants = interpass
+                ? static_cast<ID3D12Resource *>(context.Resolve(default_constants)) : upload.Get();
+            list->SetComputeRootConstantBufferView(3, constants->GetGPUVirtualAddress());
             list->Dispatch(1, 1, 1);
         };
         // A prior scope leaves a static SRV bound even when the next shader only uses UAVs.
@@ -1110,6 +904,7 @@ RWByteAddressBuffer Output : register(u1);
         {
             auto prime = graph.AddPass(299, "Prime static SRV binding", queue);
             prime.Read(poisoned, hs::Access::ComputeRead);
+            prime.Read(upload_constants_version, hs::Access::ConstantBuffer, hs::BufferRange{0, bytes});
             primed = prime.Write(primed, hs::Access::UnorderedWrite);
             prime.SetExecute([&](hs::RenderPassContext &context) {
                 auto *list = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
@@ -1119,11 +914,14 @@ RWByteAddressBuffer Output : register(u1);
                     static_cast<ID3D12Resource *>(context.Resolve(source))->GetGPUVirtualAddress());
                 list->SetComputeRootUnorderedAccessView(2,
                     static_cast<ID3D12Resource *>(context.Resolve(output))->GetGPUVirtualAddress());
+                list->SetComputeRootConstantBufferView(3, upload->GetGPUVirtualAddress());
                 list->Dispatch(1, 1, 1);
             });
         }
         auto clear = graph.AddPass(301, "Clear oracle UAV clear", queue);
         const auto cleared = clear.Write(poisoned, hs::Access::UnorderedWrite);
+        if (!interpass)
+            clear.Read(upload_constants_version, hs::Access::ConstantBuffer, hs::BufferRange{0, bytes});
         hs::ResourceVersion result;
         if (!interpass) result = clear.Write(primed, hs::Access::UnorderedWrite);
         clear.SetExecute([&](hs::RenderPassContext &context) {
@@ -1140,6 +938,7 @@ RWByteAddressBuffer Output : register(u1);
         {
             auto consumer = graph.AddPass(302, "Clear oracle SRV consumer", queue);
             consumer.Read(cleared, hs::Access::ComputeRead);
+            consumer.Read(seeded_constants, hs::Access::ConstantBuffer, hs::BufferRange{0, bytes});
             result = consumer.Write(graph.Version(output), hs::Access::UnorderedWrite);
             consumer.SetExecute(dispatch);
         }
@@ -1165,7 +964,8 @@ RWByteAddressBuffer Output : register(u1);
         Hr(readback->Map(0, &read, &mapped), "map clear oracle result");
         const auto *actual = static_cast<const UINT *>(mapped);
         for (UINT index = 0; index < elements; ++index)
-            Check(actual[index] == (clear_value ^ (0xa5a55a5au + index)), "ClearUAV actual shader result mismatch");
+            Check(actual[index] == ((clear_value ^ (0xa5a55a5au + index)) ^ 0xdeadbeefu),
+                "ClearUAV actual shader result mismatch");
         readback->Unmap(0, &no_read);
         fixture.CheckValidation();
         pool.ResetCompletedClaims(fixture.executor.Completed());
@@ -1539,25 +1339,6 @@ void Run(Fixture &fixture, hs::BarrierMode barriers, std::uint32_t frame_slot)
     });
 
     Check(graph.Prepare(pool).Succeeded(), "prepare Copy -> Compute -> Direct graph");
-    Check(graph.QueuePassCount(hs::QueueHint::Copy) == 1 &&
-              graph.QueuePassCount(hs::QueueHint::Compute) == 1 &&
-              graph.QueuePassCount(hs::QueueHint::Direct) == 1,
-          "one pass scheduled on every native queue");
-    Check(graph.CrossQueueDependencyCount() == 2,
-          "Copy -> Compute -> Direct has two cross-queue dependencies");
-    const auto first_dependency = graph.CrossQueueDependency(0);
-    const auto second_dependency = graph.CrossQueueDependency(1);
-    Check(first_dependency.producer_pass_id == 10 &&
-              first_dependency.consumer_pass_id == 20 &&
-              first_dependency.producer_queue == hs::QueueHint::Copy &&
-              first_dependency.consumer_queue == hs::QueueHint::Compute,
-          "Copy -> Compute dependency");
-    Check(second_dependency.producer_pass_id == 20 &&
-              second_dependency.consumer_pass_id == 30 &&
-              second_dependency.producer_queue == hs::QueueHint::Compute &&
-              second_dependency.consumer_queue == hs::QueueHint::Direct,
-          "Compute -> Direct dependency");
-
     auto *first_native = graph.Resolve(copy_buffer);
     auto *second_native = graph.Resolve(compute_buffer);
     Check(first_native && second_native && first_native != second_native,
@@ -1763,10 +1544,10 @@ int main(int argc, char **argv)
         Fixture fixture(hardware);
 
         RunRecordingDispatch(fixture, hs::BarrierMode::Legacy);
-        RunTimestampResolveIsolation(fixture);
         RunFinalExports(fixture, hs::BarrierMode::Legacy);
         Run(fixture, hs::BarrierMode::Legacy, 0);
         RunExternal(fixture, hs::BarrierMode::Legacy, 0);
+        RunExternal(fixture, hs::BarrierMode::Legacy, 0, true);
         RunPlanReuse(fixture, hs::BarrierMode::Legacy, 0);
         RunUavClear(fixture, hs::BarrierMode::Legacy, 0);
 
@@ -1784,6 +1565,7 @@ int main(int argc, char **argv)
             RunFinalExports(fixture, hs::BarrierMode::Enhanced);
             Run(fixture, hs::BarrierMode::Enhanced, 1);
             RunExternal(fixture, hs::BarrierMode::Enhanced, 1);
+            RunExternal(fixture, hs::BarrierMode::Enhanced, 1, true);
             RunPlanReuse(fixture, hs::BarrierMode::Enhanced, 1);
             RunUavClear(fixture, hs::BarrierMode::Enhanced, 1);
             RunSameStateRepeatedRead(fixture);

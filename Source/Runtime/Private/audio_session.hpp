@@ -7,73 +7,6 @@
 
 namespace hs::runtime_detail
 {
-struct AudioDeliveryStats
-{
-    std::uint64_t delivered{}, discarded_old_session{}, tick_boundaries{};
-    std::uint64_t event_age_ticks{}, maximum_event_age_ticks{}, event_age_samples{};
-};
-
-// Main owns the one bounded batch. Look ahead only for session identity, then
-// replay the surviving session's boundaries/events in original producer FIFO.
-class AudioDelivery
-{
-  public:
-    explicit AudioDelivery(DiagnosticClock clock = nullptr) : clock_(clock) {}
-    template<class Consume, class Observe>
-    void Drain(BoundedSpscQueue<QueuedAudioEvent, 1024> &queue, Consume &&consume, Observe &&observe)
-    {
-        std::size_t count{};
-        auto newest = session_id_;
-        bool saw_boundary = initialized_;
-        while (count < batch_.size() && queue.TryPop(batch_[count]))
-        {
-            batch_[count].dequeued_qpc = clock_ ? clock_() : 0;
-            const auto &packet = batch_[count++];
-            observe(packet);
-            if (packet.kind == QueuedAudioEvent::Kind::Tick)
-            { newest = packet.tick_info.session_id; saw_boundary = true; }
-        }
-        if (!saw_boundary)
-        {
-            for (std::size_t i = 0; i < count; ++i) ++stats_.discarded_old_session;
-            return;
-        }
-        session_id_ = newest;
-        initialized_ = true;
-        for (std::size_t i = 0; i < count; ++i)
-        {
-            const auto &packet = batch_[i];
-            const auto session = packet.kind == QueuedAudioEvent::Kind::Tick ?
-                packet.tick_info.session_id : packet.event.session_id;
-            if (session != session_id_)
-            {
-                if (packet.kind == QueuedAudioEvent::Kind::Event) ++stats_.discarded_old_session;
-                continue;
-            }
-            if (packet.kind == QueuedAudioEvent::Kind::Tick)
-            { tick_ = packet.tick_info.tick; ++stats_.tick_boundaries; }
-            else ObserveAge(packet.event);
-            consume(packet);
-        }
-    }
-
-    const AudioDeliveryStats &Stats() const noexcept { return stats_; }
-  private:
-    void ObserveAge(const PresentationEvent &event) noexcept
-    {
-        const auto age = tick_ >= event.tick ? tick_ - event.tick : 0;
-        stats_.event_age_ticks += age;
-        stats_.maximum_event_age_ticks = std::max(stats_.maximum_event_age_ticks, age);
-        ++stats_.event_age_samples; ++stats_.delivered;
-    }
-    std::array<QueuedAudioEvent, 1024> batch_{};
-    std::uint64_t session_id_{};
-    Tick tick_{};
-    bool initialized_{};
-    AudioDeliveryStats stats_{};
-    DiagnosticClock clock_{};
-};
-
 enum class MainAudioFailure : std::uint8_t { None, MissingCue, Preparation, Native };
 struct MainAudioFailureDetails
 {
@@ -89,18 +22,36 @@ struct MainAudioFailureDetails
 class MainAudioSession
 {
   public:
-    MainAudioSession(AudioEngine &audio, Sequence &sequence, DiagnosticClock clock = nullptr)
-        : audio_(audio), sequence_(sequence), delivery_(clock)
+    MainAudioSession(AudioEngine &audio, Sequence &sequence)
+        : audio_(audio), sequence_(sequence)
     { RequestMusic(Event("audio.bgm.main_menu")); }
 
-    template<class Observe>
-    void Drain(BoundedSpscQueue<QueuedAudioEvent, 1024> &simulation, Observe &&observe)
+    void Drain(BoundedSpscQueue<QueuedAudioEvent, 1024> &simulation)
     {
-        delivery_.Drain(simulation, [&](const QueuedAudioEvent &packet) {
-            if (failure_ != MainAudioFailure::None) return;
-            if (packet.kind == QueuedAudioEvent::Kind::Tick) ApplyTick(packet.tick_info);
-            else Consume(packet.event, packet.dequeued_qpc);
-        }, observe);
+        // Select the latest session boundary, then consume its packets in producer order.
+        std::size_t count{};
+        auto newest = session_id_;
+        bool saw_boundary = initialized_;
+        while (count < batch_.size() && simulation.TryPop(batch_[count]))
+        {
+            const auto &packet = batch_[count++];
+            if (packet.kind == QueuedAudioEvent::Kind::Tick)
+            {
+                newest = packet.tick_info.session_id;
+                saw_boundary = true;
+            }
+        }
+        if (!saw_boundary) return;
+        for (std::size_t i = 0; i < count; ++i)
+        {
+            if (failure_ != MainAudioFailure::None) break;
+            const auto &packet = batch_[i];
+            if (packet.kind == QueuedAudioEvent::Kind::Tick)
+            {
+                if (packet.tick_info.session_id == newest) ApplyTick(packet.tick_info);
+            }
+            else if (packet.event.session_id == newest) Consume(packet.event);
+        }
     }
     void Update()
     {
@@ -110,7 +61,7 @@ class MainAudioSession
         // Both independent owner intents must retain their PCM before reclaim/eviction.
         const auto music_ready = pending_music_ ? audio_.RequestCue(pending_music_->asset) : AudioCueReadiness::Ready;
         const auto ambience_ready = pending_ambience_ ? audio_.RequestCue(pending_ambience_->asset) : AudioCueReadiness::Ready;
-        audio_.UpdateListener(listener_, {0, 0, 1}, {0, 1, 0});
+        audio_.UpdateListener(listener_);
         if (audio_.FailedNativeOperation() != AudioNativeOperation::None)
         { Fail(MainAudioFailure::Native, {}, "listener_update"); return; }
         if (pending_music_ && Prepared(music_ready, pending_music_->asset, "music_prepare"))
@@ -122,7 +73,7 @@ class MainAudioSession
             // leaves the current track and its owner intent intact for the next Update.
             if (must_stop_before_play && previous_music.value)
             { audio_.Stop(previous_music); active_music_ = {}; }
-            const auto result = audio_.Play(*pending_music_, pending_music_dequeued_qpc_);
+            const auto result = audio_.Play(*pending_music_);
             if (result != AudioPlayResult::Limited)
             {
                 CheckPlay(result, pending_music_->asset, "music_play");
@@ -135,7 +86,6 @@ class MainAudioSession
                 }
                 pending_music_.reset();
                 pending_music_restart_ = false;
-                pending_music_dequeued_qpc_ = 0;
             }
         }
         if (failure_ != MainAudioFailure::None) return;
@@ -143,32 +93,24 @@ class MainAudioSession
     }
     MainAudioFailure Failure() const noexcept { return failure_; }
     const MainAudioFailureDetails &FailureDetails() const noexcept { return failure_details_; }
-    const AudioDeliveryStats &Stats() const noexcept { return delivery_.Stats(); }
-    bool HasPendingMusic() const noexcept { return pending_music_.has_value(); }
-    bool HasPendingAmbience() const noexcept { return pending_ambience_.has_value(); }
-    AssetId ActiveAmbience() const noexcept { return active_ambience_; }
-    AssetId ActiveMusic() const noexcept { return active_music_; }
-    SessionPhase Phase() const noexcept { return phase_; }
-    void RequestMusic(PresentationEvent event, bool restart = false, std::uint64_t dequeued_qpc = 0)
+  private:
+    void RequestMusic(PresentationEvent event, bool restart = false)
     {
         if (pending_music_ && pending_music_->asset.value == event.asset.value)
         {
-            if (!pending_music_dequeued_qpc_) pending_music_dequeued_qpc_ = dequeued_qpc;
             pending_music_restart_ = pending_music_restart_ || restart;
             return;
         }
         if (pending_music_)
         {
             audio_.Stop(pending_music_->asset); pending_music_.reset();
-            pending_music_restart_ = false; pending_music_dequeued_qpc_ = 0;
+            pending_music_restart_ = false;
         }
         if (!restart && active_music_.value == event.asset.value) return;
         pending_music_ = event;
         pending_music_restart_ = restart;
-        pending_music_dequeued_qpc_ = dequeued_qpc;
         (void)audio_.RequestCue(event.asset);
     }
-  private:
     PresentationEvent Event(std::string_view cue)
     {
         PresentationEvent event;
@@ -185,18 +127,18 @@ class MainAudioSession
             if (pending_music_ && (initialized_ || facts.phase != SessionPhase::MainMenu))
             {
                 audio_.Stop(pending_music_->asset); pending_music_.reset();
-                pending_music_restart_ = false; pending_music_dequeued_qpc_ = 0;
+                pending_music_restart_ = false;
             }
             CancelAmbience(); // Close old-session active/pending SFX ownership before its first new sound.
             audio_.BeginSession(facts.session_id);
             session_id_ = facts.session_id; initialized_ = true;
             // The new boundary precedes the first sound, never resets its clock afterwards.
-            phase_known_ = false; phase_ = SessionPhase::MainMenu; active_ambience_ = {};
+            phase_ = SessionPhase::MainMenu;
         }
         tick_ = facts.tick; listener_ = facts.listener_position;
-        if (phase_known_ && phase_ == facts.phase) return;
+        if (!new_session && phase_ == facts.phase) return;
         const auto old = phase_;
-        phase_ = facts.phase; phase_known_ = true;
+        phase_ = facts.phase;
         const bool paused = phase_ == SessionPhase::Paused || phase_ == SessionPhase::CardSelection ||
             phase_ == SessionPhase::StatAllocation || phase_ == SessionPhase::RelicSelection;
         if (paused) audio_.PauseCombat(); else audio_.ResumeCombat();
@@ -258,34 +200,33 @@ class MainAudioSession
         else if (result == AudioPlayResult::NotReady) Fail(MainAudioFailure::Preparation, cue, stage, result);
         else if (result == AudioPlayResult::MissingCue) Fail(MainAudioFailure::MissingCue, cue, stage, result);
     }
-    void PlayChecked(const PresentationEvent &event, std::uint64_t dequeued_qpc = 0)
-    { CheckPlay(audio_.Play(event, dequeued_qpc), event.asset, "event_play"); }
-    void Consume(const PresentationEvent &event, std::uint64_t dequeued_qpc)
+    void PlayChecked(const PresentationEvent &event)
+    { CheckPlay(audio_.Play(event), event.asset, "event_play"); }
+    void Consume(const PresentationEvent &event)
     {
         if (DecodeAudioAction(event.parameters) == AudioEventAction::Stop)
         {
             if (pending_music_ && pending_music_->asset.value == event.asset.value)
-            { pending_music_.reset(); pending_music_restart_ = false; pending_music_dequeued_qpc_ = 0; }
+            { pending_music_.reset(); pending_music_restart_ = false; }
             if (pending_ambience_ && pending_ambience_->asset.value == event.asset.value) pending_ambience_.reset();
             if (active_music_.value == event.asset.value) active_music_ = {};
             if (active_ambience_.value == event.asset.value) active_ambience_ = {};
             audio_.Stop(event.asset);
         }
-        else if (audio_.IsTransitionTrack(event.asset)) RequestMusic(event, false, dequeued_qpc);
-        else PlayChecked(event, dequeued_qpc);
+        else if (audio_.IsTransitionTrack(event.asset)) RequestMusic(event, false);
+        else PlayChecked(event);
     }
     AudioEngine &audio_;
     Sequence &sequence_;
-    AudioDelivery delivery_;
+    std::array<QueuedAudioEvent, 1024> batch_{};
     std::optional<PresentationEvent> pending_music_, pending_ambience_;
-    std::uint64_t pending_music_dequeued_qpc_{};
     AssetId active_music_{}, active_ambience_{};
     bool pending_music_restart_{};
     Float3 listener_{};
     std::uint64_t session_id_{};
     Tick tick_{};
     SessionPhase phase_{SessionPhase::MainMenu};
-    bool initialized_{}, phase_known_{};
+    bool initialized_{};
     MainAudioFailure failure_{};
     MainAudioFailureDetails failure_details_{};
 };

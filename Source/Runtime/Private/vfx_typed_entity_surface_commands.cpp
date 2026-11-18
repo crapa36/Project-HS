@@ -59,16 +59,6 @@ void Append(const VfxEntitySurfaceEffectRecipe &effect,
 }
 } // namespace
 
-std::vector<VfxEntitySurfaceCommand> BuildVfxTypedEntitySurfaceCommands(
-    const VfxImage &image, std::span<const VfxEntitySurfaceEventCapture> events,
-    std::span<const VfxEntitySurfacePersistentCapture> persistent, double current_tick,
-    double death_current_tick)
-{
-    std::vector<VfxEntitySurfaceCommand> result;
-    AppendVfxTypedEntitySurfaceCommands(image, events, persistent, current_tick,
-                                        death_current_tick, result);
-    return result;
-}
 
 void AppendVfxTypedEntitySurfaceCommands(
     const VfxImage &image, std::span<const VfxEntitySurfaceEventCapture> events,

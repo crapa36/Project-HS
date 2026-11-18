@@ -1,25 +1,23 @@
 #include "vfx_typed_distortion_commands.hpp"
+#include <hs/render_data/vfx_payload_ids.hpp>
 #include <algorithm>
 #include <cmath>
 #include <limits>
 #include <optional>
 #include <stdexcept>
-#include <string_view>
-#include <utility>
 namespace hs::runtime_detail
 {
 namespace
 {
-constexpr std::uint32_t Hash(std::string_view s){std::uint32_t h=2166136261u;for(unsigned char c:s){h^=c;h*=16777619u;}return h;}
-constexpr auto kPointPayload = Hash("PointEventPayload");
-constexpr auto kContextPayload = Hash("PresentationContextPayload");
-constexpr auto kCirclePayload = Hash("CircleAreaPayload");
-constexpr auto kConePayload = Hash("ConePayload");
-constexpr auto kRingGapsPayload = Hash("RingWithGapsPayload");
-constexpr auto kProjectilePayload = Hash("ProjectilePayload");
+constexpr auto kPointPayload = hs::vfx_payload::PointEvent;
+constexpr auto kContextPayload = hs::vfx_payload::PresentationContext;
+constexpr auto kCirclePayload = hs::vfx_payload::CircleArea;
+constexpr auto kConePayload = hs::vfx_payload::Cone;
+constexpr auto kRingGapsPayload = hs::vfx_payload::RingWithGaps;
+constexpr auto kProjectilePayload = hs::vfx_payload::Projectile;
 std::uint64_t Mix(std::uint64_t v){v^=v>>30;v*=0xbf58476d1ce4e5b9ull;v^=v>>27;v*=0x94d049bb133111ebull;return v^(v>>31);}
 bool Finite(Float3 v){return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z);}
-struct Anchor{Float3 position{},direction{};float scale{1},circle_radius{},inner_radius{},half_angle_degrees{},gap_half_width_degrees{};std::span<const float> gap_angles_degrees;VfxUniformRingGaps uniform_gaps{};std::uint32_t frame_gap_first{},frame_gap_count{};bool frame_gaps_copied{},projectile{},cone{},ring_gaps{};};
+struct Anchor{Float3 position{},direction{};float scale{1},circle_radius{},inner_radius{},half_angle_degrees{},gap_half_width_degrees{};std::span<const float> gap_angles_degrees;VfxUniformRingGaps uniform_gaps{};std::uint32_t frame_gap_first{},frame_gap_count{};bool projectile{},cone{},ring_gaps{};};
 std::optional<Anchor> EventAnchor(const VfxEventInput &in,std::uint32_t schema)
 {
  Anchor a;
@@ -55,7 +53,7 @@ std::optional<float> Envelope(const VfxDistortionRecipe&r,float age)
 }
 void Append(const VfxDistortionRecipe&r,Anchor&a,float age,std::uint64_t owner,
             std::uint32_t seed,VfxQuality quality,std::uint32_t importance,std::vector<VfxDistortionInput>&result,
-            std::vector<float>*frame_gaps)
+            std::vector<float>&frame_gaps)
 {
  if(!std::isfinite(age)||age<0||age>=1||static_cast<std::uint32_t>(quality)>2||r.min_quality>static_cast<std::uint32_t>(quality)||
     (a.cone||a.ring_gaps)&&r.kind!=VfxDistortionShape::ShortShock)return;
@@ -67,43 +65,23 @@ void Append(const VfxDistortionRecipe&r,Anchor&a,float age,std::uint64_t owner,
    a.cone?VfxDistortionShape::ConeSector:a.ring_gaps?VfxDistortionShape::GappedAnnulus:r.kind,quality,importance,seed};
  command.inner_radius=a.inner_radius;command.half_angle_degrees=a.half_angle_degrees;
  command.gap_half_width_degrees=a.gap_half_width_degrees;command.uniform_gaps=a.uniform_gaps;
- if(!command.uniform_gaps.Active())
+ if(!a.gap_angles_degrees.empty())
  {
-  if(!frame_gaps)command.gap_angles_degrees.assign(a.gap_angles_degrees.begin(),a.gap_angles_degrees.end());
-  else if(!a.gap_angles_degrees.empty())
+  if(a.frame_gap_count==0)
   {
-   if(!a.frame_gaps_copied)
-   {
-    const auto first=frame_gaps->size();
-    const auto maximum=std::numeric_limits<std::uint32_t>::max();
-    if(first>maximum||a.gap_angles_degrees.size()>maximum-first)
-     throw std::length_error("too many frame distortion gap angles");
-    a.frame_gap_first=static_cast<std::uint32_t>(first);
-    a.frame_gap_count=static_cast<std::uint32_t>(a.gap_angles_degrees.size());
-    frame_gaps->insert(frame_gaps->end(),a.gap_angles_degrees.begin(),
-                       a.gap_angles_degrees.end());
-    a.frame_gaps_copied=true;
-   }
-   command.frame_gap_first=a.frame_gap_first;
-   command.frame_gap_count=a.frame_gap_count;
+   const auto first=frame_gaps.size();
+   const auto maximum=std::numeric_limits<std::uint32_t>::max();
+   if(first>maximum||a.gap_angles_degrees.size()>maximum-first)
+    throw std::length_error("too many frame distortion gap angles");
+   frame_gaps.insert(frame_gaps.end(),a.gap_angles_degrees.begin(),a.gap_angles_degrees.end());
+   a.frame_gap_first=static_cast<std::uint32_t>(first);
+   a.frame_gap_count=static_cast<std::uint32_t>(a.gap_angles_degrees.size());
   }
+  command.frame_gap_first=a.frame_gap_first;
+  command.frame_gap_count=a.frame_gap_count;
  }
- result.push_back(std::move(command));
+ result.push_back(command);
 }
-}
-static void AppendVfxTypedDistortionCommandsInternal(const VfxImage&,VfxEventView,
- std::span<const VfxPersistentInput>,double,std::vector<VfxDistortionInput>&,
- std::vector<float>*);
-std::vector<VfxDistortionInput> BuildVfxTypedDistortionCommands(const VfxImage&image,VfxEventView events,std::span<const VfxPersistentInput>persistent,double current_tick)
-{
- std::vector<VfxDistortionInput> result;
- AppendVfxTypedDistortionCommands(image, events, persistent, current_tick, result);
- return result;
-}
-void AppendVfxTypedDistortionCommands(const VfxImage&image,VfxEventView events,
- std::span<const VfxPersistentInput>persistent,double current_tick,std::vector<VfxDistortionInput>&result)
-{
- AppendVfxTypedDistortionCommandsInternal(image,events,persistent,current_tick,result,nullptr);
 }
 void RebuildVfxTypedDistortionCommands(const VfxImage&image,VfxEventView events,
  std::span<const VfxPersistentInput>persistent,double current_tick,
@@ -111,12 +89,6 @@ void RebuildVfxTypedDistortionCommands(const VfxImage&image,VfxEventView events,
 {
  result.clear();
  frame_gaps.clear();
- AppendVfxTypedDistortionCommandsInternal(image,events,persistent,current_tick,result,&frame_gaps);
-}
-static void AppendVfxTypedDistortionCommandsInternal(const VfxImage&image,VfxEventView events,
- std::span<const VfxPersistentInput>persistent,double current_tick,std::vector<VfxDistortionInput>&result,
- std::vector<float>*frame_gaps)
-{
  const auto run=[&](std::span<const VfxDistortionRecipe> recipes,Anchor&a,float age,std::uint64_t owner,std::uint32_t seed,VfxQuality quality,std::uint32_t importance,bool persistent_owner){
   for(const auto&r:recipes)
    if(persistent_owner==(r.kind==VfxDistortionShape::HeadEnvelope)&&

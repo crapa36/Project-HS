@@ -21,23 +21,21 @@ void UpdateGraphicsTelemetry(GraphicsSettingsUiModel &model,
         return value.width && value.height ? std::format("{}x{}", value.width, value.height)
                                            : std::string("확인 중");
     };
-    const auto view = std::ranges::find_if(diagnostics.views, [](const auto &entry) { return entry.presenting; });
-    const auto *measurements = view == diagnostics.views.end() ? nullptr
-        : validation ? &view->validation_on : &view->validation_off;
-    const auto fps = [](const RendererDiagnosticsCadence *cadence) {
-        return cadence && cadence->available && std::isfinite(cadence->fps) && cadence->fps > 0.0
-            ? std::format("{:.1f}", cadence->fps) : std::string("확인 중");
+    const auto rendered_fps = validation ? diagnostics.validation_on_fps : diagnostics.validation_off_fps;
+    const auto fps = [](double value) {
+        return std::isfinite(value) && value > 0.0
+            ? std::format("{:.1f}", value) : std::string("확인 중");
     };
-    model.telemetry_status[1] = std::format("렌더링 {} / 출력 {} · 렌더링 {} FPS · 표시 {} FPS",
+    model.telemetry_status[1] = std::format("렌더링 {} / 출력 {} · 렌더링 {} FPS",
         extent(diagnostics.reconstruction.render_extent), extent(diagnostics.reconstruction.output_extent),
-        fps(measurements ? &measurements->rendered_cadence : nullptr), fps(&diagnostics.displayed_cadence));
+        fps(rendered_fps));
     const auto mib = [](std::uint64_t bytes) { return static_cast<double>(bytes) / (1024.0 * 1024.0); };
     const auto &memory = diagnostics.current_memory;
     const auto current = memory.budget_available
         ? std::format("{:.1f} / {:.1f} MiB", mib(memory.local_usage_bytes), mib(memory.local_budget_bytes))
         : std::string("확인 중");
-    const auto peak = diagnostics.transition_memory_peak_available && diagnostics.transition_memory_peak.budget_available
-        ? std::format("{:.1f} MiB", mib(diagnostics.transition_memory_peak.local_usage_bytes))
+    const auto peak = diagnostics.transition_peak_local_usage_bytes
+        ? std::format("{:.1f} MiB", mib(*diagnostics.transition_peak_local_usage_bytes))
         : std::string("확인 중");
     model.telemetry_status[2] = std::format("VRAM 사용량 / 한도 {} · 설정 전환 최대 사용량 {}",
                                           current, peak);
@@ -45,7 +43,7 @@ void UpdateGraphicsTelemetry(GraphicsSettingsUiModel &model,
 #endif
 
 std::shared_ptr<const GraphicsSettingsUiModel> RendererGraphicsReceipt(
-    const D3D12Renderer &renderer, const GraphicsSettings &graphics, std::uint64_t generation,
+    D3D12Renderer &renderer, const GraphicsSettings &graphics, std::uint64_t generation,
     HWND window_handle, [[maybe_unused]] bool validation)
 {
     auto model = std::make_shared<GraphicsSettingsUiModel>();

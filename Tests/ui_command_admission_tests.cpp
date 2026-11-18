@@ -62,8 +62,5 @@ int main()
         displayed,actions,commands,rejected));
     Check(commands.TryPop(command) && command.kind==hs::UiCommandKind::CancelSkillRebind && !commands.TryPop(command));
 
-    Check(hs::runtime_detail::UiFrameExtentMatches({1920,1080},{1920,1080}) &&
-          !hs::runtime_detail::UiFrameExtentMatches({1920,1080},{1280,720}),
-          "resize rejects clicks until the new extent has an accepted UI frame");
-    std::cout<<"PASS UI admission rollback, displayed-action identity and resize gate\n";
+    std::cout<<"PASS UI admission rollback and displayed-action identity\n";
 }

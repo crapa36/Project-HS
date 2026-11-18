@@ -136,14 +136,6 @@ Result GameSimulation::Initialize(const SimulationConfig &config,
     impl_->telemetry.balance_observer.Reset(config.capture_detailed_balance, config.capture_hit_rates);
     if (config.capture_hit_rates)
         impl_->telemetry.balance_observer.player_hit_casts.reserve(256);
-#ifdef HS_DEVELOPMENT_TOOLS
-    impl_->timings = {};
-    if (config.capture_timings)
-        for (std::size_t sample = 0; sample < 64; ++sample)
-        {
-            SimulationWorld::TimingScope empty_scope(&impl_->timings.empty_scope_calibration);
-        }
-#endif
     impl_->rules = rules;
     impl_->RebuildNavigation();
     impl_->session_phase = config.start_in_main_menu ? SessionPhase::MainMenu : SessionPhase::Playing;
@@ -162,17 +154,11 @@ TickResult GameSimulation::TickFixed(const InputFrame &input)
     }
     // Input bookkeeping can change the checksum without changing displayed facts.
     impl_->observation.checksum_dirty = true;
-#ifdef HS_DEVELOPMENT_TOOLS
-    impl_->ResetTimings();
-#endif
-    auto tick_timing = impl_->Measure(SimulationTimingId::Tick);
-    auto input_timing = impl_->Measure(SimulationTimingId::Input);
     impl_->current_input = input;
     bool world_changed{};
     for (const auto &action : input.ui_actions)
         world_changed |= impl_->ApplyUiAction(action);
     world_changed |= impl_->ProcessInput();
-    input_timing.Finish();
     if (impl_->session_phase != SessionPhase::Playing)
     {
         world_changed |= impl_->actors.player.buffered_skill != SkillKind::Count ||
@@ -183,22 +169,11 @@ TickResult GameSimulation::TickFixed(const InputFrame &input)
         impl_->actors.player.buffered_skill_slot = 0xFF;
         impl_->observation.small_facts_dirty |= world_changed;
         impl_->UpdateChecksum();
-#ifdef HS_DEVELOPMENT_TOOLS
-        impl_->timings.tick = impl_->tick;
-        impl_->timings.completed = impl_->config.capture_timings;
-#endif
         return {impl_->tick, impl_->checksum, impl_->session_phase, world_changed};
     }
     impl_->observation.small_facts_dirty = true;
     NextSimulationSequence(impl_->tick);
-#ifdef HS_DEVELOPMENT_TOOLS
-    impl_->timings.tick = impl_->tick;
-#endif
     impl_->RunPipeline();
-#ifdef HS_DEVELOPMENT_TOOLS
-    impl_->timings.tick = impl_->tick;
-    impl_->timings.completed = impl_->config.capture_timings;
-#endif
     return {impl_->tick, impl_->checksum, impl_->session_phase, true};
 }
 
@@ -446,20 +421,7 @@ SimulationObservation GameSimulation::GetObservation() const
 SimulationDiagnostics GameSimulation::GetDiagnostics() const
 {
     auto read = BorrowTickReadView();
-#ifdef HS_DEVELOPMENT_TOOLS
-    return {impl_->Metrics(), impl_->timings};
-#else
-    return {impl_->Metrics(), {}};
-#endif
-}
-
-SimulationTimingDiagnostics GameSimulation::GetTimingDiagnostics() const
-{
-#ifdef HS_DEVELOPMENT_TOOLS
-    return impl_->timings;
-#else
-    return {};
-#endif
+    return {impl_->Metrics()};
 }
 
 void GameSimulation::ApplyUiAction(const UiAction &action)
@@ -546,7 +508,6 @@ void GameSimulation::SimulationWorld::InitializeContentReadFacts()
 
 void GameSimulation::SimulationWorld::RefreshSmallReadFacts() const
 {
-    auto timing = Measure(SimulationTimingId::SmallFacts);
     auto &facts = read_facts;
     facts.session = BuildSessionProbe();
     facts.charge_range = facts.charge_radius = 0.0f;
@@ -602,15 +563,12 @@ void GameSimulation::SimulationWorld::RefreshSmallReadFacts() const
         const auto &upgrades = rules.upgrades.charged_shot;
         const auto mask = actors.player.upgrades[
             static_cast<std::size_t>(SkillKind::ChargedShot)];
-        const auto maximum_ticks = HasUpgrade(mask, 1)
-                                       ? upgrades.extended_full_charge_explosion
-                                             .maximum_charge_time_ticks
-                                       : definition.maximum_charge_time_ticks;
+        const auto charge = ChargeTicks();
         const auto ready_ticks = HasUpgrade(mask, 2)
                                      ? static_cast<Tick>(std::ceil(
-                                           maximum_ticks * upgrades.faster_charge
+                                           charge.maximum * upgrades.faster_charge
                                                                .charge_time_multiplier))
-                                     : maximum_ticks;
+                                     : charge.maximum;
         const auto normal_ready_ticks = HasUpgrade(mask, 2)
                                             ? static_cast<Tick>(std::ceil(
                                                   definition.maximum_charge_time_ticks *
@@ -620,14 +578,8 @@ void GameSimulation::SimulationWorld::RefreshSmallReadFacts() const
             actors.player.charge_start + normal_ready_ticks;
         facts.player.charge_full_ready_tick =
             actors.player.charge_start + ready_ticks;
-        auto elapsed = std::min(tick - actors.player.charge_start, maximum_ticks);
-        if (HasUpgrade(mask, 2))
-            elapsed = std::min(
-                maximum_ticks,
-                static_cast<Tick>(elapsed /
-                                  upgrades.faster_charge.charge_time_multiplier));
-        const auto progress = static_cast<float>(elapsed) /
-                              static_cast<float>(maximum_ticks);
+        const auto progress = static_cast<float>(charge.elapsed) /
+                              static_cast<float>(charge.maximum);
         facts.charge_ratio = progress;
         facts.charge_range = std::lerp(definition.minimum_range,
                                        definition.maximum_range, progress);

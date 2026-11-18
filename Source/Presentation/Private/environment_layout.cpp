@@ -1,6 +1,7 @@
 #include <hs/presentation/environment_layout.hpp>
 #include <hs/presentation/meadow_surface.hpp>
 #include <hs/core/sha256.hpp>
+#include <hs/render_data/material_noise.hpp>
 
 #include <algorithm>
 #include <array>
@@ -10,6 +11,7 @@
 #include <ranges>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace hs
 {
@@ -33,17 +35,21 @@ Float2 Normalize(Float2 v) noexcept
     const auto length = std::sqrt(LengthSquared(v));
     return length > .0001f ? Multiply(v, 1.0f / length) : Float2{0, 1};
 }
-std::uint32_t EnvironmentHash(std::uint32_t value) noexcept
-{
-    value ^= value >> 16;
-    value *= 0x7feb352du;
-    value ^= value >> 15;
-    value *= 0x846ca68bu;
-    return value ^ (value >> 16);
-}
 float EnvironmentUnit(std::uint32_t value) noexcept
 {
-    return static_cast<float>(EnvironmentHash(value) & 0xffffu) / 65535.0f;
+    return static_cast<float>(render_data::SeededNoiseHash(value) & 0xffffu) / 65535.0f;
+}
+float MeadowTerrainBare(Float2 position) noexcept
+{
+    const auto seed = kMeadowSurfaceSeed;
+    const auto warp_x = render_data::SeededNoiseValue(position.x / 7.0f, position.y / 7.0f, seed + 413u);
+    const auto warp_y = render_data::SeededNoiseValue(position.x / 7.0f, position.y / 7.0f, seed + 827u);
+    const auto meso = render_data::SeededNoiseValue(position.x / .85f, position.y / .85f, seed + 571u);
+    const auto patch = render_data::SeededNoiseValue((position.x + 2.0f * warp_x) / 16.0f,
+        (position.y + 2.0f * warp_y) / 16.0f, seed + 9u);
+    const auto value = patch + .10f * meso;
+    const auto t = std::clamp((value - .35f) / (.70f - .35f), 0.0f, 1.0f);
+    return t * t * (3.0f - 2.0f * t);
 }
 float EnvironmentGrowth(Float2 position) noexcept
 {
@@ -146,7 +152,7 @@ EnvironmentLayout BuildEnvironmentLayout(
     for (std::size_t index = 0; index < obstacles.size(); ++index)
     {
         const auto &obstacle = obstacles[index];
-        const auto variation = EnvironmentHash(static_cast<std::uint32_t>(index) +
+        const auto variation = render_data::SeededNoiseHash(static_cast<std::uint32_t>(index) +
                                                0x524F434Bu);
         if (obstacle.kind == ArenaObstacleKind::Tree)
             add_tree(obstacle.center, variation,
@@ -180,7 +186,7 @@ EnvironmentLayout BuildEnvironmentLayout(
         {
             for (std::uint32_t tree = 0; tree < tree_count; ++tree)
             {
-                const auto variation = EnvironmentHash(
+                const auto variation = render_data::SeededNoiseHash(
                     edge * 1'013u + row * 313u + tree * 37u + 0x54524545u);
                 const auto t = (static_cast<float>(tree) + 0.5f +
                                 (EnvironmentUnit(variation) - 0.5f) * 0.55f) /
@@ -255,7 +261,7 @@ EnvironmentLayout BuildEnvironmentLayout(
         const auto [anchor, footprint] = prop_footprints[patch];
         for (std::uint32_t member = 0; member < 3; ++member)
         {
-            const auto noise = EnvironmentHash(static_cast<std::uint32_t>(patch) * 31u + member + 0x45434fu);
+            const auto noise = render_data::SeededNoiseHash(static_cast<std::uint32_t>(patch) * 31u + member + 0x45434fu);
             const auto angle = .8f + float(patch) * 2.4f + float(member) * .48f;
             const auto distance = footprint + 1.35f + EnvironmentUnit(noise) * .45f;
             detail_patch({anchor.x + std::cos(angle) * distance, anchor.y + std::sin(angle) * distance},
@@ -311,7 +317,7 @@ EnvironmentLayout BuildEnvironmentLayout(
         for (std::uint32_t patch = 0; patch < edge_litter.size(); ++patch)
         {
             const auto anchor = edge_litter[patch];
-            const auto variation = EnvironmentHash(patch + 0x4c495454u);
+            const auto variation = render_data::SeededNoiseHash(patch + 0x4c495454u);
             detail_patch(anchor, 4u, 0x500100u | patch, .8f + EnvironmentUnit(variation) * .15f,
                          EnvironmentUnit(variation + 1u) * 2.0f * kPi);
             for (std::uint32_t member = 0; member < 3; ++member)
@@ -332,11 +338,11 @@ EnvironmentLayout BuildEnvironmentLayout(
     }
     constexpr float kGrassClusterSpacing = 2.15f;
     const auto grass_limit = arena_half_extent - 2.0f;
-    const auto grass_seed = EnvironmentHash(static_cast<std::uint32_t>(seed) ^
-                                            EnvironmentHash(static_cast<std::uint32_t>(seed >> 32)));
+    const auto grass_seed = render_data::SeededNoiseHash(static_cast<std::uint32_t>(seed) ^
+        render_data::SeededNoiseHash(static_cast<std::uint32_t>(seed >> 32)));
     Require(std::ceil(double(grass_limit) * 2.0 / kGrassClusterSpacing) + 1.0 <= 65535.0,
             "grass provenance coordinate range");
-    const auto clear_grass = [&](Float2 position) {
+    const auto clear_grass = [&](Float2 position, float natural_sample) {
         if (!ContainsArenaPoint(boundary, position, 2.0f)) return false;
         const bool meadow = arena_half_extent >= 14.0f && MeadowContains(position);
         if (MeadowRoadCoverage(position) > 0.0f)
@@ -347,13 +353,14 @@ EnvironmentLayout BuildEnvironmentLayout(
                     (static_cast<std::uint32_t>((position.y + 12.0f) * 1.25f) + 0x4c414e45u)) < .32f) return false;
         }
         if (meadow && (MeadowPressed(position) > .2f || std::isfinite(MeadowWaterLevel(position)))) return false;
-        return std::ranges::none_of(obstacles, [&](const auto &obstacle) {
-            const auto clearance = obstacle.radius + .45f;
-            return LengthSquared(Subtract(position, obstacle.center)) < clearance * clearance;
-        }) && std::ranges::none_of(prop_footprints, [&](const auto &prop) {
-            const auto clearance = prop.second + .45f;
-            return LengthSquared(Subtract(position, prop.first)) < clearance * clearance;
-        });
+        if (std::ranges::any_of(obstacles, [&](const auto &obstacle) {
+                const auto clearance = obstacle.radius + .45f;
+                return LengthSquared(Subtract(position, obstacle.center)) < clearance * clearance;
+        }) || std::ranges::any_of(prop_footprints, [&](const auto &prop) {
+                const auto clearance = prop.second + .45f;
+                return LengthSquared(Subtract(position, prop.first)) < clearance * clearance;
+        })) return false;
+        return !meadow || natural_sample <= 1.0f - .98f * MeadowTerrainBare(position);
     };
     const auto seeded_grass_begin = layout.instances.size();
     std::uint32_t grass_index{}, grid_z{};
@@ -362,7 +369,7 @@ EnvironmentLayout BuildEnvironmentLayout(
         std::uint32_t grid_x{};
         for (float x = -grass_limit; x <= grass_limit; x += kGrassClusterSpacing, ++grid_x)
         {
-            const auto cluster = EnvironmentHash(grass_seed ^ (grass_index++ + 0x47524153u));
+            const auto cluster = render_data::SeededNoiseHash(grass_seed ^ (grass_index++ + 0x47524153u));
             // Omitted patches and widely jittered centres leave irregular natural gaps.
             if (EnvironmentUnit(cluster) < 0.2f) continue;
             const Float2 centre{x + (EnvironmentUnit(cluster + 1) - 0.5f) * 2.0f,
@@ -372,17 +379,17 @@ EnvironmentLayout BuildEnvironmentLayout(
             const auto growth = EnvironmentGrowth(centre);
             if (EnvironmentUnit(cluster + 5) > .50f + growth * .45f) continue;
             const auto radius = .65f + growth * .65f + EnvironmentUnit(cluster + 3) * .25f;
-            const auto count = 10u + EnvironmentHash(cluster + 4) % 7u;
+            const auto count = 10u + render_data::SeededNoiseHash(cluster + 4) % 7u;
             for (std::uint32_t member = 0; member < count; ++member)
             {
-                const auto variation = EnvironmentHash(cluster ^ (member + 1) * 0x9e3779b9u);
+                const auto variation = render_data::SeededNoiseHash(cluster ^ (member + 1) * 0x9e3779b9u);
                 const auto angle = EnvironmentUnit(variation) * 2.0f * kPi;
                 // Product sampling concentrates growth inside each patch with a soft edge.
                 const auto distance = radius * std::sqrt(EnvironmentUnit(variation + 1) *
                                                           EnvironmentUnit(variation + 2));
                 const Float2 position{centre.x + std::cos(angle) * distance,
                                       centre.y + std::sin(angle) * distance};
-                if (!clear_grass(position)) continue;
+                if (!clear_grass(position, EnvironmentUnit(variation + 7u))) continue;
                 const bool meadow = arena_half_extent >= 14.0f && MeadowContains(position);
                 const bool road_grass = meadow && MeadowRoadCoverage(position) > 0.0f;
                 const bool pressed = (meadow && MeadowPressed(position) > .02f) || MeadowRoadCoverage(position, -.25f) > .02f;
@@ -406,9 +413,19 @@ EnvironmentLayout BuildEnvironmentLayout(
         }
     }
 
-    const auto seeded_grass_count = layout.instances.size() - seeded_grass_begin;
     if (arena_half_extent >= 14.0f)
     {
+        // Fill centres span about ±11.8m; ±12.5m includes every seeded blade within the .35m query.
+        constexpr float kSeededGrassLocalExtent = 12.5f;
+        std::vector<Float2> local_seeded_grass;
+        const auto seeded_grass_end = layout.instances.size();
+        for (auto index = seeded_grass_begin; index < seeded_grass_end; ++index)
+        {
+            const auto &grass = layout.instances[index];
+            if (std::abs(grass.position.x) <= kSeededGrassLocalExtent &&
+                std::abs(grass.position.z) <= kSeededGrassLocalExtent)
+                local_seeded_grass.push_back({grass.position.x, grass.position.z});
+        }
         // Flatten existing grass as dry packing litter; this reuses foliage rather than a cut-straw mesh.
         constexpr std::array<Float2, 3> packing_litter{{{4.0f,-3.8f},{5.2f,-4.45f},{8.6f,-4.2f}}};
         for (std::uint32_t patch = 0; patch < packing_litter.size(); ++patch)
@@ -424,7 +441,7 @@ EnvironmentLayout BuildEnvironmentLayout(
         for (std::uint32_t patch = 0; patch < edge_litter.size(); ++patch)
         {
             const auto anchor = edge_litter[patch];
-            const auto variation = EnvironmentHash(patch + 0x4c495454u);
+            const auto variation = render_data::SeededNoiseHash(patch + 0x4c495454u);
             const Float2 tuft{anchor.x + .18f, anchor.y - .25f};
             if (short_tuft_count < 64 && clear_detail(tuft, .35f) &&
                 MeadowPressed(tuft) <= .2f && !std::isfinite(MeadowWaterLevel(tuft)))
@@ -443,10 +460,10 @@ EnvironmentLayout BuildEnvironmentLayout(
             for (std::uint32_t x = 0; x < 24 && fill_count < kMaxMeadowFill; ++x)
             {
                 const auto cell = z * 24u + x;
-                const auto noise = EnvironmentHash(cell + 0x4d454144u);
+                const auto noise = render_data::SeededNoiseHash(cell + 0x4d454144u);
                 const Float2 centre{-11.5f + float(x) + (EnvironmentUnit(noise) - .5f) * .6f,
                                     -11.5f + float(z) + (EnvironmentUnit(noise + 1u) - .5f) * .6f};
-                if (!clear_grass(centre) || MeadowRoadCoverage(centre) > 0.0f) continue;
+                if (!clear_grass(centre, EnvironmentUnit(noise + 19u)) || MeadowRoadCoverage(centre) > 0.0f) continue;
                 const auto edge_fill = std::clamp((12.0f - std::max(std::abs(centre.x), std::abs(centre.y))) / 1.75f, 0.0f, 1.0f);
                 if (EnvironmentUnit(noise + 18u) > edge_fill) continue;
                 const auto growth = EnvironmentGrowth(centre);
@@ -459,15 +476,15 @@ EnvironmentLayout BuildEnvironmentLayout(
                         flower_count += detail_patch({centre.x + .55f, centre.y - .3f}, 3u,
                             0x700001u | (cell << 2u), .85f, .3f);
                 }
-                if (std::ranges::any_of(std::span(layout.instances).subspan(seeded_grass_begin, seeded_grass_count),
-                    [&](const auto &grass) { return LengthSquared(Subtract(centre, {grass.position.x, grass.position.z})) < .35f * .35f; })) continue;
+                if (std::ranges::any_of(local_seeded_grass,
+                    [&](Float2 grass) { return LengthSquared(Subtract(centre, grass)) < .35f * .35f; })) continue;
                 for (std::uint32_t member = 0; member < 12 && fill_count < kMaxMeadowFill; ++member)
                 {
-                    const auto variation = EnvironmentHash(grass_seed ^ noise ^ ((member + 1u) * 0x9e3779b9u));
+                    const auto variation = render_data::SeededNoiseHash(grass_seed ^ noise ^ ((member + 1u) * 0x9e3779b9u));
                     const auto angle = EnvironmentUnit(variation) * 2.0f * kPi;
                     const auto distance = .65f * std::sqrt(EnvironmentUnit(variation + 1u) * EnvironmentUnit(variation + 2u));
                     const Float2 position{centre.x + std::cos(angle) * distance, centre.y + std::sin(angle) * distance};
-                    if (!MeadowContains(position) || !clear_grass(position)) continue;
+                    if (!MeadowContains(position) || !clear_grass(position, EnvironmentUnit(variation + 7u))) continue;
                     const bool road_grass = MeadowRoadCoverage(position) > 0.0f;
                     const bool pressed = MeadowPressed(position) > .02f || MeadowRoadCoverage(position, -.25f) > .02f;
                     const bool tall = !pressed && growth > .55f && member >= 9u;
@@ -481,19 +498,6 @@ EnvironmentLayout BuildEnvironmentLayout(
                     ++fill_count;
                 }
             }
-        // Narrow, discontinuous weeds stay between the two wheel tracks.
-        for (std::uint32_t segment = 0; segment < 29; ++segment)
-            for (std::uint32_t member = 0; member < 3; ++member)
-            {
-                const auto variation = EnvironmentHash(grass_seed ^ (segment * 3u + member + 0x57454544u));
-                const auto z = -11.6f + float(segment) * .8f + float(member) * .12f;
-                const Float2 position{MeadowCartCenter(z) + (EnvironmentUnit(variation) - .5f) * .12f, z};
-                if (!clear_grass(position)) continue;
-                add_environment({position.x, 0, position.y}, EnvironmentUnit(variation + 1u) * .6f,
-                    {.35f,.07f + EnvironmentUnit(variation + 2u) * .02f,.35f}, 0xFFF3F8F0u,
-                    RenderMesh::Grass, variation % 4u,
-                    ProvenanceId(11) | (std::uint64_t(segment) << 8u) | member);
-            }
     }
 
     if (arena_half_extent > 8.0f)
@@ -504,7 +508,7 @@ EnvironmentLayout BuildEnvironmentLayout(
             for (std::uint32_t side = 0; side < 2; ++side)
             {
                 const auto key = row * 2u + side;
-                const auto variation = EnvironmentHash(key + 0x44455441u);
+                const auto variation = render_data::SeededNoiseHash(key + 0x44455441u);
                 const auto z = -arena_half_extent + 4.0f + (float(row) + 0.5f) * length / float(rows) +
                     (EnvironmentUnit(variation) - 0.5f) * 3.8f;
                 const auto sign = side == 0u ? -1.0f : 1.0f;
@@ -570,7 +574,7 @@ EnvironmentLayout BuildEnvironmentLayout(
         for (std::size_t index = 0; index < std::min<std::size_t>(obstacles.size(), 64); ++index)
         {
             const auto &obstacle = obstacles[index];
-            const auto variation = EnvironmentHash(static_cast<std::uint32_t>(index) + 0x4c495454u);
+            const auto variation = render_data::SeededNoiseHash(static_cast<std::uint32_t>(index) + 0x4c495454u);
             const auto angle = EnvironmentUnit(variation) * 2.0f * kPi;
             const auto distance = obstacle.radius + 1.2f;
             const Float2 position{obstacle.center.x + std::cos(angle) * distance,

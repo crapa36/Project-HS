@@ -1,37 +1,30 @@
 #include "vfx_typed_light_commands.hpp"
+#include <hs/render_data/vfx_payload_ids.hpp>
 #include <algorithm>
 #include <bit>
 #include <cmath>
 #include <optional>
-#include <string_view>
 namespace hs::runtime_detail
 {
 namespace
 {
-consteval std::uint32_t Hash(std::string_view s){std::uint32_t h=2166136261u;for(unsigned char c:s){h^=c;h*=16777619u;}return h;}
 bool Finite(Float3 v){return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z);}
 std::uint64_t Mix(std::uint64_t v){v^=v>>30;v*=0xbf58476d1ce4e5b9ull;v^=v>>27;v*=0x94d049bb133111ebull;return v^(v>>31);}
 std::optional<Float3> Center(const VfxEventInput &input,std::uint32_t schema)
 {
- if(const auto *v=std::get_if<VfxPointPayload>(&input.payload)){if(schema==Hash("PointEventPayload")&&Finite(v->position))return v->position;}
+ if(const auto *v=std::get_if<VfxPointPayload>(&input.payload)){if(schema==hs::vfx_payload::PointEvent&&Finite(v->position))return v->position;}
  else if(std::holds_alternative<VfxContextPayload>(input.payload))
- {const Float3 p{input.world_transform[12],input.world_transform[13],input.world_transform[14]};if(schema==Hash("PresentationContextPayload")&&Finite(p))return p;}
+ {const Float3 p{input.world_transform[12],input.world_transform[13],input.world_transform[14]};if(schema==hs::vfx_payload::PresentationContext&&Finite(p))return p;}
  else if(const auto *v=std::get_if<VfxCirclePayload>(&input.payload))
- {if(schema==Hash("CircleAreaPayload")&&Finite(v->center)&&std::isfinite(v->radius)&&v->radius>0&&v->inner_radius==0)return v->center;}
+ {if(schema==hs::vfx_payload::CircleArea&&Finite(v->center)&&std::isfinite(v->radius)&&v->radius>0&&v->inner_radius==0)return v->center;}
  else if(const auto *v=std::get_if<VfxRingGapsPayload>(&input.payload))
- {if(schema==Hash("RingWithGapsPayload")&&Finite(v->center)&&std::isfinite(v->inner_radius)&&std::isfinite(v->outer_radius)&&v->inner_radius>=0&&v->outer_radius>v->inner_radius)return v->center;}
+ {if(schema==hs::vfx_payload::RingWithGaps&&Finite(v->center)&&std::isfinite(v->inner_radius)&&std::isfinite(v->outer_radius)&&v->inner_radius>=0&&v->outer_radius>v->inner_radius)return v->center;}
  else if(const auto *v=std::get_if<VfxConePayload>(&input.payload))
- {if(schema==Hash("ConePayload")&&Finite(v->origin)&&Finite(v->direction)&&std::isfinite(v->range)&&v->range>0&&
+ {if(schema==hs::vfx_payload::Cone&&Finite(v->origin)&&Finite(v->direction)&&std::isfinite(v->range)&&v->range>0&&
    std::isfinite(v->half_angle_degrees)&&v->half_angle_degrees>0&&v->half_angle_degrees<=180)return v->origin;}
  return {};
 }
 
-}
-std::vector<VfxLightInput> BuildVfxTypedLightCommands(const VfxImage &image,VfxEventView inputs,double current_tick)
-{
- std::vector<VfxLightInput> result;
- AppendVfxTypedLightCommands(image, inputs, current_tick, result);
- return result;
 }
 void AppendVfxTypedLightCommands(const VfxImage &image,VfxEventView inputs,double current_tick,
  std::vector<VfxLightInput> &result)

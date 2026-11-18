@@ -13,6 +13,7 @@
 #include <iostream>
 #include <map>
 #include <ranges>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 
@@ -113,7 +114,6 @@ void Produce(const fs::path &source, const fs::path &build, bool exhaustive_geom
     if (!exhaustive_geometry_error && Current(build, spec, layout.eligible_digest))
     {
         phase("current_hit");
-        ap::TouchActionResult(build / "Actions" / spec.namespace_path / "result.json");
         return;
     }
     phase("current_miss");
@@ -176,7 +176,7 @@ void Produce(const fs::path &source, const fs::path &build, bool exhaustive_geom
     phase("source_decode");
     hs::geometry_content::SceneHlodCookOptions options;
     if (exhaustive_geometry_error)
-        options.error_checks.mode = hs::geometry_content::GeometryErrorCheckMode::Exhaustive;
+        options.error_checks = hs::geometry_content::GeometryErrorCheckMode::Exhaustive;
     const auto cooked = hs::geometry_content::CookSceneHlod(hs::MakeAssetId(kSceneId), layout.abi,
         layout.eligible_digest, members, sources, "render/hlod/arena/page", options);
     phase("cook");
@@ -185,21 +185,22 @@ void Produce(const fs::path &source, const fs::path &build, bool exhaustive_geom
     try
     {
         std::vector<ap::Product> products;
+        products.reserve(cooked.pages.size() + 1);
+        const auto write_product = [&](std::string logical_id, std::string filename,
+                                       std::span<const std::byte> bytes) {
+            ap::WriteBytes(stage / filename, bytes);
+            return ap::Product{std::move(logical_id), std::move(filename), ap::Sha256Bytes(bytes),
+                               bytes.size(), cooked.scene.dependencies};
+        };
         for (std::uint32_t i = 0; i < cooked.pages.size(); ++i)
         {
             const auto &id = cooked.scene.pages[i].logical_id;
             const auto filename = fs::path(id).filename().string();
             const auto bytes = rd::BuildGeometryPage(hs::MakeAssetId(id), cooked.scene.dependencies, cooked.pages[i]);
-            ap::WriteBytes(stage / filename, bytes);
-            auto product = ap::HashProduct(id, filename, stage / filename);
-            product.dependencies = cooked.scene.dependencies;
-            products.push_back(std::move(product));
+            products.push_back(write_product(id, filename, bytes));
         }
         const auto bytes = rd::EncodeSceneHlod(cooked.scene);
-        (void)rd::DecodeSceneHlod(bytes);
-        ap::WriteBytes(stage / "arena.shl1", bytes);
-        auto product = ap::HashProduct(std::string(kSceneId), "arena.shl1", stage / "arena.shl1");
-        product.dependencies = cooked.scene.dependencies;
+        auto product = write_product(std::string(kSceneId), "arena.shl1", bytes);
         for (const auto &page : cooked.scene.pages) product.dependencies.push_back(page.logical_id);
         product.dependencies.push_back("game-data/arena-layout");
         products.push_back(std::move(product));

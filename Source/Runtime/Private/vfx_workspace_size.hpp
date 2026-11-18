@@ -77,17 +77,4 @@ void ReserveAppend(std::vector<T, Allocator> &items, std::size_t count)
     const auto grown = capacity + std::min(maximum - capacity, capacity / 2 + 1);
     items.reserve(std::max(needed, grown));
 }
-
-template<class T, class Allocator>
-std::size_t Vector(const std::vector<T, Allocator> &items) noexcept
-{
-    // A valid vector's allocation already bounds capacity * sizeof(T).
-    return items.capacity() * sizeof(T);
-}
-
-template<class Map>
-std::size_t MapValues(const Map &items) noexcept
-{
-    return Multiply(items.size(), sizeof(typename Map::value_type));
-}
 }

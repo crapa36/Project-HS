@@ -17,23 +17,12 @@ namespace gameplay_test
 void Check(bool condition, std::string_view message);
 void Check(const hs::Result &result, std::string_view message);
 
-struct TestContent
-{
-    hs::SimulationRules simulation_rules;
-    hs::PresentationCatalog presentation;
-};
-
-const TestContent &DefaultContent();
-const hs::SimulationRules &DefaultSimulationRules();
+const hs::PresentationCatalog &DefaultPresentation();
 hs::SimulationRules QuietGameData();
 
 hs::TickResult Tick(hs::GameSimulation &simulation,
                     const hs::HeldInputState &held = {},
                     std::span<const hs::ActionEdge> edges = {});
-
-extern hs::SettingsData test_settings;
-extern hs::PresentationUiState test_ui;
-extern std::optional<hs::UiCommand> last_ui_command;
 
 hs::TickResult TickEdge(hs::GameSimulation &simulation, hs::GameAction action,
                         hs::EdgeKind kind, hs::Sequence &sequence,

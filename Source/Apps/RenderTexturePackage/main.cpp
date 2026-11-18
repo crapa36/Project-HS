@@ -155,7 +155,6 @@ void Produce(const fs::path &build_root, const TextureSpec &texture)
     spec.upstream.push_back(upstream);
     if (Current(build_root, spec, texture, source_id, product_id))
     {
-        ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
         return;
     }
 

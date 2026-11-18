@@ -6,6 +6,8 @@
 #include <hs/render_data/geometry_hierarchy.hpp>
 #include <hs/render_data/scene_hlod.hpp>
 #include <hs/render_data/render_revision.hpp>
+#include <hs/render_data/material_schema.hpp>
+#include <hs/render_data/texture_descriptor.hpp>
 #include <algorithm>
 #include <map>
 #include <optional>
@@ -40,9 +42,8 @@ private:
         std::vector<std::pair<std::size_t,std::uint32_t>> hierarchies, scenes;
         std::vector<std::size_t> characters;
         std::optional<float> ground_offset;
-        bool compiled{};
     };
-    std::map<std::uint64_t,std::string> closure_;
+    const std::map<std::uint64_t,std::string_view> &closure_;
     std::map<std::uint64_t,PageContext> pages_;
     std::vector<render_data::AdmittedGeometryHierarchy> hierarchies_;
     std::vector<render_data::AdmittedSceneHlod> scenes_;
@@ -50,16 +51,18 @@ private:
     std::vector<PreparedAnimation> animations_;
     static void Require(bool condition,const char *message)
     { if(!condition) throw std::runtime_error(message); }
-    void RequireDependency(std::string_view id) const
+    AssetId RequireDependency(std::string_view id) const
     {
-        const auto found=closure_.find(MakeAssetId(id).value);
+        const auto asset=MakeAssetId(id);
+        const auto found=closure_.find(asset.value);
         Require(found!=closure_.end() && found->second==id,"geometry dependency missing from runtime closure");
+        return asset;
     }
     PageContext &Context(std::string_view id,std::uint32_t flags)
     {
-        RequireDependency(id);
-        Require(id.ends_with(".rpage"),"geometry context does not name a page");
-        auto [entry,inserted]=pages_.try_emplace(MakeAssetId(id).value);
+        const auto asset=RequireDependency(id);
+        Require(id.starts_with("render/") && id.ends_with(".rpage"),"geometry context does not name a renderer page");
+        auto [entry,inserted]=pages_.try_emplace(asset.value);
         Require(inserted || entry->second.flags==flags,"conflicting geometry page flags");
         entry->second.flags=flags;
         return entry->second;
@@ -83,14 +86,8 @@ private:
         return entry;
     }
 public:
-    explicit RendererGeometryCatalog(std::span<const std::string> closure_product_ids)
-    {
-        for(const auto &id:closure_product_ids)
-        {
-            const auto [entry,inserted]=closure_.emplace(MakeAssetId(id).value,id);
-            Require(inserted || entry->second==id,"runtime closure AssetId collision");
-        }
-    }
+    explicit RendererGeometryCatalog(const std::map<std::uint64_t,std::string_view> &closure)
+        :closure_(closure) {}
     static bool NeedsMetadata(std::string_view id) noexcept
     {
         return !render_data::IsTerrainSurfaceProduct(id) && id.starts_with("render/") && ((id.ends_with(".rpkg") && !id.starts_with("render/texture/")) ||
@@ -99,8 +96,6 @@ public:
     void AddMetadata(std::string_view id,std::span<const std::byte> bytes)
     {
         namespace rd=render_data;
-        RequireDependency(id);
-        Require(NeedsMetadata(id),"unsupported geometry context product");
         if(id.ends_with(".ghbin"))
         {
             auto &owner=hierarchies_.emplace_back(bytes);
@@ -131,6 +126,11 @@ public:
             if(std::ranges::find(package.chunks,rd::ChunkType::CharacterMetadata,&rd::ChunkView::type)!=package.chunks.end())
             {
                 auto data=rd::DecodeCharacterMetadataPackage(package,id=="render/character/archer.rpkg");
+                Require(id.starts_with("render/character/") && id.ends_with(".rpkg"),"invalid character identity");
+                Require((id=="render/character/archer.rpkg")==!data.monster,"character product has the wrong deformation representation");
+                Require(std::ranges::none_of(package.dependencies,[](const std::string &dependency) {
+                    return dependency.ends_with(".meshbin") || dependency.ends_with("_materials.json");
+                }),"legacy character exchange dependency");
                 auto &character=characters_.emplace_back(PreparedCharacter{std::string(id),bytes,package,std::move(data)}).data;
                 const auto attach=[&](const rd::GeometryMetadata &m) {
                     auto &entry=Direct(m,package,id);
@@ -144,16 +144,15 @@ public:
             else Direct(rd::DecodeGeometryMetadata(geometry->bytes,package.dependencies,id),package,id);
         }
     }
-    [[nodiscard]] render_data::GeometryDescriptorStorage CompilePage(std::string_view id,
+    [[nodiscard]] render_data::GeometryDescriptorStorage CompilePage(AssetId asset,
         std::span<const std::byte> bytes,std::uint32_t bulk_index)
     {
         namespace rd=render_data;
-        RequireDependency(id);
-        const auto found=pages_.find(MakeAssetId(id).value);
+        const auto found=pages_.find(asset.value);
         Require(found!=pages_.end(),"geometry page has no validated runtime context");
         auto &entry=found->second;
-        auto prepared=entry.direct ? rd::PrepareGeometryPage(bytes,MakeAssetId(id),*entry.direct) :
-            rd::PrepareGeometryPagePayload(bytes,MakeAssetId(id),entry.flags);
+        auto prepared=entry.direct ? rd::PrepareGeometryPage(bytes,asset,*entry.direct) :
+            rd::PrepareGeometryPagePayload(bytes,asset,entry.flags);
         for(const auto &dependency:prepared.package.dependencies) RequireDependency(dependency);
         for(const auto [owner,index]:entry.hierarchies) hierarchies_[owner].ValidatePage(index,prepared);
         for(const auto [owner,index]:entry.scenes) scenes_[owner].ValidatePage(index,prepared);
@@ -169,17 +168,62 @@ public:
         }
         auto compiled=rd::CompileGeometryDescriptor(bytes,prepared,bulk_index);
         if(entry.ground_offset) compiled.ground_support=rd::BuildGroundSupport(prepared.geometry.vertices,*entry.ground_offset);
-        entry.compiled=true;
         return compiled;
+    }
+    void ValidateCharacterBindings(std::span<const render_data::TextureDescriptor> textures) const
+    {
+        namespace rd=render_data;
+        Require(!characters_.empty(),"character catalog is empty");
+        constexpr std::string_view prefix="render/character/";
+        for(const auto &character:characters_)
+        {
+            const auto stem=character.product_id.substr(prefix.size(),character.product_id.size()-prefix.size()-5);
+            const auto texture=[&](const std::string &id,const std::string &source) {
+                Require(std::ranges::find(character.package.dependencies,id)!=character.package.dependencies.end(),
+                    "missing character texture dependency");
+                const auto asset=MakeAssetId(id);
+                const auto found=std::ranges::find_if(textures,[&](const auto &value) { return value.asset_id.value==asset.value; });
+                Require(found!=textures.end(),"missing character texture descriptor");
+                const auto &description=found->description;
+                std::uint32_t full_mips=1;
+                for(auto side=std::max(description.width,description.height);side>1;side>>=1) ++full_mips;
+                const bool linear=source.find("_normal_")!=std::string::npos || source=="character/monster_ram.dds";
+                Require(description.array_size==1 && description.mip_count==full_mips &&
+                    description.format==(linear ? rd::kTextureFormatBc7 : rd::kTextureFormatBc7Srgb) &&
+                    found->dependencies.size()==1 && found->dependencies[0].value==MakeAssetId(source).value,
+                    "character texture dependency disagrees with its FBX slot");
+            };
+            for(std::uint32_t slot=0;slot<character.data.material_count;++slot)
+                for(const auto *semantic:{"diffuse","normal"})
+                {
+                    const auto name=stem+"_"+semantic+"_"+std::to_string(slot);
+                    texture("render/texture/"+name+".rpkg","character/"+name+".dds");
+                }
+            const bool monster_pbr=std::ranges::any_of(character.data.material_bindings,[](const auto &binding) {
+                return rd::kCharacterMaterialNames[binding.hero_ordinal]=="monster_pbr";
+            });
+            if(monster_pbr)
+                for(const auto *name:{"monster_basecolor","monster_emissive","monster_ram"})
+                    texture("render/texture/"+std::string(name)+".rpkg","character/"+std::string(name)+".dds");
+            if(stem=="archer")
+            {
+                constexpr std::string_view id="render/animation/archer.rpkg";
+                Require(std::ranges::find(character.package.dependencies,id)!=character.package.dependencies.end(),
+                    "Archer metadata is missing its named-animation dependency");
+                const auto animation=std::ranges::find(animations_,id,&PreparedAnimation::product_id);
+                Require(animation!=animations_.end(),"missing Archer animation descriptor");
+                Require(animation->package.dependencies.empty(),"direct character animation must not depend on a legacy exchange");
+                Require(animation->data.sample_rate_hz==60 && animation->data.clips.size()==11 && animation->data.sockets.empty(),
+                    "authored Archer animation extension shape mismatch");
+            }
+        }
     }
     [[nodiscard]] std::vector<PreparedCharacter> TakeCharacters()
     {
-        for(const auto &[id,page]:pages_) Require(page.compiled,"character admission precedes geometry completion");
         return std::move(characters_);
     }
     [[nodiscard]] std::vector<PreparedAnimation> TakeAnimations()
     {
-        for(const auto &[id,page]:pages_) Require(page.compiled,"animation admission precedes geometry completion");
         return std::move(animations_);
     }
 };

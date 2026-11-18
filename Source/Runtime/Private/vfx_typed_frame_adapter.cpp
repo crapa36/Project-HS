@@ -1,4 +1,6 @@
 #include "vfx_typed_frame_adapter.hpp"
+#include <hs/render_data/vfx_payload_ids.hpp>
+#include "vfx_catalog.hpp"
 #include "vfx_persistent_state.hpp"
 #include "vfx_workspace_size.hpp"
 
@@ -42,18 +44,18 @@ consteval std::uint64_t Hash64(std::string_view value) noexcept
     return hash;
 }
 
-constexpr std::uint32_t kPointPayload = Hash32("PointEventPayload");
-constexpr std::uint32_t kContextPayload = Hash32("PresentationContextPayload");
-constexpr std::uint32_t kLinkPayload = Hash32("SourceTargetPayload");
-constexpr std::uint32_t kEntityPayload = Hash32("EntityAttachmentPayload");
-constexpr std::uint32_t kCirclePayload = Hash32("CircleAreaPayload");
-constexpr std::uint32_t kLinePayload = Hash32("LineAreaPayload");
-constexpr std::uint32_t kConePayload = Hash32("ConePayload");
-constexpr std::uint32_t kRingGapsPayload = Hash32("RingWithGapsPayload");
-constexpr std::uint32_t kSafeSectorPayload = Hash32("SafeGapSectorPayload");
+constexpr std::uint32_t kPointPayload = hs::vfx_payload::PointEvent;
+constexpr std::uint32_t kContextPayload = hs::vfx_payload::PresentationContext;
+constexpr std::uint32_t kLinkPayload = hs::vfx_payload::SourceTarget;
+constexpr std::uint32_t kEntityPayload = hs::vfx_payload::EntityAttachment;
+constexpr std::uint32_t kCirclePayload = hs::vfx_payload::CircleArea;
+constexpr std::uint32_t kLinePayload = hs::vfx_payload::LineArea;
+constexpr std::uint32_t kConePayload = hs::vfx_payload::Cone;
+constexpr std::uint32_t kRingGapsPayload = hs::vfx_payload::RingWithGaps;
+constexpr std::uint32_t kSafeSectorPayload = hs::vfx_payload::SafeGapSector;
 constexpr std::uint64_t kSafeMarkerEffect = Hash64("particle.boss.shockwave.safe_gap_marker");
-constexpr std::uint32_t kProjectilePathPayload = Hash32("ProjectilePathPayload");
-constexpr std::uint32_t kProjectilePayload = Hash32("ProjectilePayload");
+constexpr std::uint32_t kProjectilePathPayload = hs::vfx_payload::ProjectilePath;
+constexpr std::uint32_t kProjectilePayload = hs::vfx_payload::Projectile;
 constexpr std::uint64_t kBossDashWarningEffect = Hash64("particle.boss.dash.telegraph");
 constexpr std::uint64_t kBossVolleyWarningEffect = Hash64("particle.boss.volley.telegraph");
 constexpr std::uint64_t kRangedWarningEffect = Hash64("particle.enemy.ranged.telegraph_line");
@@ -84,7 +86,6 @@ struct UpgradeSlowAreaAlias
 {
     std::uint8_t skill;
     std::uint8_t source_upgrade;
-    std::uint64_t skill_id;
     std::uint32_t ordinal;
     std::uint64_t effect_id;
 };
@@ -93,7 +94,6 @@ struct DamageTrailSupplement
 {
     std::uint8_t skill;
     std::uint8_t source_upgrade;
-    std::uint64_t skill_id;
     std::uint32_t ordinal;
     std::uint64_t effect_id;
     bool fixed_duration;
@@ -109,16 +109,16 @@ constexpr std::uint8_t kRicochetSkill = 5;
 constexpr std::uint8_t kRetreatShotSkill = 8;
 
 constexpr std::array kUpgradeSlowAreaAliases{
-    UpgradeSlowAreaAlias{kArrowRainSkill, 7, Hash64("skill.arrow_rain"), 8,
+    UpgradeSlowAreaAlias{kArrowRainSkill, 7, 8,
                          Hash64("particle.upgrade.arrow_rain.finish_slow")},
-    UpgradeSlowAreaAlias{kTrapSkill, 1, Hash64("skill.trap"), 2,
+    UpgradeSlowAreaAlias{kTrapSkill, 1, 2,
                          Hash64("particle.upgrade.trap.land_slow")},
 };
 
 constexpr std::array kDamageTrailSupplements{
-    DamageTrailSupplement{kRetreatShotSkill, 2, Hash64("skill.retreat_shot"), 3,
+    DamageTrailSupplement{kRetreatShotSkill, 2, 3,
                           Hash64("particle.upgrade.retreat.slow_trail"), false},
-    DamageTrailSupplement{kPiercingShotSkill, 3, Hash64("skill.piercing_shot"), 4,
+    DamageTrailSupplement{kPiercingShotSkill, 3, 4,
                           Hash64("particle.skill.piercing_shot.trail_pulse"), true},
 };
 
@@ -185,54 +185,32 @@ const VfxEffectRecord *FindEffect(const VfxProgramView &cooked,
     return effect.handle == handle ? &effect : nullptr;
 }
 
-const UpgradeSlowAreaAlias *FindUpgradeSlowAreaAlias(
-    const PersistentVfxVisual &visual) noexcept
+const PreparedVfxFrameBindings::SlowAreaAlias *FindUpgradeSlowAreaAlias(
+    const PreparedVfxFrameBindings &bindings, const PersistentVfxVisual &visual) noexcept
 {
     if (visual.kind != PersistentVfxKind::UpgradeSlowArea || visual.cast_id == 0)
         return nullptr;
-    const auto found = std::find_if(kUpgradeSlowAreaAliases.begin(),
-                                    kUpgradeSlowAreaAliases.end(),
-        [&visual](const UpgradeSlowAreaAlias &alias) {
+    const auto found = std::find_if(bindings.slow_area_aliases.begin(),
+                                    bindings.slow_area_aliases.end(),
+        [&visual](const auto &alias) {
             return alias.skill == visual.skill &&
                 alias.source_upgrade == visual.source_upgrade;
         });
-    return found == kUpgradeSlowAreaAliases.end() ? nullptr : &*found;
+    return found == bindings.slow_area_aliases.end() ? nullptr : &*found;
 }
 
-const DamageTrailSupplement *FindDamageTrailSupplement(
-    const PersistentVfxVisual &visual) noexcept
+const PreparedVfxFrameBindings::DamageSupplement *FindDamageTrailSupplement(
+    const PreparedVfxFrameBindings &bindings, const PersistentVfxVisual &visual) noexcept
 {
     if (visual.kind != PersistentVfxKind::DamageTrail || visual.cast_id == 0)
         return nullptr;
-    const auto found = std::find_if(kDamageTrailSupplements.begin(),
-                                    kDamageTrailSupplements.end(),
-        [&visual](const DamageTrailSupplement &supplement) {
+    const auto found = std::find_if(bindings.damage_supplements.begin(),
+                                    bindings.damage_supplements.end(),
+        [&visual](const auto &supplement) {
             return supplement.skill == visual.skill &&
                 supplement.source_upgrade == visual.source_upgrade;
         });
-    return found == kDamageTrailSupplements.end() ? nullptr : &*found;
-}
-
-bool UpgradeBindingContains(const VfxProgramView &cooked,
-                            std::uint64_t skill_id,
-                            std::uint32_t ordinal,
-                            std::uint32_t effect_handle) noexcept
-{
-    const auto binding = std::find_if(cooked.upgrade_bindings.begin(),
-                                      cooked.upgrade_bindings.end(),
-        [skill_id, ordinal](const VfxUpgradeBindingRecord &candidate) {
-            return candidate.skill_id == skill_id &&
-                candidate.ordinal == ordinal;
-        });
-    if (binding == cooked.upgrade_bindings.end() ||
-        binding->sequence.first > cooked.upgrade_sequences.size() ||
-        binding->sequence.count >
-            cooked.upgrade_sequences.size() - binding->sequence.first)
-        return false;
-    const auto sequence = std::span(cooked.upgrade_sequences).subspan(
-        binding->sequence.first, binding->sequence.count);
-    return std::find(sequence.begin(), sequence.end(), effect_handle) !=
-        sequence.end();
+    return found == bindings.damage_supplements.end() ? nullptr : &*found;
 }
 
 bool Finite(const Float3 &value) noexcept
@@ -699,6 +677,131 @@ bool FiniteWarningOwner(const PersistentVfxVisual &owner, double current_tick) n
 
 } // namespace
 
+bool PreparedVfxFrameBindings::ContainsUpgrade(VfxEffectHandle handle, std::uint8_t skill,
+                                               std::uint32_t ordinal) const noexcept
+{
+    return handle != 0 && handle <= upgrade_memberships.size() &&
+        skill < skill_count &&
+        ordinal != 0 && ordinal <= 8 &&
+        (upgrade_memberships[handle - 1][skill] & (1u << (ordinal - 1))) != 0;
+}
+
+PreparedVfxFrameBindings PrepareVfxFrameBindings(const VfxImage &image)
+{
+    PreparedVfxFrameBindings prepared;
+    const auto &program = image.program;
+    constexpr std::array skill_ids{
+        Hash64("skill.basic_attack"), Hash64("skill.piercing_shot"), Hash64("skill.multishot"),
+        Hash64("skill.charged_shot"), Hash64("skill.explosive_arrow"), Hash64("skill.ricochet_arrow"),
+        Hash64("skill.arrow_rain"), Hash64("skill.trap"), Hash64("skill.retreat_shot")};
+    static_assert(skill_ids.size() == PreparedVfxFrameBindings::skill_count);
+    prepared.upgrade_memberships.resize(program.effects.size());
+    for (std::size_t skill = 0; skill < skill_ids.size(); ++skill)
+        for (std::uint32_t ordinal = 1; ordinal <= 8; ++ordinal)
+        {
+            // Preserve the first matching authored binding, including an invalid first range.
+            const auto found = std::ranges::find_if(program.upgrade_bindings, [&](const auto &binding) {
+                return binding.skill_id == skill_ids[skill] && binding.ordinal == ordinal;
+            });
+            if (found == program.upgrade_bindings.end() ||
+                found->sequence.first > program.upgrade_sequences.size() ||
+                found->sequence.count > program.upgrade_sequences.size() - found->sequence.first) continue;
+            for (const auto handle : program.upgrade_sequences.subspan(found->sequence.first, found->sequence.count))
+                if (handle != 0 && handle <= prepared.upgrade_memberships.size())
+                    prepared.upgrade_memberships[handle - 1][skill] |= static_cast<std::uint8_t>(1u << (ordinal - 1));
+        }
+    const auto effect_for = [&](std::uint64_t id) {
+        const auto *lookup = FindLookup(image, id);
+        return lookup ? FindEffect(program, lookup->handle) : nullptr;
+    };
+    std::size_t kind_count{};
+    for (const auto &binding : kPersistentBindings)
+        kind_count = std::max(kind_count, static_cast<std::size_t>(binding.kind) + 1);
+    prepared.persistent.resize(kind_count);
+    for (const auto &binding : kPersistentBindings)
+    {
+        auto &row = prepared.persistent[static_cast<std::size_t>(binding.kind)];
+        row.effect_id = binding.effect_id;
+        row.payload_kind = binding.payload_kind;
+        const auto *effect = effect_for(binding.effect_id);
+        const bool pickup = binding.kind == PersistentVfxKind::PickupXpMagnetTrail;
+        const bool stamp = binding.kind == PersistentVfxKind::ChargedFullReady ||
+            binding.kind == PersistentVfxKind::MultishotRetarget ||
+            binding.kind == PersistentVfxKind::BasicArrowReturn ||
+            binding.kind == PersistentVfxKind::RicochetBleedExtend;
+        row.fixed_stamp = stamp;
+        if (!effect || effect->input_mode != (pickup ? 0u : 1u) || effect->payload_kind != binding.payload_kind ||
+            (stamp && (effect->timing_kind != 0 || !std::isfinite(effect->seconds) || effect->seconds <= 0.0f)) ||
+            (binding.payload_kind == kEntityPayload && !stamp && effect->timing_kind != 1) ||
+            (binding.payload_kind == kLinkPayload && effect->timing_kind != 1) ||
+            (binding.kind == PersistentVfxKind::ChargedOverchargeLoop && effect->binding_timing != Hash32("charge_ratio")))
+            continue;
+        row.effect = effect;
+    }
+    const auto area_for = [&](std::uint64_t id, std::uint8_t skill, std::uint32_t ordinal) {
+        const auto *effect = effect_for(id);
+        return effect && effect->input_mode == 1 && effect->timing_kind == 1 &&
+            effect->payload_kind == kCirclePayload && prepared.ContainsUpgrade(effect->handle, skill, ordinal)
+            ? effect : nullptr;
+    };
+    const auto &slow = prepared.persistent[static_cast<std::size_t>(PersistentVfxKind::UpgradeSlowArea)];
+    prepared.slow_area_aliases.reserve(kUpgradeSlowAreaAliases.size());
+    for (const auto &alias : kUpgradeSlowAreaAliases)
+    {
+        auto &row = prepared.slow_area_aliases.emplace_back();
+        row.skill = alias.skill;
+        row.source_upgrade = alias.source_upgrade;
+        row.binding = {alias.effect_id, effect_for(alias.effect_id), kCirclePayload};
+        const auto *effect = row.binding.effect;
+        if (!effect || effect->input_mode != 1 || effect->payload_kind != kCirclePayload ||
+            !prepared.ContainsUpgrade(effect->handle, alias.skill, alias.ordinal)) row.binding.effect = nullptr;
+        row.base_supplement = area_for(slow.effect_id, alias.skill, alias.ordinal);
+    }
+    const auto append_area = [&](PersistentVfxKind kind, std::uint8_t skill, std::uint8_t source_upgrade,
+                                 std::uint64_t id, std::uint32_t ordinal) {
+        prepared.area_supplements.push_back({kind, skill, source_upgrade, id, area_for(id, skill, ordinal)});
+    };
+    append_area(PersistentVfxKind::ArrowRainArea, kArrowRainSkill, 0,
+        Hash64("particle.upgrade.arrow_rain.secondary_area"), 1);
+    append_area(PersistentVfxKind::FireArea, kArrowRainSkill, 3,
+        Hash64("particle.upgrade.arrow_rain.fire_patch"), 4);
+    append_area(PersistentVfxKind::FireArea, kTrapSkill, 4,
+        Hash64("particle.upgrade.trap.fire_variant"), 5);
+    append_area(PersistentVfxKind::TrapPending, kRetreatShotSkill, 1,
+        Hash64("particle.upgrade.retreat.start_trap"), 2);
+    append_area(PersistentVfxKind::TrapArmed, kRetreatShotSkill, 1,
+        Hash64("particle.upgrade.retreat.start_trap"), 2);
+    const auto *trail = prepared.persistent[static_cast<std::size_t>(PersistentVfxKind::DamageTrail)].effect;
+    prepared.damage_supplements.reserve(kDamageTrailSupplements.size());
+    for (const auto &supplement : kDamageTrailSupplements)
+    {
+        const auto *effect = effect_for(supplement.effect_id);
+        if (!trail || !prepared.ContainsUpgrade(trail->handle, supplement.skill, supplement.ordinal) ||
+            !effect || effect->input_mode != 1 || effect->payload_kind != kLinePayload ||
+            (supplement.fixed_duration ? effect->timing_kind != 0 || !std::isfinite(effect->seconds) || effect->seconds <= 0.0f
+                                       : effect->timing_kind != 1) ||
+            !prepared.ContainsUpgrade(effect->handle, supplement.skill, supplement.ordinal)) effect = nullptr;
+        prepared.damage_supplements.push_back({supplement.skill, supplement.source_upgrade,
+            supplement.effect_id, effect, supplement.fixed_duration});
+    }
+    const auto *wave = effect_for(Hash64("particle.session.wave_warning"));
+    if (wave && wave->input_mode == 0 && wave->timing_kind == 0 && wave->payload_kind == kContextPayload &&
+        std::isfinite(wave->seconds) && wave->seconds > 0 && wave->seconds <= 60)
+    {
+        prepared.wave_timer = wave;
+        prepared.wave_timer_window = static_cast<Tick>(std::ceil(wave->seconds * 60.0f));
+    }
+    const auto *delivery = effect_for(kArrowRainIncomingEffect);
+    if (delivery && delivery->input_mode == 1 && delivery->timing_kind == 0 &&
+        delivery->payload_kind == kProjectilePayload && std::isfinite(delivery->seconds) &&
+        delivery->seconds > 0 && delivery->seconds <= 60 &&
+        prepared.ContainsUpgrade(delivery->handle, kArrowRainSkill, 1))
+        if (const auto radius = DeliveryHeadRadius(program, *delivery))
+            prepared.arrow_rain = PreparedVfxFrameBindings::ArrowRain{delivery, *radius,
+                static_cast<Tick>(std::ceil(static_cast<double>(delivery->seconds) * 60.0))};
+    return prepared;
+}
+
 #if defined(HS_DEVELOPMENT_TOOLS)
 std::optional<PersistentVfxKind> TestRoomPersistentKind(std::uint64_t effect_id,
     const VfxEffectRecord &effect) noexcept
@@ -743,13 +846,6 @@ std::size_t PreparedPairFacts::CaptureHash::operator()(const CaptureKey &key) co
     return hash;
 }
 
-std::size_t PreparedPairFacts::RetainedCapacityBytes() const noexcept
-{
-    using namespace vfx_retained_size;
-    return Add(Add(Add(MapValues(previous_), MapValues(current_)), Vector(current_aliases_)),
-        Add(MapValues(instances_), MapValues(captures_)));
-}
-
 bool PreparedPairFacts::Prepare(Key key,
     std::span<const PersistentVfxVisual> previous,
     std::span<const PersistentVfxVisual> current,
@@ -780,19 +876,6 @@ bool PreparedPairFacts::Prepare(Key key,
     key_ = key;
     prepared_ = true;
     return true;
-}
-
-namespace
-{
-PreparedPairFacts PrepareRawPairFacts(
-    std::span<const PersistentVfxVisual> previous,
-    std::span<const PersistentVfxVisual> current)
-{
-    PreparedPairFacts facts;
-    (void)facts.Prepare({.previous_publication = previous.empty() ? 0u : 1u,
-                         .current_publication = 1u}, previous, current, {}, {});
-    return facts;
-}
 }
 
 const PersistentVfxVisual *PreparedPairFacts::Previous(
@@ -827,7 +910,7 @@ const CapturedRenderInstance *PreparedPairFacts::Capture(
 }
 
 void BuildVfxTypedFrameInputs(
-    const VfxImage &image,
+    const VfxCatalog &catalog,
     std::span<const PresentationEvent> events,
     std::span<const PersistentVfxVisual> current,
     std::span<const PersistentVfxVisual> previous,
@@ -835,6 +918,8 @@ void BuildVfxTypedFrameInputs(
     VfxTypedFrameInputs &result,
     const PreparedPairFacts &pair_facts, float interpolation, VfxQuality quality)
 {
+    const auto &image = catalog.Image();
+    const auto &frame_bindings = catalog.FrameBindings();
     const auto &cooked = image.program;
     const double display_tick = static_cast<double>(current_tick) -
         (current_tick != 0 ? 1.0 - interpolation : 0.0);
@@ -1034,16 +1119,7 @@ void BuildVfxTypedFrameInputs(
         result.events.push_back(std::move(input));
     }
 
-    // The delivery action and its authored head size belong to the immutable
-    // image. Resolve this route once even when several scheduled owners use it.
-    struct ArrowRainFacts
-    {
-        const VfxEffectRecord *effect{};
-        float head_radius{};
-        Tick window_ticks{};
-    };
-    std::optional<ArrowRainFacts> arrow_rain_facts;
-    bool arrow_rain_recipe_resolved = false;
+    const auto &arrow_rain_facts = frame_bindings.arrow_rain;
 
     for (unsigned endpoint = 0; endpoint < (interpolation < 1.0f ? 2u : 1u); ++endpoint)
     for (const auto &source_visual : endpoint == 0 ? current : previous)
@@ -1078,16 +1154,13 @@ void BuildVfxTypedFrameInputs(
         if (visual.kind == PersistentVfxKind::WaveTimer)
         {
             constexpr auto id = Hash64("particle.session.wave_warning");
-            const auto *lookup = FindLookup(image, id);
-            const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
-            if (!effect || effect->input_mode != 0 || effect->timing_kind != 0 ||
-                effect->payload_kind != kContextPayload ||
-                !std::isfinite(effect->seconds) || effect->seconds <= 0 || effect->seconds > 60 ||
+            const auto *effect = frame_bindings.wave_timer;
+            if (!effect ||
                 visual.effect_asset.value != id || visual.stable_id == 0 ||
                 !Finite(visual.position) || !std::isfinite(visual.radius) || visual.radius <= 0 ||
                 visual.active_tick > display_tick || visual.source_horizon_tick <= display_tick)
             { Diagnose(result); continue; }
-            const auto window = static_cast<Tick>(std::ceil(effect->seconds * 60.0f));
+            const auto window = frame_bindings.wave_timer_window;
             if (visual.source_horizon_tick - display_tick > window) continue;
             const auto start = visual.source_horizon_tick > window
                 ? visual.source_horizon_tick - window : Tick{};
@@ -1110,23 +1183,6 @@ void BuildVfxTypedFrameInputs(
         }
         if (visual.kind == PersistentVfxKind::ScheduledAreaDelivery)
         {
-            if (!arrow_rain_recipe_resolved)
-            {
-                arrow_rain_recipe_resolved = true;
-                const auto *lookup = FindLookup(image, kArrowRainIncomingEffect);
-                const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
-                if (effect && effect->input_mode == 1 && effect->timing_kind == 0 &&
-                    effect->payload_kind == kProjectilePayload &&
-                    std::isfinite(effect->seconds) && effect->seconds > 0 &&
-                    effect->seconds <= 60)
-                {
-                    const auto head_radius = DeliveryHeadRadius(cooked, *effect);
-                    if (head_radius && UpgradeBindingContains(cooked,
-                            Hash64("skill.arrow_rain"), 1, effect->handle))
-                        arrow_rain_facts = ArrowRainFacts{effect, *head_radius,
-                            static_cast<Tick>(std::ceil(static_cast<double>(effect->seconds) * 60.0))};
-                }
-            }
             if (!arrow_rain_facts ||
                 visual.effect_asset.value != kArrowRainIncomingEffect ||
                 visual.skill != kArrowRainSkill || visual.source_upgrade != 0 ||
@@ -1199,8 +1255,7 @@ void BuildVfxTypedFrameInputs(
                 continue;
             }
             if (visual.skill == 3 && visual.source_upgrade == 2 &&
-                (!UpgradeBindingContains(cooked, Hash64("skill.charged_shot"), 3,
-                                         effect->handle) || visual.cast_id == 0))
+                (!frame_bindings.ContainsUpgrade(effect->handle, 3, 3) || visual.cast_id == 0))
             {
                 Diagnose(result);
                 continue;
@@ -1231,52 +1286,33 @@ void BuildVfxTypedFrameInputs(
             result.persistent.push_back(std::move(input));
             continue;
         }
-        const auto base_binding = std::find_if(kPersistentBindings.begin(), kPersistentBindings.end(),
-            [&visual](const PersistentBinding &candidate) { return candidate.kind == visual.kind; });
-        if (base_binding == kPersistentBindings.end())
+        const auto kind = static_cast<std::size_t>(visual.kind);
+        if (kind >= frame_bindings.persistent.size() || !frame_bindings.persistent[kind].effect_id)
         {
             Diagnose(result);
             continue;
         }
-        PersistentBinding binding = *base_binding;
-        const auto *alias = FindUpgradeSlowAreaAlias(visual);
-        if (alias)
-            binding.effect_id = alias->effect_id;
-        const auto *lookup = FindLookup(image, binding.effect_id);
-        const auto *effect = lookup ? FindEffect(cooked, lookup->handle) : nullptr;
-        if (alias && (!lookup || !effect ||
-                      !UpgradeBindingContains(cooked, alias->skill_id,
-                                              alias->ordinal, effect->handle)))
-        {
-            // An authored alias is selected by authoritative area metadata. A
-            // malformed or missing cooked membership must not fall back to the
-            // legacy effect, which would render the same area with the wrong
-            // authored recipe.
-            Diagnose(result);
-            continue;
-        }
+        const auto &base_binding = frame_bindings.persistent[kind];
+        const auto *alias = FindUpgradeSlowAreaAlias(frame_bindings, visual);
+        // A selected but unsupported alias cannot fall back to the base effect.
+        const auto &binding = alias ? alias->binding : base_binding;
+        const auto *effect = binding.effect;
         const bool bow_draw_stamp =
             visual.kind == PersistentVfxKind::PlayerBowDraw;
-        const bool fixed_status_stamp =
-            visual.kind == PersistentVfxKind::ChargedFullReady ||
-            visual.kind == PersistentVfxKind::MultishotRetarget ||
-            visual.kind == PersistentVfxKind::BasicArrowReturn ||
-            visual.kind == PersistentVfxKind::RicochetBleedExtend;
+        const bool fixed_status_stamp = binding.fixed_stamp;
         const bool empowered_ready_stamp =
             visual.kind == PersistentVfxKind::EmpoweredReady;
         const auto age = fixed_status_stamp
             ? std::optional<float>{0.0f}
             : Lifetime(visual, display_tick);
-        const bool pickup_motion = visual.kind == PersistentVfxKind::PickupXpMagnetTrail;
-        if (!lookup || !effect || effect->input_mode != (pickup_motion ? 0u : 1u) ||
-            effect->payload_kind != binding.payload_kind || !age)
+        if (!effect || !age)
         {
             Diagnose(result);
             continue;
         }
         if (visual.kind == PersistentVfxKind::UpgradeSlowArea &&
             visual.skill == kArrowRainSkill && visual.source_upgrade != 7 &&
-            !UpgradeBindingContains(cooked, Hash64("skill.arrow_rain"), 6, effect->handle))
+            !frame_bindings.ContainsUpgrade(effect->handle, kArrowRainSkill, 6))
         {
             Diagnose(result);
             continue;
@@ -1284,13 +1320,10 @@ void BuildVfxTypedFrameInputs(
         if ((visual.kind == PersistentVfxKind::BurnTransferLink ||
              visual.kind == PersistentVfxKind::RicochetLink) && visual.cast_id != 0)
         {
-            const auto skill_id = visual.skill == kPiercingShotSkill
-                ? Hash64("skill.piercing_shot")
-                : visual.skill == kMultishotSkill ? Hash64("skill.multishot")
-                : visual.skill == kRicochetSkill ? Hash64("skill.ricochet_arrow") : 0;
-            if (!skill_id || visual.source_upgrade >= 8 ||
-                !UpgradeBindingContains(cooked, skill_id, visual.source_upgrade + 1u,
-                                        effect->handle))
+            const bool supported_skill = visual.skill == kPiercingShotSkill ||
+                visual.skill == kMultishotSkill || visual.skill == kRicochetSkill;
+            if (!supported_skill || visual.source_upgrade >= 8 ||
+                !frame_bindings.ContainsUpgrade(effect->handle, visual.skill, visual.source_upgrade + 1u))
             {
                 Diagnose(result);
                 continue;
@@ -1299,31 +1332,25 @@ void BuildVfxTypedFrameInputs(
         if ((visual.kind == PersistentVfxKind::RicochetReturnLink &&
              (visual.skill != kRicochetSkill || visual.source_upgrade != 0 ||
               visual.cast_id == 0 ||
-              !UpgradeBindingContains(cooked, Hash64("skill.ricochet_arrow"), 1,
-                                      effect->handle))) ||
+              !frame_bindings.ContainsUpgrade(effect->handle, kRicochetSkill, 1))) ||
             (visual.kind == PersistentVfxKind::ChargedFullReady &&
              visual.source_upgrade == 0 &&
-             !UpgradeBindingContains(cooked, Hash64("skill.charged_shot"), 1,
-                                     effect->handle)) ||
+             !frame_bindings.ContainsUpgrade(effect->handle, 3, 1)) ||
             (visual.kind == PersistentVfxKind::BasicArrowReturn &&
              (visual.skill != 0 || visual.source_upgrade != 6 ||
-              !UpgradeBindingContains(cooked, Hash64("skill.basic_attack"), 7,
-                                      effect->handle))) ||
+              !frame_bindings.ContainsUpgrade(effect->handle, 0, 7))) ||
             (visual.kind == PersistentVfxKind::ChargedFullReady &&
              visual.source_upgrade == 4 &&
-             !UpgradeBindingContains(cooked, Hash64("skill.charged_shot"), 5,
-                                     effect->handle)) ||
+             !frame_bindings.ContainsUpgrade(effect->handle, 3, 5)) ||
             (visual.kind == PersistentVfxKind::MultishotRetarget &&
              (visual.skill != kMultishotSkill || visual.source_upgrade != 7 ||
-              !UpgradeBindingContains(cooked, Hash64("skill.multishot"), 8, effect->handle))) ||
+              !frame_bindings.ContainsUpgrade(effect->handle, kMultishotSkill, 8))) ||
             (visual.kind == PersistentVfxKind::RicochetBleedExtend &&
              (visual.skill != kRicochetSkill || visual.source_upgrade != 2 ||
-              !UpgradeBindingContains(cooked, Hash64("skill.ricochet_arrow"), 3, effect->handle))) ||
+              !frame_bindings.ContainsUpgrade(effect->handle, kRicochetSkill, 3))) ||
             (visual.kind == PersistentVfxKind::ChargedOverchargeLoop &&
              (visual.skill != 3 || visual.source_upgrade != 0 ||
-              effect->binding_timing != Hash32("charge_ratio") ||
-              !UpgradeBindingContains(cooked, Hash64("skill.charged_shot"), 1,
-                                      effect->handle))))
+              !frame_bindings.ContainsUpgrade(effect->handle, 3, 1))))
         {
             Diagnose(result);
             continue;
@@ -1422,9 +1449,7 @@ void BuildVfxTypedFrameInputs(
         input.normalized_age = *age;
         if (fixed_status_stamp)
         {
-            if (display_tick < visual.active_tick || effect->timing_kind != 0 ||
-                !std::isfinite(effect->seconds) || effect->seconds <= 0.0f ||
-                input.elapsed_seconds >= effect->seconds)
+            if (display_tick < visual.active_tick || input.elapsed_seconds >= effect->seconds)
             {
                 Diagnose(result);
                 continue;
@@ -1461,7 +1486,7 @@ void BuildVfxTypedFrameInputs(
         {
             const float length = std::hypot(std::hypot(visual.link_target_position.x - visual.position.x,
                 visual.link_target_position.z - visual.position.z), visual.link_target_position.y - visual.position.y);
-            geometry_ok = effect->timing_kind == 1 && visual.active_tick <= display_tick && display_tick < visual.expires &&
+            geometry_ok = visual.active_tick <= display_tick && display_tick < visual.expires &&
                 visual.expires > visual.active_tick && Finite(visual.position) && Finite(visual.link_target_position) &&
                 std::isfinite(length) && length > .0001f && std::isfinite(visual.link_width) && visual.link_width > 0;
             if (geometry_ok)
@@ -1475,9 +1500,7 @@ void BuildVfxTypedFrameInputs(
         }
         else if (binding.payload_kind == kEntityPayload)
         {
-            geometry_ok=(fixed_status_stamp ? effect->timing_kind == 0 &&
-                std::isfinite(effect->seconds) && effect->seconds > 0.0f
-                : effect->timing_kind == 1) && visual.effect_asset.value==binding.effect_id&&
+            geometry_ok=visual.effect_asset.value==binding.effect_id&&
                 visual.active_tick<=display_tick&&Finite(visual.position)&&std::isfinite(visual.yaw)&&
                 std::isfinite(visual.radius)&&visual.radius>0&&std::isfinite(visual.entity_health_fraction)&&
                 visual.entity_health_fraction>=0&&visual.entity_health_fraction<=1&&
@@ -1535,16 +1558,8 @@ void BuildVfxTypedFrameInputs(
         }
         result.persistent.push_back(std::move(input));
 
-        const auto append_area_recipe = [&](std::uint64_t effect_id,
-                                            std::uint64_t skill_id,
-                                            std::uint32_t ordinal) {
-            const auto *recipe_lookup = FindLookup(image, effect_id);
-            const auto *recipe = recipe_lookup
-                ? FindEffect(cooked, recipe_lookup->handle) : nullptr;
-            if (!recipe || recipe->input_mode != 1 || recipe->timing_kind != 1 ||
-                recipe->payload_kind != kCirclePayload ||
-                !UpgradeBindingContains(cooked, skill_id, ordinal, recipe->handle) ||
-                visual.cast_id == 0)
+        const auto append_area_recipe = [&](std::uint64_t effect_id, const VfxEffectRecord *recipe) {
+            if (!recipe || visual.cast_id == 0)
             {
                 Diagnose(result);
                 return;
@@ -1559,44 +1574,16 @@ void BuildVfxTypedFrameInputs(
             result.persistent.push_back(std::move(recipe_input));
         };
         if (alias)
-            append_area_recipe(base_binding->effect_id, alias->skill_id, alias->ordinal);
-        if (visual.kind == PersistentVfxKind::ArrowRainArea &&
-            visual.skill == kArrowRainSkill && visual.source_upgrade == 0)
-            append_area_recipe(Hash64("particle.upgrade.arrow_rain.secondary_area"),
-                               Hash64("skill.arrow_rain"), 1);
-        if (visual.kind == PersistentVfxKind::FireArea && visual.skill == kArrowRainSkill &&
-            visual.source_upgrade == 3)
-            append_area_recipe(Hash64("particle.upgrade.arrow_rain.fire_patch"),
-                               Hash64("skill.arrow_rain"), 4);
-        if (visual.kind == PersistentVfxKind::FireArea && visual.skill == kTrapSkill &&
-            visual.source_upgrade == 4)
-            append_area_recipe(Hash64("particle.upgrade.trap.fire_variant"),
-                               Hash64("skill.trap"), 5);
-        if ((visual.kind == PersistentVfxKind::TrapPending ||
-             visual.kind == PersistentVfxKind::TrapArmed) &&
-            visual.skill == kRetreatShotSkill && visual.source_upgrade == 1)
-            append_area_recipe(Hash64("particle.upgrade.retreat.start_trap"),
-                               Hash64("skill.retreat_shot"), 2);
-        const auto *supplement = FindDamageTrailSupplement(visual);
+            append_area_recipe(base_binding.effect_id, alias->base_supplement);
+        for (const auto &supplement : frame_bindings.area_supplements)
+            if (supplement.kind == visual.kind && supplement.skill == visual.skill &&
+                supplement.source_upgrade == visual.source_upgrade)
+                append_area_recipe(supplement.effect_id, supplement.effect);
+        const auto *supplement = FindDamageTrailSupplement(frame_bindings, visual);
         if (!supplement) continue;
 
-        const auto *supplement_lookup = FindLookup(image, supplement->effect_id);
-        const auto *supplement_effect = supplement_lookup
-            ? FindEffect(cooked, supplement_lookup->handle) : nullptr;
-        const bool exact_binding =
-            UpgradeBindingContains(cooked, supplement->skill_id,
-                                   supplement->ordinal, effect->handle) &&
-            supplement_effect && supplement_effect->input_mode == 1 &&
-            supplement_effect->payload_kind == kLinePayload &&
-            (supplement->fixed_duration
-                 ? supplement_effect->timing_kind == 0 &&
-                       std::isfinite(supplement_effect->seconds) &&
-                       supplement_effect->seconds > 0.0f
-                 : supplement_effect->timing_kind == 1) &&
-            UpgradeBindingContains(cooked, supplement->skill_id,
-                                   supplement->ordinal,
-                                   supplement_effect->handle);
-        if (!exact_binding)
+        const auto *supplement_effect = supplement->effect;
+        if (!supplement_effect)
         {
             // The generic damage trail remains valid on its own. A qualified
             // supplement is emitted only when both authored line recipes are
@@ -1632,28 +1619,14 @@ void BuildVfxTypedFrameInputs(
 
 }
 
-std::size_t VfxUpgradeMovementState::RetainedCapacityBytes() const noexcept
-{
-    return vfx_retained_size::Add(vfx_retained_size::Vector(owners_),
-        vfx_retained_size::Vector(staged_owners_));
-}
-
-void BuildVfxTypedFrameInputsFromRaw(
-    const VfxImage &image, std::span<const PresentationEvent> events,
-    std::span<const PersistentVfxVisual> current,
-    std::span<const PersistentVfxVisual> previous, Tick current_tick,
-    VfxTypedFrameInputs &result, float interpolation, VfxQuality quality)
-{
-    auto facts = PrepareRawPairFacts(previous, current);
-    BuildVfxTypedFrameInputs(image, events, current, previous, current_tick,
-                             result, facts, interpolation, quality);
-}
 
 void VfxUpgradeMovementState::Append(
-    const VfxImage &image,
+    const VfxCatalog &catalog,
     std::span<const PresentationEvent> dispatched_events,
     Tick current_tick, std::vector<VfxPersistentInput> &output, float interpolation, VfxQuality quality)
 {
+    const auto &image = catalog.Image();
+    const auto &frame_bindings = catalog.FrameBindings();
     const auto &cooked = image.program;
     const double display_tick = static_cast<double>(current_tick) -
         (current_tick != 0 ? 1.0 - interpolation : 0.0);
@@ -1662,7 +1635,6 @@ void VfxUpgradeMovementState::Append(
         return current_tick < owner.started || (display_tick >= owner.started &&
             display_tick - owner.started >= duration_ticks);
     });
-    staged_owners_.clear();
     for (const auto &event : dispatched_events)
     {
       const bool dash = event.asset.value == Hash64("particle.upgrade.retreat.second_dash");
@@ -1681,7 +1653,7 @@ void VfxUpgradeMovementState::Append(
       if (!effect || effect->input_mode != 1 || effect->timing_kind != 0 ||
           effect->payload_kind != (dash ? kLinePayload : kContextPayload) ||
           !std::isfinite(effect->seconds) || effect->seconds <= 0 ||
-          !UpgradeBindingContains(cooked, Hash64("skill.retreat_shot"), 8, effect->handle) ||
+          !frame_bindings.ContainsUpgrade(effect->handle, kRetreatShotSkill, 8) ||
           (display_tick >= event.tick && display_tick - event.tick >=
               static_cast<double>(effect->seconds * 60.0f)))
           continue;
@@ -1696,8 +1668,7 @@ void VfxUpgradeMovementState::Append(
           event.asset.value);
       if (std::any_of(owners_.begin(), owners_.end(), [stable_id](const Owner &owner) {
               return owner.input.stable_id == stable_id;
-          }) || std::any_of(staged_owners_.begin(), staged_owners_.end(),
-              [stable_id](const Owner &owner) { return owner.input.stable_id == stable_id; }))
+          }))
           continue;
       Owner owner{};
       owner.started = event.tick;
@@ -1716,16 +1687,14 @@ void VfxUpgradeMovementState::Append(
       else
           owner.input.payload = VfxContextPayload{event.upgrade_owner_id, direction,
                                                   0.0f, length, event.geometry.width};
-      staged_owners_.push_back(std::move(owner));
+      owners_.push_back(std::move(owner));
     }
 
     const auto visible_count = [display_tick](const std::vector<Owner> &owners) {
         return static_cast<std::size_t>(std::ranges::count_if(owners,
             [display_tick](const Owner &owner) { return display_tick >= owner.started; }));
     };
-    vfx_retained_size::ReserveAppend(owners_, staged_owners_.size());
-    vfx_retained_size::ReserveAppend(output,
-        visible_count(owners_) + visible_count(staged_owners_));
+    vfx_retained_size::ReserveAppend(output, visible_count(owners_));
 
     const auto append_visible = [&](const Owner &owner) {
         if (display_tick < owner.started) return;
@@ -1741,11 +1710,6 @@ void VfxUpgradeMovementState::Append(
         output.push_back(std::move(input));
     };
     for (const auto &owner : owners_) append_visible(owner);
-    for (const auto &owner : staged_owners_) append_visible(owner);
-
-    static_assert(std::is_nothrow_move_constructible_v<Owner>);
-    for (auto &owner : staged_owners_) owners_.push_back(std::move(owner));
-    staged_owners_.clear();
 }
 
 bool RefreshVfxGroundEventOwner(VfxEventInput &event,
@@ -1855,45 +1819,7 @@ bool RefreshVfxGroundEventOwner(VfxEventInput &event,
         return true;
     }
 
-void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
-    std::span<const PersistentVfxVisual> owners, Tick current_tick,
-    const PreparedPairFacts &pair_facts,
-    std::span<const PersistentVfxVisual> previous, float interpolation)
-{
-    std::size_t retained{};
-    for (auto &event : events)
-    {
-        if (!RefreshVfxGroundEventOwner(event, owners, current_tick, pair_facts,
-                                        previous, interpolation)) continue;
-        if (&events[retained] != &event) events[retained] = std::move(event);
-        ++retained;
-    }
-    events.resize(retained);
-}
 
-bool RefreshVfxGroundEventOwnerFromRaw(VfxEventInput &event,
-    std::span<const PersistentVfxVisual> owners, Tick current_tick,
-    std::span<const PersistentVfxVisual> previous, float interpolation)
-{
-    auto facts = PrepareRawPairFacts(previous, owners);
-    return RefreshVfxGroundEventOwner(event, owners, current_tick, facts,
-                                      previous, interpolation);
-}
-
-void RefreshVfxGroundEventOwnersFromRaw(
-    std::vector<VfxEventInput> &events,
-    std::span<const PersistentVfxVisual> owners, Tick current_tick,
-    std::span<const PersistentVfxVisual> previous, float interpolation)
-{
-    auto facts = PrepareRawPairFacts(previous, owners);
-    RefreshVfxGroundEventOwners(events, owners, current_tick, facts,
-                                previous, interpolation);
-}
-std::size_t SnapshotParticleScratch::RetainedCapacityBytes() const noexcept
-{
-    return vfx_retained_size::Add(vfx_retained_size::Vector(ground_routes),
-        vfx_retained_size::Add(previous.RetainedCapacityBytes(), current.RetainedCapacityBytes()));
-}
 
 void AppendPersistentSnapshotParticleBirths(
     const RenderSnapshotPair &snapshots, const RenderVfxFrameInput &typed,

@@ -3,7 +3,6 @@
 #include <hs/core/shipped_content_owner.hpp>
 #include "audio_catalog.hpp"
 #include "audio_native.hpp"
-#include "runtime_diagnostics.hpp"
 
 #include <Windows.h>
 #include <wrl/client.h>
@@ -14,7 +13,6 @@
 #include <array>
 #include <atomic>
 #include <bit>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -34,13 +32,6 @@ using namespace audio_detail;
 namespace
 {
 
-std::uint64_t AudioQpc() noexcept
-{
-    LARGE_INTEGER value{};
-    QueryPerformanceCounter(&value);
-    return static_cast<std::uint64_t>(value.QuadPart);
-}
-
 [[nodiscard]] float ClampVolume(float value) noexcept
 {
     return std::clamp(value, 0.0f, 1.0f);
@@ -55,17 +46,6 @@ std::uint64_t AudioQpc() noexcept
            a.nBlockAlign == b.nBlockAlign &&
            a.wBitsPerSample == b.wBitsPerSample &&
            a.cbSize == b.cbSize;
-}
-
-[[nodiscard]] X3DAUDIO_VECTOR Normalize(Float3 value, X3DAUDIO_VECTOR fallback) noexcept
-{
-    const auto length_squared = value.x * value.x + value.y * value.y + value.z * value.z;
-    if (length_squared <= 0.000001f)
-    {
-        return fallback;
-    }
-    const auto inverse_length = 1.0f / std::sqrt(length_squared);
-    return {value.x * inverse_length, value.y * inverse_length, value.z * inverse_length};
 }
 
 [[nodiscard]] bool IsCombatBus(AudioBus bus) noexcept
@@ -101,7 +81,7 @@ std::uint64_t AudioQpc() noexcept
 
 struct AudioEngine::Impl
 {
-    std::shared_ptr<const void> generation_lease;
+    std::shared_ptr<const void> content_owner;
     struct CuePlayback
     {
         std::uint64_t last_play_ms{};
@@ -149,7 +129,7 @@ struct AudioEngine::Impl
     std::vector<std::uint32_t> transition_cues;
     std::unique_ptr<CuePlayback[]> playback;
     std::unique_ptr<AudioSample[]> samples;
-    std::vector<std::byte> resident_pcm;
+    std::unique_ptr<std::byte[]> resident_pcm;
     std::size_t sample_count{};
     const ShippedContentOwner *content{};
     std::mutex read_mutex;
@@ -160,16 +140,9 @@ struct AudioEngine::Impl
     std::array<float, XAUDIO2_MAX_AUDIO_CHANNELS> spatial_matrix{};
     std::array<std::uint32_t, 4> spatial_matrix_key{};
     bool spatial_matrix_valid{};
-    bool capture_timings{}; // Configured before the reader is started.
     void (*wake_main)(void *) noexcept{};
     void *wake_context{};
-    std::array<runtime_detail::DiagnosticSample, kAudioWorkNames.size()> work{};
-    std::atomic<std::uint64_t> reader_jobs{}, reader_failures{}, reader_bytes{};
-    std::atomic<std::uint64_t> reader_read_ticks{}, reader_queue_ticks{}, reader_request_ready_ticks{};
     bool reader_failure_reported{}; // Reader thread only; one diagnostic per engine.
-    AudioWorkTimings native_timings{};
-    runtime_detail::DiagnosticClock Clock() const noexcept { return capture_timings ? AudioQpc : nullptr; }
-    auto &Work(AudioWorkId id) noexcept { return work[static_cast<std::size_t>(id)]; }
 
     std::span<const float> SpatialMatrix(Float3 position, AudioPriority priority) noexcept
     {
@@ -179,7 +152,6 @@ struct AudioEngine::Impl
             std::bit_cast<std::uint32_t>(distance)};
         if (!spatial_matrix_valid || spatial_matrix_key != key)
         {
-            runtime_detail::DiagnosticScope spatial(Work(AudioWorkId::Spatial), Clock());
             X3DAUDIO_EMITTER emitter{};
             emitter.Position = {position.x, position.y, position.z};
             emitter.OrientFront = {0.0f, 0.0f, 1.0f};
@@ -306,7 +278,6 @@ struct AudioEngine::Impl
                 if (stopping) return;
                 sample = reads.front(); reads.pop_front();
             }
-            const auto begin = capture_timings ? AudioQpc() : 0;
             const auto sample_index = static_cast<std::size_t>(sample - samples.get());
             std::optional<Result> read_result;
             bool success = false;
@@ -324,16 +295,6 @@ struct AudioEngine::Impl
                 ReportReaderFailure(sample_index, ErrorCode::TaskFailed, "exception", "unknown exception");
             }
             if (!success) sample->bytes.clear();
-            if (capture_timings)
-            {
-                const auto end = AudioQpc();
-                reader_read_ticks.fetch_add(end - begin, std::memory_order_relaxed);
-                reader_queue_ticks.fetch_add(begin - sample->requested_qpc, std::memory_order_relaxed);
-                reader_request_ready_ticks.fetch_add(end - sample->requested_qpc, std::memory_order_relaxed);
-                reader_bytes.fetch_add(success ? sample->data_size : 0, std::memory_order_relaxed);
-                reader_failures.fetch_add(!success, std::memory_order_relaxed);
-                reader_jobs.fetch_add(1, std::memory_order_release);
-            }
             sample->state.store(success ? SampleState::Ready : SampleState::Failed, std::memory_order_release);
             if (wake_main) wake_main(wake_context);
             if (!success && read_result)
@@ -343,7 +304,6 @@ struct AudioEngine::Impl
     }
     void EvictStopped() noexcept
     {
-        runtime_detail::DiagnosticScope scope(Work(AudioWorkId::Evict), Clock());
         for (const auto index : transition_cues)
         {
             const auto &cue = cues[index];
@@ -419,16 +379,13 @@ struct AudioEngine::Impl
             CoUninitialize();
             owns_com = false;
         }
-        status.active_source_voices = 0;
     }
 
     void Reclaim() noexcept
     {
-        runtime_detail::DiagnosticScope scope(Work(AudioWorkId::Reclaim), Clock());
-        status.active_source_voices = 0;
         for (auto &active : active_voices)
         {
-            status.active_source_voices += Observe(active);
+            Observe(active);
         }
     }
 
@@ -441,14 +398,13 @@ struct AudioEngine::Impl
 
     void ApplyVolumes() noexcept
     {
-        status.effective_master_volume = status.background_muted ? 0.0f : master_volume;
         const auto apply = [&](IXAudio2SubmixVoice *bus, float volume) {
             if (!bus) return true;
             const auto result = bus->SetVolume(volume);
             if (SUCCEEDED(result)) return true;
             Failure({AudioNativeOperation::Volume, result}); EnterSilent(result); return false;
         };
-        if (!apply(master_bus, status.effective_master_volume)) return;
+        if (!apply(master_bus, status.background_muted ? 0.0f : master_volume)) return;
         if (!apply(bgm_bus, status.combat_paused ? 0.0f : bgm_volume)) return;
         if (!apply(sfx_bus, status.combat_paused ? 0.0f : sfx_volume)) return;
         (void)apply(ui_bus, ui_volume);
@@ -464,17 +420,8 @@ AudioEngine::~AudioEngine()
     Shutdown();
 }
 
-void AudioEngine::RetainGeneration(std::shared_ptr<const void> generation)
-{
-    impl_->generation_lease = std::move(generation);
-}
-
 Result AudioEngine::InitializePlayback(const SettingsData &settings)
 {
-    impl_->status.loaded_cues = static_cast<std::uint32_t>(impl_->cues.size());
-    for (const auto &cue : impl_->cues)
-        for (std::size_t i = 0; i < cue.sample_count; ++i)
-            impl_->samples[cue.first_sample + i].preload = cue.preload;
     try
     {
         impl_->playback = std::make_unique<Impl::CuePlayback[]>(impl_->cues.size());
@@ -524,15 +471,18 @@ Result PrepareAudio(const AudioImage &image, const ShippedContentOwner &owner,
         std::size_t resident_bytes{};
         for (const auto &chunk : image.chunks)
             if (chunk.preload) resident_bytes += static_cast<std::size_t>(chunk.bytes);
-        prepared->resident_pcm.resize(resident_bytes);
+        if (resident_bytes) prepared->resident_pcm = std::make_unique_for_overwrite<std::byte[]>(resident_bytes);
+        const std::span resident_pcm{prepared->resident_pcm.get(), resident_bytes};
         // Generated chunks retain contiguous preload reads and separate transition owners.
         std::size_t resident_offset{};
         for (const auto &chunk : image.chunks)
         {
-            for (std::size_t i = 0; i < chunk.sample_count; ++i)
-                prepared->samples[chunk.first_sample + i].chunk = &chunk;
-            if (!chunk.preload) continue;
-            auto pcm = std::span(prepared->resident_pcm).subspan(resident_offset, static_cast<std::size_t>(chunk.bytes));
+            if (!chunk.preload)
+            {
+                prepared->samples[chunk.first_sample].chunk = &chunk;
+                continue;
+            }
+            auto pcm = resident_pcm.subspan(resident_offset, static_cast<std::size_t>(chunk.bytes));
             if (auto loaded = owner.ReadVerified(chunk.offset, pcm, chunk.digest); !loaded)
                 return loaded;
             std::size_t sample_offset{};
@@ -552,20 +502,13 @@ Result PrepareAudio(const AudioImage &image, const ShippedContentOwner &owner,
     { return Result::Failure(ErrorCode::TaskFailed, "audio", error.what()); }
 }
 
-Result AudioEngine::Initialize(const SettingsData &settings, const AudioImage &image, const ShippedContentOwner &owner)
-{
-    std::shared_ptr<PreparedAudio> prepared;
-    if (auto result = PrepareAudio(image, owner, prepared); !result) return result;
-    return Initialize(settings, std::move(prepared), {});
-}
-
 Result AudioEngine::Initialize(const SettingsData &settings, std::shared_ptr<PreparedAudio> prepared,
                                std::shared_ptr<const void> owner)
 {
     if (!prepared || !prepared->samples)
         return Result::Failure(ErrorCode::InvalidArgument, "audio", "Prepared audio is missing or already consumed.");
     Shutdown();
-    impl_->generation_lease = std::move(owner);
+    impl_->content_owner = std::move(owner);
     return InitializePrepared(settings, std::move(*prepared));
 }
 
@@ -576,7 +519,6 @@ bool AudioEngine::PrepareCue(AssetId id) noexcept
 
 AudioCueReadiness AudioEngine::RequestCue(AssetId id) noexcept
 {
-    runtime_detail::DiagnosticScope scope(impl_->Work(AudioWorkId::PrepareCue), impl_->Clock());
     auto *cue = impl_->Find(id);
     if (!cue) return AudioCueReadiness::Missing;
     auto &playing = impl_->State(*cue);
@@ -597,7 +539,6 @@ AudioCueReadiness AudioEngine::RequestCue(AssetId id) noexcept
             if (state == SampleState::Empty)
             {
                 std::lock_guard lock(impl_->read_mutex);
-                sample->requested_qpc = impl_->capture_timings ? AudioQpc() : 0;
                 impl_->reads.push_back(sample);
                 sample->state.store(SampleState::Queued, std::memory_order_release);
                 impl_->read_ready.notify_one();
@@ -631,7 +572,6 @@ bool AudioEngine::IsTransitionTrack(AssetId id) const noexcept
 
 Result AudioEngine::InitializeDevice(const SettingsData &settings)
 {
-    runtime_detail::DiagnosticScope scope(impl_->Work(AudioWorkId::InitializeDevice), impl_->Clock());
     const auto com_result = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (SUCCEEDED(com_result))
     {
@@ -717,7 +657,6 @@ Result AudioEngine::InitializeDevice(const SettingsData &settings)
     impl_->listener.OrientFront = {0.0f, 0.0f, 1.0f};
     impl_->listener.OrientTop = {0.0f, 1.0f, 0.0f};
     impl_->device_channels = device_details.InputChannels;
-    impl_->native_timings.output_sample_rate = device_details.InputSampleRate;
     impl_->status.device_state = AudioDeviceState::Ready;
     impl_->status.native_error = 0;
     ApplySettings(settings);
@@ -741,11 +680,11 @@ void AudioEngine::Shutdown() noexcept
     impl_->transition_cues.clear();
     impl_->playback.reset();
     impl_->samples.reset();
-    std::vector<std::byte>().swap(impl_->resident_pcm);
+    impl_->resident_pcm.reset();
     impl_->sample_count = 0;
     impl_->content = nullptr;
     impl_->stopping = false;
-    impl_->generation_lease.reset();
+    impl_->content_owner.reset();
     impl_->status = {};
 }
 
@@ -766,17 +705,16 @@ void AudioEngine::SetBackgroundMuted(bool muted) noexcept
     impl_->ApplyVolumes();
 }
 
-AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t dequeued_qpc) noexcept
+AudioPlayResult AudioEngine::Play(const PresentationEvent &event) noexcept
 {
-    runtime_detail::DiagnosticScope scope(impl_->Work(AudioWorkId::Play), impl_->Clock());
-    runtime_detail::DiagnosticScope admission(impl_->Work(AudioWorkId::Admission), impl_->Clock());
     try
     {
     if (event.kind != PresentationKind::Audio || event.asset.value == 0) return AudioPlayResult::Ignored;
     const auto *cue_ptr = impl_->Find(event.asset);
     if (!cue_ptr)
     {
-        impl_->Reclaim(); ++impl_->status.skipped_missing_cues; return AudioPlayResult::MissingCue;
+        impl_->Reclaim();
+        return AudioPlayResult::MissingCue;
     }
     const auto &cue = *cue_ptr;
     auto &playing = impl_->State(cue);
@@ -786,12 +724,11 @@ AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t 
     struct ArrowCandidate { std::uint64_t started_ms; Sequence sequence; };
     std::array<ArrowCandidate, kMaximumSourceVoices> arrows;
     std::size_t arrow_count{};
-    impl_->status.active_source_voices = 0;
     // Observe native completion and decide admission in the same slot pass.
     // The shared retrigger/arrow clock is still read after native observations.
     for (auto &active : impl_->active_voices)
     {
-        impl_->status.active_source_voices += impl_->Observe(active);
+        impl_->Observe(active);
         if (active.releasing) continue;
         if (!active.voice || !active.queued)
         {
@@ -831,7 +768,7 @@ AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t 
             if (FAILED(pitch))
             {
                 impl_->Failure({AudioNativeOperation::Frequency, pitch});
-                impl_->Retire(*first_same_cue); --impl_->status.active_source_voices;
+                impl_->Retire(*first_same_cue);
                 return AudioPlayResult::NativeFailure;
             }
         }
@@ -839,10 +776,7 @@ AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t 
     }
     if (same_cue >= cue.max_simultaneous) return AudioPlayResult::Limited;
     if (same_priority >= PrioritySoftCap(cue.priority) || recent_arrow_impacts >= 6)
-    {
-        ++impl_->status.skipped_voice_limits;
         return AudioPlayResult::Limited;
-    }
     const auto index = static_cast<std::size_t>(event.sequence % cue.sample_count);
     auto *sample = &impl_->samples[cue.first_sample + index];
     if (sample->state.load(std::memory_order_acquire) != SampleState::Ready)
@@ -851,7 +785,6 @@ AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t 
         return AudioPlayResult::NotReady;
     }
     if (!impl_->engine || !impl_->device_voice) return AudioPlayResult::Silent;
-    admission.Stop();
     auto *selected = free_slot ? free_slot : victim;
     if (!free_slot && (!selected || selected->priority >= cue.priority)) return AudioPlayResult::Limited;
     const auto spatial_matrix = cue.spatial && sample->format.nChannels == 1
@@ -865,8 +798,7 @@ AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t 
     buffer.Flags = XAUDIO2_END_OF_STREAM;
     if (cue.loop) buffer.LoopCount = XAUDIO2_LOOP_INFINITE;
 
-    runtime_detail::DiagnosticScope native(impl_->Work(AudioWorkId::NativeVoice), impl_->Clock());
-    const bool reuse = selected->voice && sample->preload && !selected->completion && selected->sample &&
+    const bool reuse = selected->voice && cue.preload && !selected->completion && selected->sample &&
                        SameWaveFormat(selected->sample->format, sample->format);
     struct Candidate
     {
@@ -875,12 +807,12 @@ AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t 
     } candidate;
     if (!reuse)
     {
-        if (!sample->preload)
+        if (!cue.preload)
         {
             const auto slot = static_cast<std::size_t>(selected - impl_->active_voices.data());
             for (auto &record : impl_->completions[slot])
                 if (!record.claimed) { candidate.completion = &record; break; }
-            if (!candidate.completion) { ++impl_->status.skipped_voice_limits; return AudioPlayResult::Limited; }
+            if (!candidate.completion) return AudioPlayResult::Limited;
             candidate.completion->wake_main = impl_->wake_main;
             candidate.completion->wake_context = impl_->wake_context;
             candidate.completion->Begin(sample->native_pins);
@@ -894,8 +826,6 @@ AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t 
             return AudioPlayResult::NativeFailure; // Old playback is still untouched.
         }
     }
-    const bool old_queued = selected->queued;
-    if (old_queued) --impl_->status.active_source_voices;
     selected->queued = false;
     if (!reuse && selected->voice)
     {
@@ -906,11 +836,9 @@ AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t 
             return AudioPlayResult::NativeFailure;
     }
     auto *source = reuse ? selected->voice : candidate.voice;
-    std::uint64_t submit_qpc{};
     const bool start = !impl_->status.combat_paused || !IsCombatBus(cue.bus);
     const auto submitted = SubmitPreparedVoice(*source, sends, destination, impl_->device_channels,
-        spatial_matrix, buffer,
-        dequeued_qpc ? impl_->Clock() : nullptr, &submit_qpc, start);
+        spatial_matrix, buffer, start);
     if (!submitted.Succeeded())
     {
         impl_->Failure(submitted);
@@ -923,7 +851,6 @@ AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t 
             selected->sample = sample;
             selected->queued = impl_->Observe(*selected);
             selected->releasing = selected->queued;
-            impl_->status.active_source_voices += selected->queued;
         }
         else if (reuse) impl_->Retire(*selected);
         return AudioPlayResult::NativeFailure; // New candidate guard destroys before releasing its PCM pin.
@@ -940,14 +867,6 @@ AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t 
     selected->aggregation_count = 1; selected->started_ms = now; selected->serial = ++impl_->voice_serial;
     selected->queued = true; selected->releasing = false; selected->session_id = event.session_id;
     playing.last_play_ms = now; playing.has_played = true;
-    ++impl_->status.played_count; ++impl_->status.active_source_voices;
-    if (submit_qpc && submit_qpc >= dequeued_qpc)
-    {
-        const auto elapsed = submit_qpc - dequeued_qpc;
-        impl_->native_timings.drain_submit_ticks += elapsed;
-        impl_->native_timings.drain_submit_max_ticks = std::max(impl_->native_timings.drain_submit_max_ticks, elapsed);
-        ++impl_->native_timings.drain_submit_calls;
-    }
     return start ? AudioPlayResult::Started : AudioPlayResult::QueuedPaused;
     }
     catch (...) { ++impl_->status.skipped_load_failures; return AudioPlayResult::NativeFailure; }
@@ -955,9 +874,7 @@ AudioPlayResult AudioEngine::Play(const PresentationEvent &event, std::uint64_t 
 
 void AudioEngine::Stop(AssetId cue) noexcept
 {
-    runtime_detail::DiagnosticScope scope(impl_->Work(AudioWorkId::Stop), impl_->Clock());
     if (const auto *row = impl_->Find(cue)) impl_->State(*row).prepared = false;
-    impl_->status.active_source_voices = 0;
     for (auto &active : impl_->active_voices)
     {
         if (active.voice && active.cue.value == cue.value)
@@ -966,31 +883,12 @@ void AudioEngine::Stop(AssetId cue) noexcept
             if (!result.Succeeded()) { impl_->Failure(result); impl_->Retire(active); }
             else active.releasing = true;
         }
-        impl_->status.active_source_voices += impl_->Observe(active);
-    }
-}
-
-void AudioEngine::StopBus(AudioBus bus) noexcept
-{
-    runtime_detail::DiagnosticScope scope(impl_->Work(AudioWorkId::Stop), impl_->Clock());
-    for (const auto &cue : impl_->cues)
-        if (cue.bus == bus) impl_->State(cue).prepared = false;
-    impl_->status.active_source_voices = 0;
-    for (auto &active : impl_->active_voices)
-    {
-        if (active.voice && active.bus == bus)
-        {
-            const auto result = StopFlushVoice(*active.voice);
-            if (!result.Succeeded()) { impl_->Failure(result); impl_->Retire(active); }
-            else active.releasing = true;
-        }
-        impl_->status.active_source_voices += impl_->Observe(active);
+        impl_->Observe(active);
     }
 }
 
 void AudioEngine::BeginSession(std::uint64_t session_id) noexcept
 {
-    impl_->status.active_source_voices = 0;
     for (auto &active : impl_->active_voices)
     {
         if (active.voice && active.bus != AudioBus::Bgm && active.session_id != 0 && active.session_id != session_id)
@@ -998,31 +896,21 @@ void AudioEngine::BeginSession(std::uint64_t session_id) noexcept
             impl_->Failure(StopFlushVoice(*active.voice));
             impl_->Retire(active); // Session close joins native reads before any transition eviction.
         }
-        impl_->status.active_source_voices += impl_->Observe(active);
+        impl_->Observe(active);
     }
     // Reset once at the queue boundary, before its first event. Within the
     // session all producers still share the original per-cue retrigger clock.
     for (const auto &cue : impl_->cues) impl_->State(cue).has_played = false;
 }
 
-void AudioEngine::UpdateListener(Float3 position, Float3 forward, Float3 up) noexcept
+void AudioEngine::UpdateListener(Float3 position) noexcept
 {
-    runtime_detail::DiagnosticScope scope(impl_->Work(AudioWorkId::Listener), impl_->Clock());
     impl_->Reclaim();
     impl_->EvictStopped();
-    const X3DAUDIO_VECTOR next_position{position.x, position.y, position.z};
-    const auto next_front = Normalize(forward, {0.0f, 0.0f, 1.0f});
-    const auto next_top = Normalize(up, {0.0f, 1.0f, 0.0f});
-    const auto equal = [](const X3DAUDIO_VECTOR &a, const X3DAUDIO_VECTOR &b) {
-        return a.x == b.x && a.y == b.y && a.z == b.z;
-    };
-    if (equal(impl_->listener.Position, next_position) &&
-        equal(impl_->listener.OrientFront, next_front) &&
-        equal(impl_->listener.OrientTop, next_top)) return;
+    const auto &previous = impl_->listener.Position;
+    if (previous.x == position.x && previous.y == position.y && previous.z == position.z) return;
     impl_->spatial_matrix_valid = false;
-    impl_->listener.Position = next_position;
-    impl_->listener.OrientFront = next_front;
-    impl_->listener.OrientTop = next_top;
+    impl_->listener.Position = {position.x, position.y, position.z};
     for (auto &active : impl_->active_voices)
     {
         if (!active.voice || !active.queued || !active.spatial || !active.sample)
@@ -1030,14 +918,12 @@ void AudioEngine::UpdateListener(Float3 position, Float3 forward, Float3 up) noe
         const auto matrix = impl_->SpatialMatrix(active.position, active.priority);
         const auto target_bus = active.bus == AudioBus::Sfx ? impl_->sfx_bus :
                                 active.bus == AudioBus::Bgm ? impl_->bgm_bus : impl_->ui_bus;
-        runtime_detail::DiagnosticScope native(impl_->Work(AudioWorkId::NativeVoice), impl_->Clock());
         const auto result = active.voice->SetOutputMatrix(target_bus ? target_bus : impl_->master_bus,
                                                           1, impl_->device_channels, matrix.data());
         if (FAILED(result))
         {
             impl_->Failure({AudioNativeOperation::Matrix, result});
             impl_->Retire(active);
-            --impl_->status.active_source_voices;
         }
     }
 }
@@ -1057,7 +943,7 @@ void AudioEngine::PauseCombat() noexcept
             if (FAILED(result))
             {
                 impl_->Failure({AudioNativeOperation::Stop, result});
-                impl_->Retire(active); --impl_->status.active_source_voices;
+                impl_->Retire(active);
             }
         }
     }
@@ -1079,7 +965,7 @@ void AudioEngine::ResumeCombat() noexcept
             if (FAILED(result))
             {
                 impl_->Failure({AudioNativeOperation::Start, result});
-                impl_->Retire(active); --impl_->status.active_source_voices;
+                impl_->Retire(active);
             }
         }
     }
@@ -1100,55 +986,10 @@ AudioNativeOperation AudioEngine::FailedNativeOperation() const noexcept
     return impl_->status.native_operation;
 }
 
-void AudioEngine::SetCaptureTimings(bool enabled) noexcept
-{
-    // Changing capture while the reader runs would change its counter ownership.
-    if (impl_->reader.joinable()) return;
-    impl_->capture_timings = enabled;
-    LARGE_INTEGER frequency{};
-    if (enabled) QueryPerformanceFrequency(&frequency);
-    impl_->native_timings.qpc_frequency = static_cast<std::uint64_t>(frequency.QuadPart);
-}
-
 void AudioEngine::SetWakeCallback(void (*notify)(void *) noexcept, void *context) noexcept
 {
     if (impl_->reader.joinable()) return;
     impl_->wake_main = notify; impl_->wake_context = context;
-}
-
-AudioWorkTimings AudioEngine::CaptureTimings() noexcept
-{
-    if (!impl_->capture_timings) return {};
-    const auto now = AudioQpc();
-    auto &native = impl_->native_timings;
-    native.native_available = static_cast<bool>(impl_->engine);
-    if (impl_->engine && (native.native_samples == 0 || now - native.native_sample_qpc >= native.qpc_frequency))
-    {
-        XAUDIO2_PERFORMANCE_DATA data{};
-        impl_->engine->GetPerformanceData(&data);
-        native.native_available = true;
-        native.native_sample_qpc = now;
-        ++native.native_samples;
-        native.audio_cycles = data.AudioCyclesSinceLastQuery;
-        native.total_cycles = data.TotalCyclesSinceLastQuery;
-        native.minimum_cycles_per_quantum = data.MinimumCyclesPerQuantum;
-        native.maximum_cycles_per_quantum = data.MaximumCyclesPerQuantum;
-        native.native_active_voices = data.ActiveSourceVoiceCount;
-        native.native_total_voices = data.TotalSourceVoiceCount;
-        native.glitches = data.GlitchesSinceEngineStarted;
-        native.latency_samples = data.CurrentLatencyInSamples;
-    }
-    auto result = native;
-    result.captured = true;
-    for (std::size_t i = 0; i < impl_->work.size(); ++i)
-        result.scopes[i] = {impl_->work[i].ticks, impl_->work[i].calls};
-    result.reader_jobs = impl_->reader_jobs.load(std::memory_order_acquire);
-    result.reader_failures = impl_->reader_failures.load(std::memory_order_relaxed);
-    result.reader_bytes = impl_->reader_bytes.load(std::memory_order_relaxed);
-    result.reader_read_ticks = impl_->reader_read_ticks.load(std::memory_order_relaxed);
-    result.reader_queue_ticks = impl_->reader_queue_ticks.load(std::memory_order_relaxed);
-    result.reader_request_ready_ticks = impl_->reader_request_ready_ticks.load(std::memory_order_relaxed);
-    return result;
 }
 
 } // namespace hs

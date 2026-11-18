@@ -8,34 +8,8 @@ namespace hs::geometry_content
 struct GeometryErrorBounds
 {
     double lower{}, upper{};
-    std::uint64_t oracle_queries{};
-    bool qualification_used{};
 };
 enum class GeometryErrorCheckMode { Normal, Exhaustive };
-struct GeometryErrorQualificationKey
-{
-    std::uint32_t bvh_abi{}, distance_abi{}, geometry_format_abi{}, material_policy{};
-    std::uint32_t compiler{}, target{}, floating_point_contract{};
-    std::int32_t rounding_mode{};
-    std::uint64_t compiler_version{};
-    bool operator==(const GeometryErrorQualificationKey &) const noexcept = default;
-};
-// An independently accepted GT09 result, supplied by the build caller. No
-// production qualification is assumed from the method ABI or unit-test success.
-// The record must outlive the synchronous cook, including its joined workers.
-struct GeometryErrorQualification
-{
-    GeometryErrorQualificationKey key;
-    double maximum_absolute_coordinate{};
-    double minimum_positive_edge_squared{}, minimum_positive_area_squared{};
-    std::uint64_t maximum_triangles_per_surface{};
-    bool includes_degenerate_triangles{};
-};
-struct GeometryErrorChecks
-{
-    GeometryErrorCheckMode mode{GeometryErrorCheckMode::Normal};
-    const GeometryErrorQualification *qualification{};
-};
 struct OpticalMaterialProfile
 {
     std::uint32_t compatibility_group{};
@@ -52,7 +26,6 @@ struct SurfaceWitness
 [[nodiscard]] std::vector<SurfaceWitness> BuildSurfaceWitnesses(
     std::span<const render_data::ExpandedVertex> source,
     std::span<const render_data::ExpandedVertex> target);
-[[nodiscard]] GeometryErrorQualificationKey GeometryErrorImplementationKey() noexcept;
 // Preserve complete vertex field identity without a portable encode/decode roundtrip.
 void IndexVertices(std::span<const render_data::ExpandedVertex> expanded,
                    std::vector<render_data::ExpandedVertex> &vertices,
@@ -74,5 +47,5 @@ void IndexVertices(std::span<const render_data::ExpandedVertex> expanded,
     std::span<const render_data::ExpandedVertex> coarse,
     std::span<const std::uint16_t> material_mapping = {},
     std::uint64_t refinement_budget = 4096,
-    GeometryErrorChecks checks = {});
+    GeometryErrorCheckMode checks = GeometryErrorCheckMode::Normal);
 }

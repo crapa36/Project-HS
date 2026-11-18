@@ -22,29 +22,16 @@ struct SelectedGeneration
     std::unordered_map<std::string, std::string> product_digests;
     std::unordered_map<std::string, std::vector<std::string>> product_dependencies;
 
-    [[nodiscard]] std::string_view PointerSnapshot() const noexcept { return pointer_snapshot_; }
-
     [[nodiscard]] Result Require(std::string_view logical_id,
                                  std::filesystem::path &path) const;
 
 private:
-    std::string pointer_snapshot_;
-    // Copies share the read lease; the final owner releases it.
-    std::shared_ptr<GenerationFileLock> reader_lease_;
+    // Copies share each ProductSet lease; the final owner releases them.
+    std::vector<std::shared_ptr<GenerationFileLock>> reader_leases_;
     friend Result LoadSelectedGeneration(const std::filesystem::path &, SelectedGeneration &);
 };
 
 [[nodiscard]] Result LoadSelectedGeneration(
-    const std::filesystem::path &pointer_path, SelectedGeneration &generation);
-
-// Reads one pointer snapshot while allowing atomic replacement of its pathname.
-[[nodiscard]] Result ReadGenerationPointer(
-    const std::filesystem::path &pointer_path, std::string &bytes);
-
-// Validate the immutable payload bytes against the manifest identities. Startup
-// selection intentionally performs only structural and size checks; callers
-// preparing a candidate for adoption invoke this explicit integrity pass.
-[[nodiscard]] Result VerifySelectedGenerationProducts(
-    const SelectedGeneration &generation);
+    const std::filesystem::path &manifest_path, SelectedGeneration &generation);
 
 } // namespace hs

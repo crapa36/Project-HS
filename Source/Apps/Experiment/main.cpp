@@ -129,27 +129,15 @@ struct Arguments
 [[nodiscard]] hs::Result ClearPreviousArtifacts(
     const std::filesystem::path &directory, const hs::ExperimentSpec &spec)
 {
-    constexpr std::array<std::string_view, 18> names{
-        "adapter.txt", "camera.json", "d3d12_validation.log", "dred.txt",
-        "dred_config.json", "events.ndjson", "gpu_passes.csv", "heartbeat.json",
-        "particle_stats.json", "render.json",
-        "result.json", "shader_hot_reload.log", "spec.json", "timeline.csv",
-        "watchdog.dmp", "watchdog.json", "input_spec.json", "child_failure.dmp"};
-    std::vector<std::filesystem::path> paths;
-    paths.reserve(names.size() + spec.captures.size());
-    for (const auto name : names) paths.emplace_back(name);
-    for (const auto &capture : spec.captures) paths.emplace_back(capture.path);
-
-    for (const auto &relative : paths)
+    const std::string_view names[]{
+        "adapter.txt", "d3d12_validation.log", "dred.txt",
+        "events.ndjson", "gpu_live.csv", "render.json", "result.json", "timeline.csv",
+        spec.final_capture_path};
+    for (const auto name : names)
     {
-        if (relative.empty() || relative.is_absolute() ||
-            std::ranges::find(relative, std::filesystem::path("..")) != relative.end())
-        {
-            return hs::Result::Failure(hs::ErrorCode::InvalidArgument, "hs_experiment",
-                                       "Artifact paths must stay inside the artifact directory.");
-        }
+        if (name.empty()) continue;
         std::error_code error;
-        std::filesystem::remove(directory / relative, error);
+        std::filesystem::remove(directory / name, error);
         if (error)
         {
             return hs::Result::Failure(hs::ErrorCode::InvalidState, "hs_experiment",
@@ -168,8 +156,6 @@ struct Arguments
     spec.mode = hs::ExperimentMode::OffscreenRender;
     spec.build_hash = std::move(build_hash);
     spec.content_hash = std::move(content_hash);
-    spec.probes = {"gpu.pass", "gameplay.checksum"};
-    spec.captures.push_back({180, "capture_tick_180.png"});
     spec.assertions.push_back(
         {"execution-valid", "/execution_valid", "eq", true, 0.0});
     spec.assertions.push_back(
@@ -182,7 +168,7 @@ struct Arguments
 {
     if (spec.mode == hs::ExperimentMode::SimulationOnly)
     {
-        if (!spec.captures.empty())
+        if (!spec.final_capture_path.empty())
         {
             return hs::Result::Failure(hs::ErrorCode::InvalidArgument, "hs_experiment",
                                        "simulation_only does not produce PNG captures.");
@@ -194,14 +180,6 @@ struct Arguments
         return hs::Result::Failure(
             hs::ErrorCode::InvalidArgument, "hs_experiment",
             "Current RunApplication contract supports maximum_tick termination only.");
-    }
-    if (std::ranges::any_of(spec.captures, [&](const hs::ExperimentCapture &capture) {
-            return capture.tick != spec.termination.maximum_tick;
-        }))
-    {
-        return hs::Result::Failure(
-            hs::ErrorCode::InvalidArgument, "hs_experiment",
-            "Current render runner captures termination.maximum_tick only.");
     }
     return hs::Result::Success();
 }
@@ -412,8 +390,7 @@ RunSimulationExperiment(const hs::ExperimentSpec &spec,
                           {"ecs_count", 1u + probe.normal_enemy_count + probe.boss_count +
                                             probe.player_projectile_count +
                                             probe.enemy_projectile_count + probe.pickup_count},
-                          {"queue_depth", 0},
-                          {"user_review", "awaiting"}};
+                          {"queue_depth", 0}};
     std::ofstream(directory / "result.json", std::ios::trunc) << output.dump(2) << '\n';
     return {result, tick.tick, tick.checksum, 0};
 }
@@ -429,9 +406,23 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    hs::ExperimentSpec spec;
+    if (arguments.spec_path)
+    {
+        if (auto loaded = hs::LoadExperimentSpec(*arguments.spec_path, spec); !loaded)
+        {
+            std::cerr << loaded.Message() << '\n';
+            return 2;
+        }
+    }
+    const bool simulation_only = arguments.spec_path
+        ? spec.mode == hs::ExperimentMode::SimulationOnly
+        : arguments.simulation_only;
+
     const auto executable = hs::CurrentExecutablePath();
     std::filesystem::path generation_pointer;
-    auto simulation_rules = std::make_unique<hs::SimulationRules>();
+    std::unique_ptr<hs::SimulationRules> simulation_rules;
+    if (simulation_only) simulation_rules = std::make_unique<hs::SimulationRules>();
     std::uint64_t content_hash_value{};
     if (arguments.generation_pointer)
     {
@@ -448,10 +439,27 @@ int main(int argc, char **argv)
             std::cerr << resolved.Message() << '\n';
             return 2;
         }
-        if (auto loaded = hs::LoadSimulationRules(simulation_rules_path, *simulation_rules, &content_hash_value); !loaded)
+        if (simulation_only)
         {
-            std::cerr << loaded.Message() << '\n';
-            return 2;
+            if (auto loaded = hs::LoadSimulationRules(
+                    simulation_rules_path, *simulation_rules, &content_hash_value);
+                !loaded)
+            {
+                std::cerr << loaded.Message() << '\n';
+                return 2;
+            }
+        }
+        else
+        {
+            hs::CookedHeader header;
+            if (auto read = hs::ReadCookedHeader(
+                    simulation_rules_path, header, hs::SimulationRulesSchemaHash());
+                !read)
+            {
+                std::cerr << read.Message() << '\n';
+                return 2;
+            }
+            content_hash_value = header.source_hash;
         }
     }
     else
@@ -463,16 +471,21 @@ int main(int argc, char **argv)
             std::cerr << opened.Message() << '\n';
             return 2;
         }
-        std::vector<std::byte> bytes;
-        if (auto read = hs::shipping::ReadRange(owner, info.tables[static_cast<std::size_t>(hs::shipping::ShippingTable::Simulation)], bytes); !read)
+        if (simulation_only)
         {
-            std::cerr << read.Message() << '\n';
-            return 2;
-        }
-        if (auto decoded = hs::DecodeSimulationRules(bytes, *simulation_rules); !decoded)
-        {
-            std::cerr << decoded.Message() << '\n';
-            return 2;
+            std::vector<std::byte> bytes;
+            if (auto read = hs::shipping::ReadRange(
+                    owner, info.tables[static_cast<std::size_t>(hs::shipping::ShippingTable::Simulation)], bytes);
+                !read)
+            {
+                std::cerr << read.Message() << '\n';
+                return 2;
+            }
+            if (auto decoded = hs::DecodeSimulationRules(bytes, *simulation_rules); !decoded)
+            {
+                std::cerr << decoded.Message() << '\n';
+                return 2;
+            }
         }
         content_hash_value = info.content_hash;
     }
@@ -485,14 +498,8 @@ int main(int argc, char **argv)
     const auto build_hash = std::format("{:016x}", *build_hash_value);
     const auto content_hash = std::format("{:016x}", content_hash_value);
 
-    hs::ExperimentSpec spec;
     if (arguments.spec_path)
     {
-        if (auto loaded = hs::LoadExperimentSpec(*arguments.spec_path, spec); !loaded)
-        {
-            std::cerr << loaded.Message() << '\n';
-            return 2;
-        }
         if (!EqualHex(spec.build_hash, build_hash) ||
             !EqualHex(spec.content_hash, content_hash))
         {
@@ -503,17 +510,13 @@ int main(int argc, char **argv)
     else
     {
         spec = DefaultSpec(build_hash, content_hash);
-        if (arguments.simulation_only)
-        {
+        if (simulation_only)
             spec.mode = hs::ExperimentMode::SimulationOnly;
-            spec.captures.clear();
-        }
-        std::ranges::sort(spec.timeline_actions, {}, [](const auto &action) {
-            return std::pair{action.target_tick, action.sequence};
-        });
     }
     hs::ApplicationConfig config;
     config.smoke = true;
+    config.capture_smoke_frame = !spec.final_capture_path.empty();
+    config.smoke_capture_name = spec.final_capture_path;
     config.mute_audio = true;
     config.visible = spec.mode == hs::ExperimentMode::PresentPerformance;
     config.capture_diagnostics = config.visible;
@@ -523,7 +526,7 @@ int main(int argc, char **argv)
     config.seed = spec.seed;
     config.maximum_ticks = spec.termination.maximum_tick;
     config.artifact_directory = arguments.artifact_directory.value_or(
-        std::filesystem::path("Artifacts") / spec.scenario_id);
+        executable.parent_path() / "Artifacts" / spec.scenario_id);
     config.generation_pointer = generation_pointer;
     if (auto applied = hs::ApplyExperimentOverrides(spec, config); !applied)
     {
@@ -559,7 +562,7 @@ int main(int argc, char **argv)
     }
 
     const auto start_utc = UtcNow();
-    const auto run = spec.mode == hs::ExperimentMode::SimulationOnly
+    const auto run = simulation_only
                          ? RunSimulationExperiment(
                                spec, config.artifact_directory,
                                *simulation_rules)
@@ -571,7 +574,7 @@ int main(int argc, char **argv)
     }
     const auto end_utc = UtcNow();
     if (auto finalized = hs::FinalizeExperimentArtifacts(
-            spec, config.artifact_directory, start_utc, end_utc, 0);
+            spec, config.artifact_directory, start_utc, end_utc);
         !finalized)
     {
         std::cerr << finalized.Message() << '\n';

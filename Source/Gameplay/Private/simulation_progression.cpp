@@ -42,7 +42,7 @@ void GameSimulation::SimulationWorld::CollectPickup(PickupActor &pickup)
     }
     else if (pickup.kind == PickupKind::Magnet)
     {
-        progression.pickup_work.ApplyMagnet(actors.pickups, pickup.id.value, rules.arena_half_extent);
+        progression.pickup_work.ApplyMagnet(actors.pickups, pickup.id.value);
         DomainSignalGeometry geometry{};
         geometry.kind = DomainSignalGeometryKind::Circle;
         geometry.radius = rules.arena_half_extent * 3.0f;

@@ -1,5 +1,6 @@
 #include "vfx_gradient_cooker.hpp"
 #include <hs/render_data/dds_texture.hpp>
+#include <nlohmann/json.hpp>
 #include <DirectXPackedVector.h>
 #include <algorithm>
 #include <array>
@@ -14,27 +15,28 @@
 
 namespace hs::content
 {
-nlohmann::json CookVfxGradientDefaults(const nlohmann::json &spec,
-    const std::filesystem::path &source_dds, const std::filesystem::path &output_dds)
+VfxGradientRows CookVfxGradientDefaults(const nlohmann::json &spec,
+    const std::filesystem::path &staged_dds)
 {
     using Json = nlohmann::json;
     const auto &libraries = spec.at("libraries");
     const auto &catalog = libraries.at("texture_catalog").at("tex.vfx.gradient_lut");
-    Json rows = catalog.at("row_map");
-    std::ifstream input(source_dds, std::ios::binary);
-    if (!input) throw std::runtime_error("Cannot open gradient LUT: " + source_dds.string());
+    const auto &row_map = catalog.at("row_map");
+    std::ifstream input(staged_dds, std::ios::binary);
+    if (!input) throw std::runtime_error("Cannot open gradient LUT: " + staged_dds.string());
     std::vector<char> bytes{std::istreambuf_iterator<char>(input), {}};
+    input.close();
     {
-        if (rows.empty() || rows.size() > 16384) throw std::runtime_error("Gradient row extent is invalid");
+        if (row_map.empty() || row_map.size() > 16384) throw std::runtime_error("Gradient row extent is invalid");
         const auto decoded = render_data::DecodeDdsTexture(std::as_bytes(std::span(bytes.data(), bytes.size())));
         render_data::ValidateDdsTextureRole(decoded, render_data::DdsTextureRole::VfxTexture,
-            {256, static_cast<std::uint32_t>(rows.size()), 1, 1, render_data::kTextureFormatRgba16Float});
+            {256, static_cast<std::uint32_t>(row_map.size()), 1, 1, render_data::kTextureFormatRgba16Float});
     } // Drop the borrowed source view before extending this buffer with cooked rows.
-    std::set<std::pair<std::string, std::string>> pairs;
-    for (std::size_t i = 0; i < rows.size(); ++i)
+    VfxGradientRows rows;
+    for (std::size_t i = 0; i < row_map.size(); ++i)
     {
-        const auto &row = rows[i];
-        if (row.at("row") != i || !pairs.emplace(row.at("style"), row.at("gradient")).second)
+        const auto &row = row_map[i];
+        if (row.at("row") != i || !rows.emplace(std::pair{row.at("style").get<std::string>(), row.at("gradient").get<std::string>()}, static_cast<std::uint32_t>(i)).second)
             throw std::runtime_error("Duplicate or unordered gradient row map");
     }
     std::set<std::pair<std::string, std::string>> missing;
@@ -45,7 +47,7 @@ nlohmann::json CookVfxGradientDefaults(const nlohmann::json &spec,
             {
                 const std::pair<std::string, std::string> pair{
                     effect.at("visual").at("style"), output.value("gradient", default_gradient)};
-                if (!pairs.contains(pair)) missing.insert(pair);
+                if (!rows.contains(pair)) missing.insert(pair);
             }
     for (const auto &[style, gradient] : missing)
     {
@@ -81,13 +83,13 @@ nlohmann::json CookVfxGradientDefaults(const nlohmann::json &spec,
                 bytes.insert(bytes.end(), begin, begin + sizeof(half));
             }
         }
-        rows.push_back({{"row", rows.size()}, {"style", style}, {"gradient", gradient}});
+        rows.emplace(std::pair{style, gradient}, static_cast<std::uint32_t>(rows.size()));
     }
     const auto height = static_cast<std::uint32_t>(rows.size());
     std::memcpy(bytes.data() + 12, &height, sizeof(height));
-    std::filesystem::create_directories(output_dds.parent_path());
-    std::ofstream output(output_dds, std::ios::binary | std::ios::trunc);
+    std::ofstream output(staged_dds, std::ios::binary | std::ios::trunc);
     output.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+    output.close();
     if (!output) throw std::runtime_error("Cannot write cooked gradient DDS");
     return rows;
 }

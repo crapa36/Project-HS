@@ -1,89 +1,24 @@
 #pragma once
+#include <cstddef>
+#include <cstdint>
+#if defined(HS_DEVELOPMENT_TOOLS)
 #include <algorithm>
 #include <array>
 #include <bitset>
 #include <charconv>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
 #include <memory>
 #include <new>
 #include <ostream>
 #include <string>
 #include <string_view>
 #include <type_traits>
+#endif
 
 namespace hs::runtime_detail
 {
 using DiagnosticClock = std::uint64_t (*)() noexcept;
-struct DiagnosticSample
-{
-    std::uint64_t ticks{}, calls{};
-};
-
-// Capture inventory for selected render-frame VFX checkpoints, not process RSS.
-struct VfxWorkspaceSample
-{
-    std::size_t retained_bytes{};
-    std::size_t raw_event_bytes{};
-    std::size_t prepared_bytes{};
-    std::size_t frozen_native_bytes{};
-    std::size_t frame_scratch_bytes{};
-
-    [[nodiscard]] std::size_t TotalBytes() const noexcept
-    {
-        const auto add = [](std::size_t a, std::size_t b) noexcept {
-            return b > std::numeric_limits<std::size_t>::max() - a
-                ? std::numeric_limits<std::size_t>::max() : a + b;
-        };
-        return add(add(add(add(retained_bytes, raw_event_bytes), prepared_bytes),
-            frozen_native_bytes), frame_scratch_bytes);
-    }
-};
 
 #if defined(HS_DEVELOPMENT_TOOLS)
-class VfxWorkspacePeak
-{
-  public:
-    void Observe(VfxWorkspaceSample sample) noexcept
-    {
-        if (!observed_ || sample.TotalBytes() > sample_.TotalBytes())
-        {
-            sample_ = sample;
-            observed_ = true;
-        }
-    }
-    [[nodiscard]] VfxWorkspaceSample Sample() const noexcept { return sample_; }
-    [[nodiscard]] std::size_t TotalBytes() const noexcept { return sample_.TotalBytes(); }
-  private:
-    VfxWorkspaceSample sample_{};
-    bool observed_{};
-};
-#endif
-
-#if defined(HS_DEVELOPMENT_TOOLS)
-// A null clock leaves ordinary play free of diagnostic clock reads.
-class DiagnosticScope
-{
-  public:
-    DiagnosticScope(DiagnosticSample &sample, DiagnosticClock clock) noexcept
-        : sample_(sample), clock_(clock), begin_(clock ? clock() : 0) {}
-    ~DiagnosticScope() { Stop(); }
-    DiagnosticScope(const DiagnosticScope &) = delete;
-    void Stop() noexcept
-    {
-        if (!clock_) return;
-        const auto end = clock_();
-        sample_.ticks += end >= begin_ ? end - begin_ : 0;
-        ++sample_.calls;
-        clock_ = nullptr;
-    }
-  private:
-    DiagnosticSample &sample_;
-    DiagnosticClock clock_{};
-    std::uint64_t begin_{};
-};
-
 // RFC 4180 field quoting also keeps provider/display names and native reasons parseable.
 inline std::string CsvField(std::string_view value)
 {
@@ -188,9 +123,8 @@ class PerformanceLogState
 class DiagnosticLog
 {
   public:
-    DiagnosticLog(std::ostream &sink, bool enabled, std::string_view header = {},
-                  DiagnosticClock clock = nullptr)
-        : sink_(sink), enabled_(enabled), clock_(clock)
+    DiagnosticLog(std::ostream &sink, bool enabled, std::string_view header = {})
+        : sink_(sink), enabled_(enabled)
     {
         if (enabled_)
         {
@@ -211,7 +145,6 @@ class DiagnosticLog
         if (enabled_ && !finished_)
         {
             FlushChunk();
-            DiagnosticScope scope(io_, clock_);
             try { sink_.flush(); failed_ |= !sink_; }
             catch (...) { failed_ = true; }
         }
@@ -227,17 +160,13 @@ class DiagnosticLog
     bool Failed() const noexcept { return failed_; }
     std::uint64_t Records() const noexcept { return records_; }
     std::uint64_t Dropped() const noexcept { return dropped_; }
-    DiagnosticSample Io() const noexcept { return io_; }
-    std::uint64_t Bytes() const noexcept { return bytes_; }
   private:
     void FlushChunk()
     {
         if (used_ && !failed_)
         {
-            DiagnosticScope scope(io_, clock_);
             try { sink_.write(chunk_->data(), static_cast<std::streamsize>(used_)); failed_ |= !sink_; }
             catch (...) { failed_ = true; }
-            if (!failed_) bytes_ += used_;
         }
         used_ = 0;
     }
@@ -253,50 +182,10 @@ class DiagnosticLog
     }
     std::ostream &sink_;
     bool enabled_{}, failed_{}, finished_{};
-    DiagnosticClock clock_{};
-    DiagnosticSample io_{};
     using Chunk = std::array<char, 64 * 1024>;
     std::unique_ptr<Chunk> chunk_;
     std::size_t used_{};
-    std::uint64_t records_{}, dropped_{}, bytes_{};
-};
-#else
-class DiagnosticScope
-{
-  public:
-    DiagnosticScope(DiagnosticSample &, DiagnosticClock) noexcept {}
-    void Stop() noexcept {}
-};
-
-inline std::string CsvField(std::string_view) { return {}; }
-template <typename T> inline void AppendCsvValue(std::string &, T) {}
-template <typename... Values> inline void AppendCsvValues(std::string &, const Values &...) {}
-inline void AppendCsvText(std::string &, std::string_view) {}
-
-class PerformanceLogState
-{
-  public:
-    static constexpr std::uint64_t ElapsedTicks(std::uint64_t, std::uint64_t) noexcept { return 0; }
-    std::uint64_t FrameInterval(std::uint64_t) noexcept { return 0; }
-    bool AcceptGpuFrame(std::uint64_t, bool, bool) noexcept { return false; }
-    [[nodiscard]] std::uint64_t GpuFrames() const noexcept { return 0; }
-    [[nodiscard]] std::uint64_t LastGpuFrame() const noexcept { return 0; }
-    [[nodiscard]] bool GpuFrameCoverageComplete(std::uint64_t) const noexcept { return true; }
-};
-
-class DiagnosticLog
-{
-  public:
-    DiagnosticLog(std::ostream &, bool, std::string_view = {}, DiagnosticClock = nullptr) {}
-    void Append(std::string_view) {}
-    bool Flush() { return true; }
-    bool Finish() { return true; }
-    bool Complete() const noexcept { return true; }
-    bool Failed() const noexcept { return false; }
-    std::uint64_t Records() const noexcept { return 0; }
-    std::uint64_t Dropped() const noexcept { return 0; }
-    DiagnosticSample Io() const noexcept { return {}; }
-    std::uint64_t Bytes() const noexcept { return 0; }
+    std::uint64_t records_{}, dropped_{};
 };
 #endif
 }

@@ -30,14 +30,7 @@ enum class ReadStatus
     Missing,
     Valid,
     Corrupt,
-    Future,
 };
-
-[[nodiscard]] Result FutureSaveFailure()
-{
-    return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
-                           "A newer save schema is present; save files were left untouched.");
-}
 
 class UniqueHandle
 {
@@ -162,17 +155,6 @@ template <typename Integer>
     return true;
 }
 
-[[nodiscard]] bool ReadBool(const Json &json, std::string_view key, bool &value)
-{
-    const auto iterator = json.find(key);
-    if (iterator == json.end() || !iterator->is_boolean())
-    {
-        return false;
-    }
-    value = iterator->get<bool>();
-    return true;
-}
-
 [[nodiscard]] bool ReadVolume(const Json &json, std::string_view key, float &value)
 {
     const auto iterator = json.find(key);
@@ -201,28 +183,6 @@ template <typename Integer>
         }
     }
     return true;
-}
-
-[[nodiscard]] bool ValidSettings(const SettingsData &settings) noexcept
-{
-    if (settings.schema_version != SettingsData::kSchemaVersion || settings.width < 640 ||
-        settings.width > 16'384 || settings.height < 360 || settings.height > 8'640 ||
-        (settings.frame_cap != 0 && settings.frame_cap != 30 && settings.frame_cap != 60 &&
-         settings.frame_cap != 120) ||
-        (settings.render_scale_percent != 75 && settings.render_scale_percent != 100) ||
-        (settings.shadow_resolution != 1024 && settings.shadow_resolution != 2048) ||
-        (settings.particle_percentage != 50 && settings.particle_percentage != 100) ||
-        !std::isfinite(settings.master_volume) || settings.master_volume < 0.0f ||
-        settings.master_volume > 1.0f || !std::isfinite(settings.bgm_volume) ||
-        settings.bgm_volume < 0.0f || settings.bgm_volume > 1.0f ||
-        !std::isfinite(settings.sfx_volume) || settings.sfx_volume < 0.0f ||
-        settings.sfx_volume > 1.0f || !std::isfinite(settings.ui_volume) ||
-        settings.ui_volume < 0.0f || settings.ui_volume > 1.0f)
-    {
-        return false;
-    }
-
-    return ValidSkillKeys(settings.skill_virtual_keys);
 }
 
 [[nodiscard]] bool ValidVolume(float value) noexcept
@@ -308,28 +268,7 @@ template <typename T>
     else if constexpr (std::is_enum_v<T>)
     {
         if (!json.is_string()) return false;
-        auto token = json.get<std::string>();
-        // Read compatibility only: removed modes never enter the current settings/UI domain.
-        if constexpr (std::is_same_v<T, GraphicsPreset>)
-        {
-            if (token == "ultra_rt") token = "ultra";
-        }
-        else if constexpr (std::is_same_v<T, GraphicsAoMode>)
-        {
-            if (token == "rtao") token = "gtao";
-        }
-        else if constexpr (std::is_same_v<T, GraphicsGiMode>)
-        {
-            if (token == "ray_traced" || token == "raytraced" || token == "software_hybrid") token = "probe";
-        }
-        else if constexpr (std::is_same_v<T, GraphicsReflectionMode>)
-        {
-            if (token == "hybrid_rt") token = "screen_space";
-        }
-        else if constexpr (std::is_same_v<T, GraphicsShadowMode>)
-        {
-            if (token == "hybrid_rt") token = "raster";
-        }
+        const auto token = json.get<std::string>();
         const auto parsed = ParseGraphicsEnumToken<T>(token);
         if (!parsed) return false;
         value = *parsed;
@@ -460,55 +399,6 @@ template <typename T>
             {"total_kills", profile.total_kills}};
 }
 
-[[nodiscard]] bool FromJson(const Json &json, SettingsData &settings)
-{
-    if (!json.is_object() || (json.size() != 15 && !(json.size() == 16 && json.contains("outline"))))
-    {
-        return false;
-    }
-
-    SettingsData parsed;
-    const auto keys = json.find("skill_virtual_keys");
-    if (!ReadUnsigned(json, "schema_version", parsed.schema_version) ||
-        !ReadUnsigned(json, "width", parsed.width) ||
-        !ReadUnsigned(json, "height", parsed.height) ||
-        !ReadBool(json, "borderless", parsed.borderless) ||
-        !ReadBool(json, "vsync", parsed.vsync) ||
-        !ReadUnsigned(json, "frame_cap", parsed.frame_cap) ||
-        !ReadUnsigned(json, "render_scale_percent", parsed.render_scale_percent) ||
-        !ReadUnsigned(json, "shadow_resolution", parsed.shadow_resolution) ||
-        !ReadUnsigned(json, "particle_percentage", parsed.particle_percentage) ||
-        !ReadBool(json, "bloom", parsed.bloom) ||
-        !ReadVolume(json, "master_volume", parsed.master_volume) ||
-        !ReadVolume(json, "bgm_volume", parsed.bgm_volume) ||
-        !ReadVolume(json, "sfx_volume", parsed.sfx_volume) ||
-        !ReadVolume(json, "ui_volume", parsed.ui_volume) || keys == json.end() ||
-        !keys->is_array() || keys->size() != parsed.skill_virtual_keys.size())
-    {
-        return false;
-    }
-    for (std::size_t index = 0; index < parsed.skill_virtual_keys.size(); ++index)
-    {
-        const auto &key = (*keys)[index];
-        if (!key.is_number_unsigned())
-        {
-            return false;
-        }
-        const auto value = key.get<std::uint64_t>();
-        if (value > std::numeric_limits<std::uint16_t>::max())
-        {
-            return false;
-        }
-        parsed.skill_virtual_keys[index] = static_cast<std::uint16_t>(value);
-    }
-    if (!ValidSettings(parsed))
-    {
-        return false;
-    }
-    settings = parsed;
-    return true;
-}
-
 [[nodiscard]] bool FromJson(const Json &json, SettingsDocument &settings)
 {
     if (!json.is_object()) return false;
@@ -532,10 +422,6 @@ template <typename T>
 #include <hs/core/graphics_settings.def>
 #undef HS_GRAPHICS_SETTING
 
-    // DLSS RR was also offered as a fused SR choice; retain its SR provider only.
-    if (parsed.graphics.reconstruction_provider.value == "dlss_rr")
-        parsed.graphics.reconstruction_provider.value = "dlss";
-
     Json extensions = Json::object();
     for (auto iterator = json.begin(); iterator != json.end(); ++iterator)
     {
@@ -556,57 +442,18 @@ template <typename T>
 
 [[nodiscard]] bool FromJson(const Json &json, ProfileData &profile)
 {
-    std::uint32_t schema{};
-    if (!json.is_object() || !ReadUnsigned(json, "schema_version", schema) ||
-        (schema != 1 && schema != ProfileData::kSchemaVersion) ||
-        json.size() != (schema == 1 ? 6u : 4u))
-    {
-        return false;
-    }
-
+    if (!json.is_object() || json.size() != 4u) return false;
     ProfileData parsed;
-    if (!ReadUnsigned(json, "best_level", parsed.best_level) ||
+    if (!ReadUnsigned(json, "schema_version", parsed.schema_version) ||
+        !ReadUnsigned(json, "best_level", parsed.best_level) ||
         !ReadUnsigned(json, "total_wins", parsed.total_wins) ||
         !ReadUnsigned(json, "total_kills", parsed.total_kills) ||
         !ValidProfile(parsed))
     {
         return false;
     }
-    if (schema == 1)
-    {
-        std::uint64_t skills{}, relics{};
-        if (!ReadUnsigned(json, "unlocked_skills_mask", skills) || (skills & ~0xFFull) != 0 ||
-            !ReadUnsigned(json, "unlocked_relics_mask", relics) || (relics & ~0xFFFull) != 0)
-            return false;
-    }
     profile = parsed;
     return true;
-}
-
-[[nodiscard]] SettingsDocument MigrateSettings(const SettingsData &old)
-{
-    SettingsDocument migrated;
-    migrated.graphics.preset = GraphicsPreset::Custom;
-    migrated.graphics.display_mode = old.borderless
-        ? GraphicsDisplayMode::BorderlessFullscreen : GraphicsDisplayMode::Windowed;
-    migrated.graphics.output_extent = GraphicsExtent{old.width, old.height};
-    migrated.graphics.vsync = old.vsync;
-    migrated.graphics.frame_limit_fps = old.frame_cap;
-    migrated.graphics.resolution_mode = GraphicsResolutionMode::Manual;
-    migrated.graphics.reconstruction_provider.value = "internal_taau";
-    migrated.graphics.manual_scale_percent = static_cast<float>(old.render_scale_percent);
-    migrated.graphics.frame_generation_mode = GraphicsFrameGenerationMode::Off;
-    migrated.graphics.shadow_quality = old.shadow_resolution == 1024
-        ? GraphicsQuality::Medium : GraphicsQuality::High;
-    migrated.graphics.particle_quality = old.particle_percentage == 50
-        ? GraphicsQuality::Low : GraphicsQuality::High;
-    migrated.graphics.bloom = old.bloom;
-    migrated.master_volume = old.master_volume;
-    migrated.bgm_volume = old.bgm_volume;
-    migrated.sfx_volume = old.sfx_volume;
-    migrated.ui_volume = old.ui_volume;
-    migrated.skill_virtual_keys = old.skill_virtual_keys;
-    return migrated;
 }
 
 template <typename Data>
@@ -636,26 +483,9 @@ template <typename Data>
         std::uint64_t schema{};
         if (json.is_object() && ReadUnsigned(json, "schema_version", schema))
         {
-            if (schema > Data::kSchemaVersion)
-            {
-                status = ReadStatus::Future;
-                return Result::Success();
-            }
-            if constexpr (std::is_same_v<Data, SettingsDocument>)
-            {
-                if (schema == SettingsData::kSchemaVersion)
-                {
-                    SettingsData old;
-                    if (FromJson(json, old))
-                    {
-                        data = MigrateSettings(old);
-                        status = ReadStatus::Valid;
-                        return Result::Success();
-                    }
-                    status = ReadStatus::Corrupt;
-                    return Result::Success();
-                }
-            }
+            if (schema != Data::kSchemaVersion)
+                return Result::Failure(ErrorCode::InvalidState, "hs_runtime",
+                                       "Unsupported save schema.");
         }
         if (FromJson(json, data))
         {
@@ -818,7 +648,6 @@ template <typename Data>
     {
         return read;
     }
-    if (primary_status == ReadStatus::Future) return FutureSaveFailure();
     if (primary_status == ReadStatus::Valid)
     {
         data = primary;
@@ -833,7 +662,6 @@ template <typename Data>
     {
         return read;
     }
-    if (backup_status == ReadStatus::Future) return FutureSaveFailure();
     if (backup_status == ReadStatus::Valid)
     {
         if (primary_status == ReadStatus::Corrupt)
@@ -904,14 +732,12 @@ template <typename Data>
     {
         return read;
     }
-    if (status == ReadStatus::Future) return FutureSaveFailure();
     Data existing_backup;
     ReadStatus backup_status{};
     if (auto read = ReadDocument(BackupPath(path), existing_backup, backup_status); !read)
     {
         return read;
     }
-    if (backup_status == ReadStatus::Future) return FutureSaveFailure();
     if constexpr (std::is_same_v<Data, SettingsDocument>)
     {
         const auto retain = [&](const Data &old) {

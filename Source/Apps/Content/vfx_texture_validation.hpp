@@ -4,6 +4,6 @@
 
 namespace hs::content
 {
-// Validate source DDS files mapped from catalog runtime destinations.
-void ValidateVfxTextures(const nlohmann::json &spec, const std::filesystem::path &root);
+// Validate the staged DDS against its authored catalog entry.
+void ValidateVfxTexture(const nlohmann::json &entry, const std::filesystem::path &path);
 }

@@ -3,20 +3,18 @@
 #endif
 #include "../AssetPipeline/action.hpp"
 #include "../Content/arena_layout_payload.hpp"
-#include "../Content/content_cooker.hpp"
+#include "../Content/game_data_cooker.hpp"
 #include "../Content/content_paths.hpp"
 
 #include <hs/core/cooked_format.hpp>
+#include <hs/core/process_info.hpp>
 #include <hs/game_rules/simulation_rules_io.hpp>
 #include <hs/presentation/presentation_catalog_io.hpp>
 
-#include <array>
-#include <algorithm>
 #include <charconv>
 #include <cstring>
 #include <iostream>
 #include <limits>
-#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -28,12 +26,6 @@ namespace
 {
 namespace fs = std::filesystem;
 namespace ap = hs::asset_pipeline;
-
-constexpr std::array<std::string_view, 9> kSimulationDocuments = {
-    "stats", "level", "characters", "skills", "upgrades", "enemies",
-    "relics", "spawn_schedule", "bosses"};
-constexpr std::array<std::string_view, 2> kPresentationDocuments = {
-    "characters", "relics"};
 
 void Require(bool condition, std::string_view message)
 {
@@ -79,8 +71,8 @@ void RequireConfiguredRoots(const fs::path &source_root, const fs::path &build_r
     Require(source_root.is_absolute() && build_root.is_absolute(),
             "source and build roots must be absolute");
     Require(source_root == hs::content::paths::SourceRoot() &&
-            build_root == hs::content::paths::BuildRoot(),
-            "CLI roots differ from hs_build_config.json");
+            build_root == hs::CurrentExecutableDirectory().parent_path(),
+            "source or build directory does not match this cooker");
     ap::RequireDirectory(source_root);
 }
 
@@ -88,7 +80,9 @@ void ValidateOnly(const fs::path &source_root, const fs::path &build_root)
 {
     RequireConfiguredRoots(source_root, build_root);
     const auto sources = hs::content::LoadAndValidateGameDataDocuments();
-    static_cast<void>(hs::content::BuildGameData(sources));
+    const auto camera = hs::content::ReadPresentationCamera(sources);
+    static_cast<void>(hs::content::BuildSimulationRules(sources, camera));
+    static_cast<void>(hs::content::BuildPresentationCatalog(sources, camera));
     std::cout << "game-data.validated documents=" << sources.documents.size() << '\n';
 }
 
@@ -112,26 +106,12 @@ void Produce(std::string_view mode, const fs::path &source_root,
 
     if (mode == "simulation-payload" || mode == "presentation-payload")
     {
-        const auto names = mode == "simulation-payload"
-            ? std::span<const std::string_view>(kSimulationDocuments)
-            : std::span<const std::string_view>(kPresentationDocuments);
-        const auto sources = hs::content::LoadScopedGameDataSources(names);
-        spec.inputs.push_back(ap::HashInput(
-            "Schemas/game.schema.json", source_root / "Schemas/game.schema.json"));
-        for (const auto name : names)
+        const bool simulation = mode == "simulation-payload";
+        const auto sources = hs::content::LoadScopedGameDataSources(simulation, spec.inputs);
+        const auto camera = hs::content::ReadPresentationCamera(sources);
+        if (simulation)
         {
-            const auto path = source_root / "ContentSource" / "GameData" /
-                              (std::string(name) + ".json");
-            const auto position = std::ranges::find(hs::content::kDocumentNames, name);
-            const auto &text = sources.inventory.document_text[static_cast<std::size_t>(
-                std::distance(hs::content::kDocumentNames.begin(), position))];
-            spec.inputs.push_back({
-                "ContentSource/GameData/" + std::string(name) + ".json", path,
-                ap::Sha256Bytes(Bytes(std::string_view(text)))});
-        }
-        if (mode == "simulation-payload")
-        {
-            const auto rules = hs::content::BuildGameData(sources).simulation_rules;
+            const auto rules = hs::content::BuildSimulationRules(sources, camera);
             const auto payload = hs::EncodeSimulationRules(rules);
             bytes.assign(reinterpret_cast<const char *>(payload.data()), payload.size());
             arena_layout_bytes = hs::content::EncodeArenaLayoutPayload(
@@ -142,7 +122,7 @@ void Produce(std::string_view mode, const fs::path &source_root,
         }
         else
         {
-            const auto presentation = hs::content::BuildPresentationCatalog(sources);
+            const auto presentation = hs::content::BuildPresentationCatalog(sources, camera);
             const auto payload = hs::EncodePresentationCatalog(presentation);
             bytes.assign(reinterpret_cast<const char *>(payload.data()), payload.size());
             filename = "presentation_catalog.payload";
@@ -152,25 +132,7 @@ void Produce(std::string_view mode, const fs::path &source_root,
     else if (mode == "gameplay-identity" || mode == "content-identity")
     {
         const auto full = mode == "content-identity";
-        std::optional<ap::Sha256Stream> digest;
-        const auto scan = hs::content::ScanLegacyIdentity(
-            full, [&](std::string_view name, const fs::path &path,
-                      std::string_view chunk, bool last_chunk) {
-                if (!digest)
-                {
-                    ap::RequireRegularFile(path);
-                    digest.emplace();
-                }
-                digest->Add(Bytes(chunk));
-                if (last_chunk)
-                {
-                    spec.inputs.push_back({std::string(name), path, digest->Finish()});
-                    digest.reset();
-                }
-            });
-        Require(!digest && spec.inputs.size() == scan.inputs.size(),
-                "incomplete identity input digest");
-        bytes = std::to_string(full ? scan.all_source_hash : scan.gameplay_source_hash) + "\n";
+        bytes = std::to_string(hs::content::ScanSourceIdentity(full, spec.inputs)) + "\n";
         filename = full ? "content_source_hash.txt" : "gameplay_source_hash.txt";
         logical_id = full ? "game-data/content-identity" : "game-data/gameplay-identity";
     }

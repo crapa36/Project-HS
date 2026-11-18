@@ -1,6 +1,6 @@
 #pragma once
 #include <filesystem>
+#include <string_view>
 namespace hs::content {
-void ValidateVfxMeshAtlas(const std::filesystem::path &source);
-void CookVfxMeshAtlas(const std::filesystem::path &source,const std::filesystem::path &output);
+void CookVfxMeshAtlas(std::string_view source_json,const std::filesystem::path &output);
 }

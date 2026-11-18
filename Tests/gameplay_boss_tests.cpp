@@ -153,7 +153,7 @@ void TestRangedWarningAndExplosiveArea()
     warning_enemy.id = {72}; warning_enemy.position = {2.0f, 9.0f}; warning_enemy.warning_sequence = 902;
     displaced.AddEnemy(warning_enemy);
     warning_snapshot.Clear();
-    Check(hs::ProjectRenderSnapshot(displaced.View(), DefaultContent().presentation,
+    Check(hs::ProjectRenderSnapshot(displaced.View(), DefaultPresentation(),
           hs::PresentationUiState{}, hs::SettingsData{}, warning_snapshot), "displaced ranged warning projection");
     const auto first_warning = std::ranges::find_if(warning_snapshot.View().persistent_vfx,
         [](const auto &v) { return v.stable_id == 901; });

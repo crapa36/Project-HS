@@ -1,7 +1,6 @@
 #include <hs/asset_manifest/generation_lock.hpp>
 #include <hs/asset_manifest/selected_generation.hpp>
 #include "../Source/Apps/AssetPipeline/action.hpp"
-#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -43,54 +42,6 @@ int main(int argc, char **argv)
                 throw;
             }
             ap::RemoveStage(stage);
-            return 0;
-        }
-
-        if (argc >= 2 && std::string_view(argv[1]) == "action-hold")
-        {
-            if (argc != 7)
-                throw std::runtime_error("action-hold build-root namespace product-id ready release");
-            const fs::path root(argv[2]);
-            ap::UpstreamProduct dependency;
-            fs::path product_path;
-            const ap::ActionResultSnapshot snapshot(root, argv[3]);
-            snapshot.ReadProduct(argv[4], dependency, product_path);
-
-            ap::ActionSpec consumer;
-            consumer.action_id = "fixture.consumer";
-            consumer.recipe_id = "fixture.consume-product";
-            consumer.recipe_version = 1;
-            consumer.namespace_path = "consumer";
-            consumer.upstream.push_back(dependency);
-            const auto consumed = ap::ReadBytes(product_path);
-            const auto stage = ap::CreateStage(root / "Actions" / consumer.namespace_path);
-            try
-            {
-                ap::WriteBytes(stage / "consumed.bin",
-                    std::as_bytes(std::span(consumed.data(), consumed.size())));
-                ap::Publish(root, consumer, stage,
-                    {ap::HashProduct("consumer/output", "consumed.bin", stage / "consumed.bin")});
-            }
-            catch (...)
-            {
-                ap::RemoveStageAfterFailure(stage);
-                throw;
-            }
-            ap::RemoveStage(stage);
-            // Only the original snapshot remains pinned across the downstream publish.
-            consumer.upstream.clear();
-            dependency = {};
-
-            std::ofstream(argv[5]) << "ready\n";
-            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-            while (!fs::exists(argv[6]))
-            {
-                if (std::chrono::steady_clock::now() > deadline)
-                    throw std::runtime_error("action snapshot probe timeout");
-                if (!fs::is_regular_file(product_path))
-                    throw std::runtime_error("active ActionResult product was deleted");
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
             return 0;
         }
 

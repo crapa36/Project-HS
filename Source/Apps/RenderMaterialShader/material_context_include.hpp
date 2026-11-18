@@ -39,7 +39,7 @@ std::string CharacterContextInclude(ap::ActionSpec &spec, const fs::path &source
                                PreparedMaterialInputs &materials)
 {
     std::string generated = "#include \"material_surface.hlsli\"\n";
-    std::string surface_demand_cases, opacity_demand_cases;
+    std::string surface_demand_cases, opacity_demand_cases, surface_cases, opacity_cases;
     for (std::size_t ordinal = 0; ordinal < rd::kCharacterMaterialNames.size(); ++ordinal)
     {
         const auto name = rd::kCharacterMaterialNames[ordinal];
@@ -48,8 +48,9 @@ std::string CharacterContextInclude(ap::ActionSpec &spec, const fs::path &source
         const auto kind = prepared.Graph().kind;
         const bool translucent = kind == rd::MaterialGraphKind::Translucent ||
             kind == rd::MaterialGraphKind::HeroRefractive;
+        const auto index = std::to_string(ordinal);
         const auto functions = rd::EmitCharacterMaterialContextHlsl(prepared,
-            "HsCharacterEvaluateSurface_" + std::to_string(ordinal), "HsCharacterEvaluateOpacity_" + std::to_string(ordinal));
+            "HsCharacterEvaluateSurface_" + index, "HsCharacterEvaluateOpacity_" + index);
         if (ordinal == 0)
         {
             constexpr std::string_view end_marker = "#endif // HS_MATERIAL_CONTEXT_DEMAND_HLSLI\n";
@@ -58,20 +59,16 @@ std::string CharacterContextInclude(ap::ActionSpec &spec, const fs::path &source
             generated += functions.substr(0, end + end_marker.size());
         }
         const auto demand = rd::AnalyzeContextDemand(prepared);
-        auto surface_case = "    case " + std::to_string(ordinal) + "u: return " +
-            std::to_string(demand.surface_mask) + "u;\n";
-        auto opacity_case = "    case " + std::to_string(ordinal) + "u: return " +
-            std::to_string(demand.opacity_mask) + "u;\n";
-        if (!translucent)
-        {
-            surface_case = "#if !defined(HS_CHARACTER_TRANSLUCENT_DOMAIN_ONLY)\n" + surface_case + "#endif\n";
-            opacity_case = "#if !defined(HS_CHARACTER_TRANSLUCENT_DOMAIN_ONLY)\n" + opacity_case + "#endif\n";
-        }
+        const std::string guard = translucent ? "" : "#if !defined(HS_CHARACTER_TRANSLUCENT_DOMAIN_ONLY)\n";
+        const std::string end_guard = translucent ? "" : "#endif\n";
+        const auto case_prefix = guard + "    case " + index + "u: return ";
+        const auto surface_case = case_prefix + std::to_string(demand.surface_mask) + "u;\n" + end_guard;
+        const auto opacity_case = case_prefix + std::to_string(demand.opacity_mask) + "u;\n" + end_guard;
         surface_demand_cases += surface_case;
         opacity_demand_cases += opacity_case;
-        if (!translucent) generated += "#if !defined(HS_CHARACTER_TRANSLUCENT_DOMAIN_ONLY)\n";
-        generated += functions;
-        if (!translucent) generated += "#endif\n";
+        surface_cases += case_prefix + "HsCharacterEvaluateSurface_" + index + "(ctx);\n" + end_guard;
+        opacity_cases += case_prefix + "HsCharacterEvaluateOpacity_" + index + "(ctx);\n" + end_guard;
+        generated.append(guard).append(functions).append(end_guard);
         const auto semantic = functions + surface_case + opacity_case;
         spec.inputs.push_back(SemanticInput("material/" + std::string(name) + "/character-context-ir", path,
             std::as_bytes(std::span(semantic.data(), semantic.size()))));
@@ -81,29 +78,11 @@ std::string CharacterContextInclude(ap::ActionSpec &spec, const fs::path &source
     generated += "uint HsCharacterOpacityContextDemand(uint ordinal)\n{\n    switch (ordinal)\n    {\n" +
         opacity_demand_cases + "    default: return 0x0fffffffu;\n    }\n}\n";
     generated += "HsSurfaceClosure HsCharacterEvaluateSurface(HsMaterialContext ctx, uint ordinal)\n{\n    switch (ordinal)\n    {\n";
-    for (std::size_t ordinal = 0; ordinal < rd::kCharacterMaterialNames.size(); ++ordinal)
-    {
-        const auto &prepared = materials.Get(rd::kCharacterMaterialNames[ordinal]).prepared;
-        const auto kind = prepared.Graph().kind;
-        const bool translucent = kind == rd::MaterialGraphKind::Translucent ||
-            kind == rd::MaterialGraphKind::HeroRefractive;
-        if (!translucent) generated += "#if !defined(HS_CHARACTER_TRANSLUCENT_DOMAIN_ONLY)\n";
-        generated += "    case " + std::to_string(ordinal) + "u: return HsCharacterEvaluateSurface_" + std::to_string(ordinal) + "(ctx);\n";
-        if (!translucent) generated += "#endif\n";
-    }
+    generated += surface_cases;
     generated += "    default:\n    {\n        HsSurfaceClosure empty = (HsSurfaceClosure)0;\n"
         "        empty.normal_is_world = true;\n        return empty;\n    }\n    }\n}\n";
     generated += "float HsCharacterEvaluateOpacity(HsMaterialContext ctx, uint ordinal)\n{\n    switch (ordinal)\n    {\n";
-    for (std::size_t ordinal = 0; ordinal < rd::kCharacterMaterialNames.size(); ++ordinal)
-    {
-        const auto &prepared = materials.Get(rd::kCharacterMaterialNames[ordinal]).prepared;
-        const auto kind = prepared.Graph().kind;
-        const bool translucent = kind == rd::MaterialGraphKind::Translucent ||
-            kind == rd::MaterialGraphKind::HeroRefractive;
-        if (!translucent) generated += "#if !defined(HS_CHARACTER_TRANSLUCENT_DOMAIN_ONLY)\n";
-        generated += "    case " + std::to_string(ordinal) + "u: return HsCharacterEvaluateOpacity_" + std::to_string(ordinal) + "(ctx);\n";
-        if (!translucent) generated += "#endif\n";
-    }
+    generated += opacity_cases;
     return generated + "    default: return 0.0;\n    }\n}\n";
 }
 

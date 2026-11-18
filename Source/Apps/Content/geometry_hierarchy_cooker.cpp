@@ -207,7 +207,7 @@ WorkGroup MakeParent(const Partition &partition, const std::vector<WorkGroup> &g
     std::span<const std::array<float, 3>> positions,
     std::span<const std::array<float, kAttributeCount>> attributes,
     std::span<const unsigned char> locks, std::span<const std::uint16_t> material_mapping,
-    float reduction_ratio, GeometryErrorChecks error_checks)
+    float reduction_ratio, GeometryErrorCheckMode error_checks)
 {
     WorkGroup parent;
     parent.children = partition.children;

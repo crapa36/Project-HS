@@ -1,12 +1,10 @@
 #include "vfx_catalog.hpp"
 
 #include <hs/core/cooked_format.hpp>
-#include <hs/runtime/vfx_image_io.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
-#include <utility>
 
 namespace hs
 {
@@ -32,24 +30,6 @@ const CookedVfxDefinition *VfxCatalog::FindEffect(EffectId id) const noexcept
     return found != image_.definitions.end() && found->effect_id == id.value ? &*found : nullptr;
 }
 
-VfxCatalog::VfxCatalog() noexcept = default;
-VfxCatalog::~VfxCatalog() = default;
-VfxCatalog::VfxCatalog(VfxCatalog &&other) noexcept
-    : image_(std::exchange(other.image_, {})),
-      fresnel_recipe_view_(std::exchange(other.fresnel_recipe_view_, PreparedVfxFresnelRecipeView{})),
-      mesh_recipe_view_(std::exchange(other.mesh_recipe_view_, PreparedVfxMeshRecipeView{})),
-      owned_(std::move(other.owned_)) {}
-VfxCatalog &VfxCatalog::operator=(VfxCatalog &&other) noexcept
-{
-    if (this != &other)
-    {
-        image_ = std::exchange(other.image_, {});
-        fresnel_recipe_view_ = std::exchange(other.fresnel_recipe_view_, PreparedVfxFresnelRecipeView{});
-        mesh_recipe_view_ = std::exchange(other.mesh_recipe_view_, PreparedVfxMeshRecipeView{});
-        owned_ = std::move(other.owned_);
-    }
-    return *this;
-}
 Result VfxCatalog::Bind(const VfxImage &image)
 {
     if (&image == &image_) return Result::Success();
@@ -61,34 +41,13 @@ Result VfxCatalog::Bind(const VfxImage &image)
     PreparedVfxMeshRecipeView mesh_recipe_view;
     if (auto result = PreparedVfxMeshRecipeView::Create(image.mesh_recipes, mesh_recipe_view); !result)
         return result;
-    owned_.reset();
+    auto frame_bindings = runtime_detail::PrepareVfxFrameBindings(image);
     image_ = image;
+    frame_bindings_ = std::move(frame_bindings);
     fresnel_recipe_view_ = recipe_view;
     mesh_recipe_view_ = mesh_recipe_view;
     return Result::Success();
 }
-const CookedParticleSprite *VfxCatalog::FindSprite(AssetId id) const noexcept
-{
-    const auto found = std::lower_bound(image_.sprites.begin(), image_.sprites.end(), id.value,
-        [](const CookedParticleSprite &sprite, std::uint64_t value) {
-            return sprite.sprite_id < value;
-        });
-    return found != image_.sprites.end() && found->sprite_id == id.value ? &*found : nullptr;
-}
-
-Result VfxCatalog::ExpandEvent(const PresentationEvent &event, float decorative_fraction,
-                           std::vector<ParticleSpawnCommand> &particles,
-                           std::vector<VfxLineSpawnCommand> &lines,
-                           bool particles_replaced, bool mesh_replaced,
-                           VfxLegacyGroundSuppression ground_suppression) const
-{
-    VfxPreparedLegacyEvent prepared;
-    std::vector<std::uint32_t> indices;
-    if (auto result = PrepareEvent(event, decorative_fraction, prepared, indices,
-            particles_replaced, mesh_replaced, ground_suppression); !result) return result;
-    return AppendPreparedEvent(prepared, indices, particles, lines);
-}
-
 Result VfxCatalog::PrepareEvent(const PresentationEvent &event, float decorative_fraction,
     VfxPreparedLegacyEvent &prepared, std::vector<std::uint32_t> &emitter_indices,
     bool particles_replaced, bool mesh_replaced,

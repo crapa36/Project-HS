@@ -212,20 +212,25 @@ void RequireIdAndLogic(const Json &entry, std::string_view file, const std::stri
 
 } // namespace
 
-hs::PresentationCatalog BuildPresentationCatalog(const ContentSources &sources)
+hs::PresentationCamera ReadPresentationCamera(const ContentSources &sources)
 {
-    hs::PresentationCatalog presentation{};
-    const auto &character = sources.documents.at("characters")["entries"][0];
-    const auto &camera = character["camera"];
-    presentation.camera = {
+    const auto &camera = sources.documents.at("characters")["entries"][0]["camera"];
+    const hs::PresentationCamera result{
         RequiredFloat(camera, "characters", "$/entries/0/camera", "yaw_degrees"),
         RequiredFloat(camera, "characters", "$/entries/0/camera", "pitch_degrees"),
         RequiredFloat(camera, "characters", "$/entries/0/camera", "vertical_fov_degrees"),
         RequiredFloat(camera, "characters", "$/entries/0/camera", "distance_m"),
         CheckedInteger<std::uint32_t>(RequireInteger(camera, "characters", "$/entries/0/camera", "minimum_distance_percent"), "characters", "$/entries/0/camera/minimum_distance_percent"),
         CheckedInteger<std::uint32_t>(RequireInteger(camera, "characters", "$/entries/0/camera", "maximum_distance_percent"), "characters", "$/entries/0/camera/maximum_distance_percent")};
-    if (presentation.camera.minimum_distance_percent > presentation.camera.maximum_distance_percent)
+    if (result.minimum_distance_percent > result.maximum_distance_percent)
         ThrowValidationError("characters", "$/entries/0/camera", "minimum distance must not exceed maximum distance");
+    return result;
+}
+
+hs::PresentationCatalog BuildPresentationCatalog(const ContentSources &sources, const hs::PresentationCamera &camera)
+{
+    hs::PresentationCatalog presentation{};
+    presentation.camera = camera;
     const auto &relics = sources.documents.at("relics")["entries"];
     for (std::size_t index = 0; index < relics.size(); ++index)
     {
@@ -236,12 +241,9 @@ hs::PresentationCatalog BuildPresentationCatalog(const ContentSources &sources)
     return presentation;
 }
 
-BuiltGameData BuildGameData(const ContentSources &sources)
+hs::SimulationRules BuildSimulationRules(const ContentSources &sources, const hs::PresentationCamera &camera)
 {
-    BuiltGameData content{};
-    auto &data = content.simulation_rules;
-    auto &presentation = content.presentation;
-    presentation = BuildPresentationCatalog(sources);
+    hs::SimulationRules data{};
     data.version = 7;
 
     const auto &stats_document = sources.documents.at("stats");
@@ -425,7 +427,7 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     }
 
     const auto &character = sources.documents.at("characters")["entries"][0];
-    const auto spawn_view = DeriveMaxZoomView(presentation.camera);
+    const auto spawn_view = DeriveMaxZoomView(camera);
     data.character_initial.starting_level = CheckedInteger<std::uint8_t>(RequireInteger(character, "characters", "$/entries/0", "starting_level"), "characters", "$/entries/0/starting_level");
     data.character_initial.starting_basic_attack_level = CheckedInteger<std::uint8_t>(RequireInteger(character, "characters", "$/entries/0", "starting_basic_attack_level"), "characters", "$/entries/0/starting_basic_attack_level");
     data.character_initial.starting_unspent_stat_points = CheckedInteger<std::uint8_t>(RequireInteger(character, "characters", "$/entries/0", "starting_unspent_stat_points"), "characters", "$/entries/0/starting_unspent_stat_points");
@@ -914,7 +916,7 @@ BuiltGameData BuildGameData(const ContentSources &sources)
     }
     if (!SimulationRulesHaveSafeProgression(data))
         ThrowValidationError("level", "$", "invalid progression or projectile array bounds");
-    return content;
+    return data;
 }
 
 } // namespace hs::content

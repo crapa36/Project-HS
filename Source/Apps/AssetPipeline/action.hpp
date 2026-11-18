@@ -151,7 +151,6 @@ class Sha256Stream
                                     fs::path &product_path);
 void WriteBytes(const fs::path &path, std::span<const std::byte> bytes);
 void AtomicWriteIfDifferent(const fs::path &path, std::string_view bytes);
-void TouchActionResult(const fs::path &path);
 void RequireRegularFile(const fs::path &path);
 void RequireDirectory(const fs::path &path);
 void MakeDirectory(const fs::path &path);

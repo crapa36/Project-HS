@@ -45,18 +45,17 @@ void Recipe(CanonicalBytes &b, const VfxDecalRecipe &r)
 }
 void Recipe(CanonicalBytes &b, const VfxGroundRecipe &r)
 {
-    b.Fields(r.effect_id,r.effect_handle,r.source_index,r.source_stable_id,r.output_index,
-        r.gradient_row,r.payload_kind,r.timing_kind,r.min_quality,r.source_type,r.profile,
-        r.motion,r.kind,r.knot_count);
+    b.Fields(r.source_index,r.source_row_count,r.output_index,
+        r.gradient_row,r.payload_kind,r.timing_kind,r.min_quality,
+        r.kind,r.knot_count);
     Array(b,r.knots); Range(b,r.pulse_curve_keys);
     b.Fields(r.pulse_curve_interpolation,r.tick_count,r.seconds,r.primary,r.secondary);
-    Vec(b,r.rgb);
+    Vec(b,r.hdr_rgb);
     b.Fields(r.hdr,r.alpha,r.motion_rate_hz,r.motion_amplitude,r.motion_inset_fraction,r.tertiary);
     b.Sequence(r.mask_variants,[](CanonicalBytes &out,const VfxGroundRecipe::MaskVariant &mask) {
         Range(out,mask.slices); out.Fields(mask.strength,mask.valid,mask.present);
     });
-    b.Fields(r.texture_contract_valid,r.source_output_count,r.source_parameters_empty,
-        r.admission_profiles);
+    b.Fields(r.texture_contract_valid,r.wave_source_supported,r.direct_output,r.shape,r.source_event_outputs,r.admission_profiles);
 }
 void Recipe(CanonicalBytes &b, const VfxFlashEffectRecipe &r)
 {
@@ -86,14 +85,14 @@ void Recipe(CanonicalBytes &b, const VfxOwnedStatusTickRecipe &r)
 void Recipe(CanonicalBytes &b, const VfxMoteSourceRecipe &r)
 {
     b.Fields(r.count,r.rate,r.curl,r.drag,r.speed,r.cone_degrees,r.common_params_valid,r.rate_valid,r.residual_valid,r.spark_valid);
-    b.Fields(r.effect_id,r.effect_handle,r.effect_routes,r.stable_id); Range(b,r.output_range); Array(b,r.knots);
-    b.Fields(r.output_range_valid,r.common_route_valid,r.residual_route_valid,r.rate_route_valid,r.tick_route_valid,r.spark_route_valid,r.cosmetic);
+    b.Fields(r.effect_id,r.effect_routes,r.stable_id); Range(b,r.output_range); Array(b,r.knots);
+    b.Fields(r.output_range_valid,r.common_route_valid,r.residual_route_valid,r.rate_route_valid,r.tick_route_valid,r.spark_schedule,r.cosmetic);
 }
 void Recipe(CanonicalBytes &b, const VfxMoteOutputRecipe &r)
 {
     b.Fields(r.min_quality,r.appearance.gradient_row); b.Sequence(r.mask_slices,[](CanonicalBytes &out,VfxRange v){Range(out,v);}); Array(b,r.mask_strengths);
     b.Fields(r.persistent_curve_row,r.persistent_size,r.appearance.hdr); Vec(b,r.appearance.color); b.Fields(r.mask_present_mask,r.mask_quality_mask,r.output_color_valid,r.persistent_params_valid,r.spark_textures_valid);
-    b.Fields(r.common_recipe_index,r.empty_parameters_valid,r.residual_route_valid,r.rate_route_valid,r.tick_route_valid,r.persistent_route_valid,r.spark_route_valid);
+    b.Fields(r.common_recipe_index,r.empty_parameters_valid,r.residual_route_valid,r.rate_route_valid,r.tick_route_valid,r.persistent_route_valid);
 }
 void Recipe(CanonicalBytes &b, const VfxScreenEffectRecipe &r)
 {
@@ -124,11 +123,6 @@ void Recipe(CanonicalBytes &b, const VfxEntitySurfaceRecipe &r)
         r.knot_start,r.knot_end,r.noise_scale,r.edge_width);
     Vec(b,r.color); b.Fields(r.hdr,r.alpha,r.persistent,r.death);
 }
-void Recipe(CanonicalBytes &b,const VfxRibbonEffectRecipe &r)
-{
-    b.Fields(r.effect_id,r.handle,r.importance,r.payload_kind,r.input_mode,r.timing_kind,r.lookup_count,
-        r.identity_count,r.seconds); Range(b,r.sources); b.Scalar(r.valid_handle);
-}
 void Recipe(CanonicalBytes &b,const VfxRibbonWakeRecipe &r)
 {
     b.Fields(r.effect_handle,r.importance,r.min_quality,r.detail_min_quality,r.gradient_row);
@@ -149,7 +143,7 @@ void Recipe(CanonicalBytes &b,const VfxRibbonFixedRecipe &r)
 }
 void Recipe(CanonicalBytes &b,const VfxRibbonProjectileSourceRecipe &r)
 {
-    b.Fields(r.effect_handle,r.source_id,r.knot_count,r.history_seconds);
+    b.Fields(r.source_id,r.knot_count,r.history_seconds,r.fade_seconds);
     Array(b,r.knots); Range(b,r.outputs);
 }
 void Recipe(CanonicalBytes &b,const VfxRibbonProjectileOutputRecipe &r)
@@ -180,16 +174,16 @@ void Recipe(CanonicalBytes &b,const VfxRibbonEventSourceRecipe &r)
 {
     b.Fields(r.source_id,r.knot_count); Array(b,r.knots);
     b.Fields(r.history_seconds,r.start_seconds,r.end_seconds);
-    Array(b,r.recoil_arc_by_quality); Array(b,r.axial_arc_by_quality);
+    Array(b,r.recoil_arc_by_quality);
     Range(b,r.outputs);
 }
 void Recipe(CanonicalBytes &b,const VfxRibbonEventEffectRecipe &r)
 {
-    b.Fields(r.effect_id,r.effect_handle,r.importance,r.payload_kind,r.seconds); Range(b,r.sources);
+    b.Fields(r.effect_handle,r.importance,r.payload_kind,r.seconds); Range(b,r.sources);
 }
 void Recipe(CanonicalBytes &b,const VfxRibbonEventOutputRecipe &r)
 {
-    b.Fields(r.min_quality,r.axial,r.arc_present,r.arc_degrees); RibbonOutput(b,r.output);
+    b.Fields(r.min_quality,r.arc_present,r.arc_degrees); RibbonOutput(b,r.output);
     Range(b,r.detail_slices); b.Fields(r.detail_strength,r.detail_present);
 }
 void Recipe(CanonicalBytes &b,const VfxFresnelEffectRecipe &r)
@@ -258,9 +252,8 @@ void Binding(CanonicalBytes &b,const ParticleSpriteBinding &r) { b.Fields(r.spri
 
 std::vector<std::byte> CanonicalVfxImageBytes(const VfxImage &image)
 {
-    // v11 removes the redundant per-Ground-row effect lookup count.
     // The cooked wire pack version and ActionKey identity remain independent.
-    CanonicalBytes b("project-hs-vfx-image",12);
+    CanonicalBytes b("project-hs-vfx-image",19);
     b.Sequence(image.definitions,Definitions<CookedVfxDefinition>); b.Sequence(image.emitters,Emitter); b.Sequence(image.sprites,Sprite);
     b.Sequence(image.authored_mesh_indices,[](CanonicalBytes &out,std::uint8_t x){out.Scalar(x);});
     b.Sequence(image.legacy_effect_policies,[](CanonicalBytes &out,const VfxLegacyEffectPolicy &row){out.Fields(row.importance,row.decorative);});
@@ -284,13 +277,15 @@ std::vector<std::byte> CanonicalVfxImageBytes(const VfxImage &image)
     b.Sequence(image.persistent_fire_effect_ranges,[](CanonicalBytes &out,VfxRange x){Range(out,x);}); Recipes(b,image.persistent_fire_recipes);
     b.Sequence(image.owned_status_tick_effect_ranges,[](CanonicalBytes &out,VfxRange x){Range(out,x);}); Recipes(b,image.owned_status_tick_recipes);
     Recipes(b,image.mote_source_recipes); Recipes(b,image.mote_output_recipes);
+    b.Sequence(image.spark_schedules, [](CanonicalBytes &out, const VfxSparkSchedule &schedule) {
+        out.Fields(schedule.output_index, schedule.lifetime);
+        out.Sequence(schedule.birth_ticks, [](CanonicalBytes &bytes, std::uint16_t tick) { bytes.Scalar(tick); });
+    });
     Recipes(b,image.screen_effect_recipes); Recipes(b,image.screen_recipes);
     Recipes(b,image.volume_effect_recipes); Recipes(b,image.volume_recipes);
     Recipes(b,image.entity_surface_effect_recipes); Recipes(b,image.entity_surface_recipes);
     b.Fields(image.entity_surface_routes.phase_effect,image.entity_surface_routes.death_effect,
         image.entity_surface_routes.trap_point_rate_effect);
-    Recipes(b,image.ribbon_effect_recipes);
-    b.Sequence(image.ribbon_slice_indices,[](CanonicalBytes &out,std::uint32_t slice){out.Scalar(slice);});
     b.Sequence(image.ribbon_wake_effect_ranges,[](CanonicalBytes &out,VfxRange range){Range(out,range);});
     Recipes(b,image.ribbon_wake_recipes);
     b.Sequence(image.ribbon_fixed_effect_ranges,[](CanonicalBytes &out,VfxRange range){Range(out,range);});

@@ -506,7 +506,6 @@ void GameSimulation::SimulationWorld::CollectEnemies(Float2 minimum,Float2 maxim
 std::optional<EnemyRow> GameSimulation::SimulationWorld::NearestEnemy(Float2 position, float radius,
                          std::span<const std::uint64_t> excluded)
 {
-    auto timing = Measure(SimulationTimingId::EnemyQueries);
     std::optional<EnemyRow> best{};
     auto best_distance = radius * radius;
     CollectEnemies(position, radius, combat_state.nearest_query);
@@ -530,7 +529,6 @@ std::optional<EnemyRow> GameSimulation::SimulationWorld::NearestEnemy(Float2 pos
 
 std::optional<ConstEnemyRow> GameSimulation::SimulationWorld::NearestEnemy(Float2 position, float radius) const
 {
-    auto timing = Measure(SimulationTimingId::EnemyQueries);
     std::optional<ConstEnemyRow> best{};
     auto best_distance = radius * radius;
     CollectEnemies(position, radius, combat_state.nearest_query);
@@ -554,13 +552,8 @@ std::optional<ConstEnemyRow> GameSimulation::SimulationWorld::NearestEnemy(Float
 
 void GameSimulation::SimulationWorld::RunPipeline()
 {
-#ifdef HS_DEVELOPMENT_TOOLS
-#define HS_RUN_SIMULATION_PHASE(name, method) \
-    { pipeline_phase = SimulationPhaseId::name; auto phase_timing = Measure(SimulationTimingId::name); method(); }
-#else
 #define HS_RUN_SIMULATION_PHASE(name, method) \
     { pipeline_phase = SimulationPhaseId::name; method(); }
-#endif
     HS_SIMULATION_PHASES(HS_RUN_SIMULATION_PHASE)
 #undef HS_RUN_SIMULATION_PHASE
 #undef HS_SIMULATION_PHASES
@@ -1369,7 +1362,6 @@ float GameSimulation::SimulationWorld::SlowMultiplier(ConstEnemyRow enemy) const
 
 void GameSimulation::SimulationWorld::BossAi(EnemyRow boss)
 {
-    auto timing = Measure(SimulationTimingId::BossAi);
     if (boss.action.boss_action_until != 0 && tick > boss.action.boss_action_until)
     {
         boss.action.boss_action_started = 0;
@@ -1421,7 +1413,7 @@ void GameSimulation::SimulationWorld::BossAi(EnemyRow boss)
                                            rules.boss_common.collision_radius,
                                            rules.arena_boundary, ArenaObstacles())
                                            ? actors.player.position
-                                           : TimedNavigationWaypoint(navigation.boss_navigation,boss.motion.position,
+                                           : navigation.boss_navigation.NextWaypoint(boss.motion.position,
                                                                            actors.player.position);
         boss.motion.velocity = Multiply(Normalize(Subtract(navigation_target, boss.motion.position)),
                                  boss.cold.move_speed * SlowMultiplier(boss));
@@ -1708,7 +1700,6 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
         navigation.boss_navigation.RequestFlow(actors.player.position);
         navigation.enemy_navigation_target = target_cell;
     }
-    auto enemy_ai_timing = Measure(SimulationTimingId::EnemyPerceptionDecision);
     for (auto enemy : actors.enemies)
     {
         if (enemy.life.dead)
@@ -1843,7 +1834,7 @@ void GameSimulation::SimulationWorld::AiIntentPhase()
                                                           radius, rules.arena_boundary,
                                                           ArenaObstacles())
                                                ? actors.player.position
-                                               : TimedNavigationWaypoint(navigation.enemy_navigation,enemy.motion.position,
+                                               : navigation.enemy_navigation.NextWaypoint(enemy.motion.position,
                                                                                 actors.player.position);
             const auto direction = Normalize(Subtract(navigation_target, enemy.motion.position));
             enemy.motion.velocity = direction;

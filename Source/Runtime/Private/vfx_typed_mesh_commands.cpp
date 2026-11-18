@@ -18,14 +18,6 @@ bool InRange(VfxRange range, std::span<const T> values) noexcept
 }
 }
 
-std::vector<VfxOwnedMeshInput> BuildVfxTypedMeshCommands(
-    const VfxImage &image, const PreparedVfxMeshRecipeView &recipes,
-    std::span<const VfxPersistentInput> inputs)
-{
-    std::vector<VfxOwnedMeshInput> result;
-    AppendVfxTypedMeshCommands(image, recipes, inputs, result);
-    return result;
-}
 
 void AppendVfxTypedMeshCommands(const VfxImage &image,
     const PreparedVfxMeshRecipeView &recipes,

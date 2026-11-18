@@ -1,6 +1,7 @@
 #pragma once
 
 #include "character_ir.hpp"
+#include <nlohmann/json_fwd.hpp>
 #include <string_view>
 
 namespace hs::content
@@ -44,12 +45,6 @@ struct CharacterProduct
     const CharacterIR &character, const render_data::GeometryData &geometry,
     const render_data::GeometryMetadata &metadata, bool suicide_bubble);
 
-struct CharacterDependencyProduct
-{
-    std::string_view logical_id;
-    std::span<const std::byte> bytes;
-};
-
 struct PreparedCharacterBinding
 {
     std::string logical_id;
@@ -61,10 +56,4 @@ struct PreparedCharacterBinding
 [[nodiscard]] PreparedCharacterBinding PrepareCharacterBinding(
     std::string_view logical_id, std::span<const std::byte> metadata_bytes);
 
-// Build/image-link boundary after all referenced shader/material/texture products
-// exist. Callers supply bytes from their checked immutable product snapshots.
-// Requires the referenced page, material closures, slot textures, optional PBR
-// textures and Archer animation; no source file or legacy exchange is reopened.
-void ValidateCharacterProductBindings(const PreparedCharacterBinding &prepared,
-    std::span<const CharacterDependencyProduct> products);
 } // namespace hs::content

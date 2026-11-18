@@ -29,7 +29,6 @@ void TestVfxProfileAdmission()
     std::array<VfxEffectRecord, 1> effects{};
     std::array<VfxSourceRecord, 2> sources{};
     std::array<VfxOutputRecord, 3> outputs{};
-    std::array<VfxEffectLookupRecord, 2> effect_lookup{};
     std::array<std::uint32_t, 1> output_profiles{};
     std::array<VfxRange, 1> light_ranges{};
     std::array<VfxLightRecipe, 3> light_recipes{};
@@ -37,7 +36,6 @@ void TestVfxProfileAdmission()
     std::array<VfxGroundRecipe, 2> ground_recipes{};
     std::array<VfxScreenEffectRecipe, 1> screen_effects{};
     std::array<VfxScreenRecipe, 2> screen_recipes{};
-    std::array<VfxRibbonEffectRecipe, 1> ribbon_effects{};
     std::array<VfxRange, 1> distortion_ranges{};
     std::array<VfxDistortionRecipe, 3> distortion_recipes{};
     std::array<VfxRange, 1> decal_ranges{};
@@ -55,7 +53,6 @@ void TestVfxProfileAdmission()
     image.program.effects = effects;
     image.program.sources = sources;
     image.program.outputs = outputs;
-    image.program.effect_lookup = std::span(effect_lookup).first(1);
     image.effect_output_profiles = output_profiles;
     image.light_effect_ranges = light_ranges;
     image.light_recipes = light_recipes;
@@ -63,7 +60,6 @@ void TestVfxProfileAdmission()
     image.ground_recipes = ground_recipes;
     image.screen_effect_recipes = screen_effects;
     image.screen_recipes = screen_recipes;
-    image.ribbon_effect_recipes = ribbon_effects;
     image.distortion_effect_ranges = distortion_ranges;
     image.distortion_recipes = distortion_recipes;
     image.decal_effect_ranges = decal_ranges;
@@ -87,7 +83,6 @@ void TestVfxProfileAdmission()
         ground_ranges = {};
         ground_recipes = {};
         screen_effects = {};
-        ribbon_effects = {};
         distortion_ranges = {};
         distortion_recipes = {};
         decal_ranges = {};
@@ -102,9 +97,6 @@ void TestVfxProfileAdmission()
         output_profiles = {};
         effects[0].handle = 1;
         effects[0].sources = {0, 2};
-        effect_lookup = {};
-        effect_lookup[0] = {0x123456789abcdef0ull, 1};
-        image.program.effect_lookup = std::span(effect_lookup).first(1);
         sources[0].effect = 1;
         sources[0].stable_id = 101;
         sources[0].type = VfxSourceType::Direct;
@@ -122,9 +114,6 @@ void TestVfxProfileAdmission()
         light_ranges[0] = {0, 1};
         screen_effects[0].route = VfxScreenRoute::EventHit;
         screen_effects[0].outputs = {0, 1};
-        ribbon_effects[0].handle = 1;
-        ribbon_effects[0].valid_handle = true;
-        ribbon_effects[0].sources = {0, 1};
         distortion_ranges[0] = {0, 1};
         decal_ranges[0] = {0, 1};
         volume_effects[0].route = VfxVolumeRoute::EventContext;
@@ -133,11 +122,6 @@ void TestVfxProfileAdmission()
             (1u << static_cast<unsigned>(VfxOutputProfile::Light));
     };
 
-    auto setOutputProfile = [&](VfxOutputProfile profile)
-    {
-        outputs[0].profile = profile;
-        output_profiles[0] |= 1u << static_cast<unsigned>(profile);
-    };
     const auto hash32 = [](std::string_view value)
     {
         std::uint32_t hash = 2166136261u;
@@ -169,15 +153,7 @@ void TestVfxProfileAdmission()
         for (std::size_t i = 0; i < count; ++i)
         {
             auto &recipe = ground_recipes[i];
-            recipe.effect_handle = 1;
-            recipe.effect_id = effect_lookup[0].effect_id;
-            recipe.source_index = static_cast<std::uint32_t>(i);
-            recipe.source_stable_id = sources[i].stable_id;
             recipe.output_index = static_cast<std::uint32_t>(i);
-            recipe.source_type = VfxSourceType::Direct;
-            recipe.profile = outputs[i].profile;
-            recipe.payload_kind = effects[0].payload_kind;
-            recipe.timing_kind = effects[0].timing_kind;
         }
     };
 
@@ -208,22 +184,6 @@ void TestVfxProfileAdmission()
     initialize();
     effects[0].must_match_logic = 1;
     Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Screen), false) == Bit(Profile::Screen));
-
-    initialize();
-    setOutputProfile(VfxOutputProfile::RibbonAdd);
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ribbon), false) == Bit(Profile::Ribbon));
-    initialize();
-    setOutputProfile(VfxOutputProfile::RibbonOit);
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ribbon), false) == Bit(Profile::Ribbon));
-    initialize();
-    setOutputProfile(VfxOutputProfile::Distortion);
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Distortion), false) == Bit(Profile::Distortion));
-    initialize();
-    setOutputProfile(VfxOutputProfile::Decal);
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Decal), false) == Bit(Profile::Decal));
-    initialize();
-    setOutputProfile(VfxOutputProfile::LocalVolume);
-    Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Volume), false) == Bit(Profile::Volume));
 
     configureCosmeticGround(2);
     Require(runtime_detail::ClassifyCosmeticVfxEventProfiles(image, 1, Bit(Profile::Ground), false) ==

@@ -10,7 +10,6 @@
 #include <hs/presentation/projector.hpp>
 
 #include "graphics_settings_commit.hpp"
-#include "runtime_diagnostics.hpp"
 #include "main_wake.hpp"
 #include "ui_draw_packet.hpp"
 
@@ -54,7 +53,6 @@ class ResizeMailbox
 struct QueuedAudioEvent
 {
     PresentationEvent event;
-    std::uint64_t enqueued_qpc{};
     enum class Kind : std::uint8_t { Event, Tick } kind{};
     struct TickInfo
     {
@@ -63,7 +61,6 @@ struct QueuedAudioEvent
         SessionPhase phase{SessionPhase::MainMenu};
         Float3 listener_position{};
     } tick_info;
-    std::uint64_t dequeued_qpc{}; // Main's owned batch only; producer leaves zero.
 };
 
 struct RenderPorts
@@ -137,7 +134,6 @@ struct SimulationPorts
 #if defined(HS_DEVELOPMENT_TOOLS)
     std::atomic<std::shared_ptr<const MeadowGroundQuery>> &room_ground;
 #endif
-    runtime_detail::DiagnosticClock capture_clock{};
     runtime_detail::MainWake *main_wake{};
     void NotifyMain() noexcept { if (main_wake) main_wake->Notify(); }
 
@@ -146,7 +142,6 @@ struct SimulationPorts
         QueuedAudioEvent packet;
         packet.kind = QueuedAudioEvent::Kind::Tick;
         packet.tick_info = tick;
-        packet.enqueued_qpc = capture_clock ? capture_clock() : 0;
         if (!sim_audio_events.TryPush(packet))
             dropped_presentation_events.fetch_add(1, std::memory_order_relaxed);
         else NotifyMain();
@@ -154,7 +149,7 @@ struct SimulationPorts
 
     void PublishAudioEvent(const PresentationEvent &event)
     {
-        if (!sim_audio_events.TryPush({event, capture_clock ? capture_clock() : 0}))
+        if (!sim_audio_events.TryPush({event}))
             dropped_presentation_events.fetch_add(1, std::memory_order_relaxed);
         else NotifyMain();
     }
@@ -215,7 +210,6 @@ struct RuntimeChannels
     RenderSnapshotExchange snapshots;
     BoundedSpscQueue<PresentationEvent, 8192> presentation_events;
     BoundedSpscQueue<QueuedAudioEvent, 1024> sim_audio_events;
-    runtime_detail::DiagnosticClock capture_clock{}; // Assigned before worker publication.
     runtime_detail::MainWake *main_wake{};
     void NotifyMain() noexcept { if (main_wake) main_wake->Notify(); }
     ResizeMailbox resize_commands;
@@ -296,7 +290,7 @@ struct RuntimeChannels
 #if defined(HS_DEVELOPMENT_TOOLS)
                 room_ground,
 #endif
-                capture_clock, main_wake};
+                main_wake};
     }
 };
 

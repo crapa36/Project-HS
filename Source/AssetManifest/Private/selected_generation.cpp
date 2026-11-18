@@ -1,14 +1,11 @@
 #include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/asset_manifest/generation_lock.hpp>
-#include <hs/core/sha256.hpp>
-
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
-#include <array>
 #include <cstdint>
 #include <fstream>
-#include <iterator>
+#include <memory>
 #include <stdexcept>
 #include <string_view>
 #include <unordered_map>
@@ -16,21 +13,12 @@
 #include <utility>
 #include <vector>
 
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <Windows.h>
-#endif
-
 namespace hs
 {
 namespace
 {
 using Json = nlohmann::json;
 namespace fs = std::filesystem;
-
-using PayloadHash = Sha256Stream;
 
 [[nodiscard]] bool IsDigest(std::string_view value)
 {
@@ -49,34 +37,36 @@ using PayloadHash = Sha256Stream;
            });
 }
 
-[[nodiscard]] std::string DigestText(const std::array<std::byte, 32> &digest)
+[[nodiscard]] std::string ScopeFileName(std::string_view scope)
 {
-    constexpr char digits[] = "0123456789abcdef";
-    std::string text = "sha256:";
-    text.reserve(7 + digest.size() * 2);
-    for (const auto byte : digest)
+    if (scope.empty() || scope.size() > 128)
+        throw std::runtime_error("invalid Generation scope length");
+    std::string encoded;
+    constexpr char hex[] = "0123456789ABCDEF";
+    for (const unsigned char ch : scope)
     {
-        const auto value = std::to_integer<unsigned char>(byte);
-        text.push_back(digits[value >> 4]);
-        text.push_back(digits[value & 15]);
+        if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
+            ch == '-' || ch == '_' || ch == '.')
+            encoded.push_back(static_cast<char>(ch));
+        else if (ch == ':')
+        {
+            encoded.push_back('%');
+            encoded.push_back(hex[ch >> 4]);
+            encoded.push_back(hex[ch & 15]);
+        }
+        else
+            throw std::runtime_error("unsafe Generation scope character");
     }
-    return text;
+    return encoded + ".json";
 }
 
-[[nodiscard]] std::string LogicalIdDigest(std::string_view logical_id)
+[[nodiscard]] bool IsSafeProductFilename(std::string_view value)
 {
-    const auto digest = Sha256({reinterpret_cast<const std::byte *>(logical_id.data()),
-                                logical_id.size()});
-    constexpr char digits[] = "0123456789abcdef";
-    std::string hex;
-    hex.reserve(64);
-    for (const auto byte : digest)
-    {
-        const auto value = std::to_integer<unsigned char>(byte);
-        hex.push_back(digits[value >> 4]);
-        hex.push_back(digits[value & 15]);
-    }
-    return hex;
+    if (value.empty() || value == "." || value == ".." ||
+        value.find_first_of("/\\:") != std::string_view::npos)
+        return false;
+    const auto path = fs::u8path(value);
+    return path.filename() == path && !path.has_root_path();
 }
 
 [[nodiscard]] fs::path ResolveLocator(const fs::path &root,
@@ -109,48 +99,6 @@ using PayloadHash = Sha256Stream;
 }
 } // namespace
 
-Result ReadGenerationPointer(const fs::path &pointer_path, std::string &bytes)
-{
-    try
-    {
-        std::string snapshot;
-#ifdef _WIN32
-        const auto raw = CreateFileW(pointer_path.c_str(), GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (raw == INVALID_HANDLE_VALUE)
-            throw std::runtime_error("cannot open Generation pointer (Win32 " +
-                std::to_string(GetLastError()) + "): " + pointer_path.string());
-        const auto close = [](void *handle) { CloseHandle(handle); };
-        const std::unique_ptr<void, decltype(close)> handle(raw, close);
-        std::array<char, 64 * 1024> buffer{};
-        for (;;)
-        {
-            DWORD count{};
-            if (!ReadFile(handle.get(), buffer.data(), static_cast<DWORD>(buffer.size()),
-                          &count, nullptr))
-                throw std::runtime_error("cannot read Generation pointer (Win32 " +
-                    std::to_string(GetLastError()) + "): " + pointer_path.string());
-            if (count == 0) break;
-            snapshot.append(buffer.data(), count);
-        }
-#else
-        std::ifstream input(pointer_path, std::ios::binary);
-        if (!input)
-            throw std::runtime_error("cannot open Generation pointer: " + pointer_path.string());
-        snapshot.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
-        if (input.bad())
-            throw std::runtime_error("cannot read Generation pointer: " + pointer_path.string());
-#endif
-        bytes = std::move(snapshot);
-        return Result::Success();
-    }
-    catch (const std::exception &error)
-    {
-        return Result::Failure(ErrorCode::InvalidState, "generation", error.what());
-    }
-}
-
 Result SelectedGeneration::Require(std::string_view logical_id,
                                    fs::path &path) const
 {
@@ -163,91 +111,82 @@ Result SelectedGeneration::Require(std::string_view logical_id,
     return Result::Success();
 }
 
-Result LoadSelectedGeneration(const fs::path &pointer_path,
+Result LoadSelectedGeneration(const fs::path &manifest_path,
                               SelectedGeneration &generation)
 {
     try
     {
-        const auto absolute_pointer = fs::absolute(pointer_path);
-        const auto root = fs::canonical(absolute_pointer.parent_path().parent_path());
+        const auto absolute_manifest = fs::absolute(manifest_path);
+        const auto root = fs::canonical(absolute_manifest.parent_path().parent_path().parent_path());
         GenerationFileLock root_reader_lease;
         const auto mutation_lock_path = root / ".generation-mutation.lock";
         if (fs::exists(mutation_lock_path))
             root_reader_lease = GenerationFileLock(
                 mutation_lock_path, GenerationFileLock::Mode::Shared, false);
 
-        std::string pointer_bytes;
-        if (const auto read = ReadGenerationPointer(absolute_pointer, pointer_bytes); !read)
-            return read;
-        const auto pointer = Json::parse(pointer_bytes);
-        if (pointer.at("schema_version") != 1)
-            throw std::runtime_error("unsupported Generation pointer schema");
-        const auto id = pointer.at("generation_id").get<std::string>();
-        const auto scope = pointer.at("scope").get<std::string>();
-        const auto locator = pointer.at("manifest_locator").get<std::string>();
-        if (!IsDigest(id) || scope.empty() ||
-            locator != "Generations/" + id + "/generation.json")
-            throw std::runtime_error("invalid Generation pointer identity");
-        const auto manifest_path = ResolveLocator(root, locator);
-        auto lease = std::make_shared<GenerationFileLock>(manifest_path, GenerationFileLock::Mode::Shared);
-        // Root publication/GC can retire the selected path until the manifest
-        // reader lease is established. After that lease owns the generation,
-        // release the short-lived root lock before reading its immutable data.
-        root_reader_lease = GenerationFileLock{};
-        const auto manifest = ReadJson(manifest_path);
+        const auto manifest = ReadJson(absolute_manifest);
         const auto &schema = manifest.at("schema_version");
-        if (!schema.is_number_integer() || (schema != 2 && schema != 3))
+        if (!schema.is_number_integer() || schema != 5)
             throw std::runtime_error("unsupported Generation manifest schema");
-        const int version = schema.get<int>();
-        if (manifest.at("generation_id") != id ||
-            manifest.at("scope") != scope)
-            throw std::runtime_error("Generation manifest does not match pointer");
+        const auto id = manifest.at("generation_id").get<std::string>();
+        const auto scope = manifest.at("scope").get<std::string>();
+        const auto expected_manifest = root / "Generations" / "current" / ScopeFileName(scope);
+        if (!IsDigest(id) || absolute_manifest != expected_manifest ||
+            fs::canonical(expected_manifest) != expected_manifest)
+            throw std::runtime_error("invalid Generation manifest identity or path");
 
         SelectedGeneration loaded;
-        loaded.reader_lease_ = std::move(lease);
         loaded.id = id;
         loaded.scope = scope;
         const auto &products = manifest.at("products");
-        const auto &required = manifest.at("required_ids");
-        if (!products.is_array() || products.empty() ||
-            !required.is_array() || required.size() != products.size())
+        if (!products.is_array() || products.empty())
             throw std::runtime_error("Generation product set is incomplete");
         std::unordered_map<std::string, std::pair<std::string, std::uint64_t>> identities;
         std::unordered_map<std::string, std::vector<std::string>> dependencies;
         std::unordered_set<std::string> action_ids;
+        std::unordered_set<std::string> leased_product_sets;
         std::string_view previous_id;
-        for (std::size_t index = 0; index < products.size(); ++index)
+        for (const auto &item : products)
         {
-            const auto &item = products[index];
             const auto &logical_id = item.at("logical_id").get_ref<const std::string &>();
             if (logical_id <= previous_id)
                 throw std::runtime_error("Generation products are not sorted uniquely");
-            if (required[index] != logical_id)
-                throw std::runtime_error("Generation required IDs do not match products");
             previous_id = logical_id;
             const auto product_locator = item.at("locator").get<std::string>();
             const auto digest = item.at("digest").get<std::string>();
             const auto size = item.at("size").get<std::uint64_t>();
             const auto action_id = item.at("action_id").get<std::string>();
-            if (version == 3)
+            const auto namespace_path = item.at("namespace_path").get<std::string>();
+            const auto product_set_id = item.at("product_set_id").get<std::string>();
+            const auto relative_namespace = fs::path(namespace_path);
+            const auto product_prefix = "Products/" + namespace_path + "/" +
+                product_set_id + "/";
+            if (!IsActionId(action_id) || namespace_path.empty() ||
+                relative_namespace.has_root_path() ||
+                relative_namespace.generic_string() != namespace_path ||
+                !IsDigest(product_set_id) || !product_locator.starts_with(product_prefix) ||
+                !IsSafeProductFilename(std::string_view(product_locator).substr(product_prefix.size())))
+                throw std::runtime_error("invalid Generation product ownership or locator");
+            for (const auto &part : relative_namespace)
+                if (!IsActionId(part.string()))
+                    throw std::runtime_error("unsafe Generation action namespace");
+
+            std::string product_set_key = namespace_path;
+            product_set_key.push_back('\0');
+            product_set_key += product_set_id;
+            if (leased_product_sets.insert(std::move(product_set_key)).second)
             {
-                const auto namespace_path = item.at("namespace_path").get<std::string>();
-                const auto relative_namespace = fs::path(namespace_path);
-                if (!IsActionId(action_id) || namespace_path.empty() ||
-                    relative_namespace.has_root_path() ||
-                    relative_namespace.generic_string() != namespace_path ||
-                    product_locator != "Generations/" + id + "/products/" +
-                                           LogicalIdDigest(logical_id) + ".bin")
-                    throw std::runtime_error("invalid Generation snapshot ownership or locator");
-                for (const auto &part : relative_namespace)
-                    if (!IsActionId(part.string()))
-                        throw std::runtime_error("unsafe Generation action namespace");
+                const auto lease_path = root / "Products" / fs::u8path(namespace_path) /
+                    ".leases" / (product_set_id + ".lock");
+                if (fs::canonical(lease_path) != lease_path)
+                    throw std::runtime_error("ProductSet lease path aliases another path");
+                loaded.reader_leases_.push_back(std::make_shared<GenerationFileLock>(
+                    lease_path, GenerationFileLock::Mode::Shared, false));
             }
             const auto path = ResolveLocator(root, product_locator);
-            if (version == 3 && path !=
-                                    root / fs::path(product_locator))
-                throw std::runtime_error("Generation snapshot locator aliases another path");
-            if (action_id.empty() || !digest.starts_with("sha256:") ||
+            if (path != root / fs::u8path(product_locator))
+                throw std::runtime_error("Generation product locator aliases another path");
+            if (!digest.starts_with("sha256:") ||
                 !IsDigest(std::string_view(digest).substr(7)))
                 throw std::runtime_error("invalid Generation product identity");
             if (fs::file_size(path) != size)
@@ -274,11 +213,12 @@ Result LoadSelectedGeneration(const fs::path &pointer_path,
             identities.emplace(logical_id, std::pair{digest, size});
             action_ids.insert(action_id);
         }
+        root_reader_lease = GenerationFileLock{};
         std::unordered_map<std::string, std::uint8_t> dependency_state;
         std::vector<std::pair<std::string, std::size_t>> pending;
-        for (const auto &entry : required)
+        for (const auto &product : products)
         {
-            const auto &id = entry.get_ref<const std::string &>();
+            const auto &id = product.at("logical_id").get_ref<const std::string &>();
             if (dependency_state[id] == 2)
                 continue;
             dependency_state[id] = 1;
@@ -326,52 +266,7 @@ Result LoadSelectedGeneration(const fs::path &pointer_path,
             has_previous_edge = true;
         }
         loaded.product_dependencies = std::move(dependencies);
-        loaded.pointer_snapshot_ = std::move(pointer_bytes);
         generation = std::move(loaded);
-        return Result::Success();
-    }
-    catch (const std::exception &error)
-    {
-        return Result::Failure(ErrorCode::InvalidState, "generation", error.what());
-    }
-}
-
-Result VerifySelectedGenerationProducts(const SelectedGeneration &generation)
-{
-    try
-    {
-        if (generation.product_paths.empty() ||
-            generation.product_paths.size() != generation.product_digests.size())
-            throw std::runtime_error("Generation product path/digest keys do not match");
-
-        constexpr std::size_t kChunkSize = 64 * 1024;
-        std::array<std::byte, kChunkSize> buffer{};
-        for (const auto &[logical_id, path] : generation.product_paths)
-        {
-            if (logical_id.empty() || path.empty())
-                throw std::runtime_error("Generation product has an empty identity");
-            const auto expected = generation.product_digests.find(logical_id);
-            if (expected == generation.product_digests.end() ||
-                !expected->second.starts_with("sha256:") ||
-                !IsDigest(std::string_view(expected->second).substr(7)))
-                throw std::runtime_error("Generation product digest is missing or invalid: " +
-                                         logical_id);
-
-            std::ifstream input(path, std::ios::binary);
-            if (!input)
-                throw std::runtime_error("cannot read Generation product: " + logical_id);
-            PayloadHash hash;
-            while (input.read(reinterpret_cast<char *>(buffer.data()),
-                              static_cast<std::streamsize>(buffer.size())))
-                hash.Add({buffer.data(), buffer.size()});
-            const auto count = input.gcount();
-            if (count > 0)
-                hash.Add({buffer.data(), static_cast<std::size_t>(count)});
-            if (!input.eof())
-                throw std::runtime_error("cannot read Generation product: " + logical_id);
-            if (DigestText(hash.Finish()) != expected->second)
-                throw std::runtime_error("Generation product digest mismatch: " + logical_id);
-        }
         return Result::Success();
     }
     catch (const std::exception &error)

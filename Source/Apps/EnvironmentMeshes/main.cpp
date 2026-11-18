@@ -42,7 +42,6 @@ void Produce(const fs::path &source_root, const fs::path &build_root)
     AddInputs(spec, source_root, {mesh_source, mesh_source.parent_path() / "meadow_surface_meshes.json"});
     std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
     if (IsCurrent(build_root, spec, names)) {
-        ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
         return;
     }
     const auto input_stage = ap::CreateStage(build_root / "Actions" / spec.namespace_path);
@@ -53,7 +52,6 @@ void Produce(const fs::path &source_root, const fs::path &build_root)
         snapshot.Capture(frozen_mesh_source.parent_path() / "meadow_surface_meshes.json");
         snapshot.SetInputs(spec, {frozen_mesh_source, frozen_mesh_source.parent_path() / "meadow_surface_meshes.json"});
         if (IsCurrent(build_root, spec, names)) {
-            ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
             ap::RemoveStage(input_stage);
             return;
         }

@@ -1526,10 +1526,9 @@ int main(int argc, char **argv)
             return 0;
         }
 
-        const auto executable = hs::CurrentExecutablePath();
         const auto pointer_path = generation_pointer
             ? std::filesystem::absolute(*generation_pointer)
-            : executable.parent_path() / "GenerationState/runtime-full.json";
+            : hs::CurrentExecutableDirectory().parent_path() / "Generations/current/runtime-full.json";
         hs::SelectedGeneration selected_generation;
         if (auto loaded = hs::LoadSelectedGeneration(pointer_path, selected_generation);
             !loaded)
@@ -1706,7 +1705,7 @@ int main(int argc, char **argv)
                     {"baseline_build_id", suite.builds.front().id},
                     {"seeds", suite.seeds},
                     {"builds", std::move(builds)},
-                    {"runs", runs},
+                    {"runs", Json::array()},
                     {"aggregates", aggregates}};
         if (relic_balance_mode)
         {
@@ -1722,6 +1721,7 @@ int main(int argc, char **argv)
             report["relic_pairs"] = AggregateRelicPairs(suite, runs);
             report["paired_spawn_counts_valid"] = true;
         }
+        report["runs"] = std::move(runs);
         std::ofstream report_file(output_directory / "combat_report.json", std::ios::trunc);
         report_file << report.dump(2) << '\n';
         report_file.close();

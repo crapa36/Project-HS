@@ -1,121 +1,16 @@
 #include "game_data_parameters.hpp"
+#include "../AssetPipeline/action.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <cstdint>
-#include <optional>
-#include <set>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
 
 namespace hs::content
 {
-
-[[noreturn]] void ThrowValidationError(std::string_view, std::string_view,
-                                       std::string_view);
-const Json &RequireMember(const Json &, std::string_view, std::string_view, std::string_view);
-const Json &RequireArray(const Json &, std::string_view, std::string_view, std::string_view);
-std::string RequireString(const Json &, std::string_view, std::string_view, std::string_view);
-void RequireCount(const Json &, std::string_view, std::string_view, std::size_t);
-
-[[noreturn]] void ThrowValidationError(std::string_view file, std::string_view path,
-                       std::string_view message)
-{
-    throw std::runtime_error(std::string(file) + ":" + std::string(path) + ": " +
-                             std::string(message));
-}
-
-const Json &RequireMember(const Json &object, std::string_view file,
-                          std::string_view path, std::string_view key)
-{
-    if (!object.is_object())
-    {
-        ThrowValidationError(file, path, "expected object");
-    }
-    const auto iterator = object.find(key);
-    if (iterator == object.end())
-    {
-        ThrowValidationError(file, std::string(path) + "/" + std::string(key), "missing member");
-    }
-    return *iterator;
-}
-
-const Json &RequireArray(const Json &object, std::string_view file,
-                         std::string_view path, std::string_view key)
-{
-    const auto &value = RequireMember(object, file, path, key);
-    if (!value.is_array())
-    {
-        ThrowValidationError(file, std::string(path) + "/" + std::string(key), "expected array");
-    }
-    return value;
-}
-
-std::string RequireString(const Json &object, std::string_view file,
-                          std::string_view path, std::string_view key)
-{
-    const auto &value = RequireMember(object, file, path, key);
-    if (!value.is_string() || value.get_ref<const std::string &>().empty())
-    {
-        ThrowValidationError(file, std::string(path) + "/" + std::string(key),
-             "expected non-empty string");
-    }
-    return value.get<std::string>();
-}
-
-double RequireNumber(const Json &object, std::string_view file,
-                     std::string_view path, std::string_view key)
-{
-    const auto &value = RequireMember(object, file, path, key);
-    if (!value.is_number())
-    {
-        ThrowValidationError(file, std::string(path) + "/" + std::string(key), "expected number");
-    }
-    const auto number = value.get<double>();
-    if (!std::isfinite(number))
-    {
-        ThrowValidationError(file, std::string(path) + "/" + std::string(key),
-             "number must be finite");
-    }
-    return number;
-}
-
-std::int64_t RequireInteger(const Json &object, std::string_view file,
-                            std::string_view path, std::string_view key)
-{
-    const auto &value = RequireMember(object, file, path, key);
-    if (!value.is_number_integer())
-    {
-        ThrowValidationError(file, std::string(path) + "/" + std::string(key), "expected integer");
-    }
-    return value.get<std::int64_t>();
-}
-
-void RequireExactKeys(const Json &object, std::string_view file,
-                      std::initializer_list<std::string_view> expected)
-{
-    for (const auto &[key, unused] : object.items())
-    {
-        static_cast<void>(unused);
-        if (std::ranges::find(expected, key) == expected.end())
-        {
-            ThrowValidationError(file, std::string("$/") + key, "unexpected root member");
-        }
-    }
-    std::optional<std::string_view> missing;
-    for (const auto key : expected)
-        if (object.find(key) == object.end() && (!missing || key < *missing))
-            missing = key;
-    if (missing)
-    {
-        ThrowValidationError(file, std::string("$/") + std::string(*missing), "missing root member");
-    }
-}
 
 void RequireCount(const Json &array, std::string_view file, std::string_view path,
                   std::size_t expected)
@@ -771,10 +666,11 @@ void ValidateDocuments(const ContentSources &sources)
 namespace
 {
 
-void ValidateGameDataSchema()
+std::string ReadValidatedSchema()
 {
     const auto schema_path = paths::Schema();
-    const auto schema_text = ReadRequiredText(schema_path);
+    asset_pipeline::RequireRegularFile(schema_path);
+    auto schema_text = ReadRequiredText(schema_path);
     Json schema;
     try
     {
@@ -793,6 +689,7 @@ void ValidateGameDataSchema()
         throw std::runtime_error(schema_path.string() +
                                  ": expected complete draft 2020-12 category schema");
     }
+    return schema_text;
 }
 
 Json ParseGameDataDocument(std::string_view text, std::string_view name)
@@ -812,67 +709,43 @@ Json ParseGameDataDocument(std::string_view text, std::string_view name)
     return document;
 }
 
-void ValidateGameDataDocuments(ContentSources &sources)
-{
-    for (std::size_t index = 0; index < kDocumentNames.size(); ++index)
-    {
-        const auto name = kDocumentNames[index];
-        const auto &text = sources.inventory.document_text[index];
-        sources.documents.emplace(name, ParseGameDataDocument(text, name));
-    }
-    ValidateDocuments(sources);
-}
-
 } // namespace
 
 ContentSources LoadAndValidateGameDataDocuments()
 {
     ValidateGameDataDirectory();
-    ValidateGameDataSchema();
+    ReadValidatedSchema();
     ContentSources sources;
-    for (std::size_t index = 0; index < kDocumentNames.size(); ++index)
-        sources.inventory.document_text[index] =
-            ReadRequiredText(GameDataCategoryPath(kDocumentNames[index]));
-    ValidateGameDataDocuments(sources);
+    for (const auto name : kDocumentNames)
+    {
+        const auto text = ReadRequiredText(GameDataCategoryPath(name));
+        sources.documents.emplace(name, ParseGameDataDocument(text, name));
+    }
+    ValidateDocuments(sources);
     return sources;
 }
 
-ContentSources LoadScopedGameDataSources(std::span<const std::string_view> names)
+ContentSources LoadScopedGameDataSources(bool is_simulation, std::vector<asset_pipeline::Input> &inputs)
 {
     ValidateGameDataDirectory();
-    ValidateGameDataSchema();
-    ContentSources sources;
-    std::set<std::string, std::less<>> requested;
-    for (const auto name : names)
-    {
-        if (!IsGameDataCategory(name) || name == "audio_cues" ||
-            name == "materials" || name == "particles" || name == "ui_strings" ||
-            !requested.emplace(name).second)
-            throw std::runtime_error("invalid or repeated semantic GameData category: " +
-                                     std::string(name));
-        const auto path = GameDataCategoryPath(name);
-        auto text = ReadRequiredText(path);
-        sources.documents.emplace(name, ParseGameDataDocument(text, name));
-        const auto position = std::ranges::find(kDocumentNames, name);
-        sources.inventory.document_text[static_cast<std::size_t>(
-            std::distance(kDocumentNames.begin(), position))] = std::move(text);
-    }
-
+    const auto schema = ReadValidatedSchema();
+    inputs.push_back({"Schemas/game.schema.json", paths::Schema(),
+                      asset_pipeline::Sha256Bytes(std::as_bytes(std::span(schema)))});
     constexpr std::array<std::string_view, 9> simulation_scope = {
         "stats", "level", "characters", "skills", "upgrades", "enemies",
         "relics", "spawn_schedule", "bosses"};
-    constexpr std::array<std::string_view, 2> presentation_scope = {
-        "characters", "relics"};
-    const auto is_exact_scope = [&](const auto &expected) {
-        if (requested.size() != expected.size())
-            return false;
-        return std::ranges::all_of(expected, [&](const auto name) {
-            return requested.contains(std::string(name));
-        });
-    };
-    const auto is_simulation = is_exact_scope(simulation_scope);
-    if (!is_simulation && !is_exact_scope(presentation_scope))
-        throw std::runtime_error("unsupported semantic GameData scope");
+    constexpr std::array<std::string_view, 2> presentation_scope = {"characters", "relics"};
+    const auto names = is_simulation ? std::span<const std::string_view>(simulation_scope)
+                                     : std::span<const std::string_view>(presentation_scope);
+    ContentSources sources;
+    for (const auto name : names)
+    {
+        const auto path = GameDataCategoryPath(name);
+        const auto text = ReadRequiredText(path);
+        sources.documents.emplace(name, ParseGameDataDocument(text, name));
+        inputs.push_back({"ContentSource/GameData/" + std::string(name) + ".json", path,
+                          asset_pipeline::Sha256Bytes(std::as_bytes(std::span(text)))});
+    }
 
     const auto &character = sources.documents.at("characters")["entries"][0];
     const auto &relic_entries = sources.documents.at("relics")["entries"];

@@ -4,7 +4,6 @@
 
 #ifdef _WIN32
 #include <Windows.h>
-#include <bcrypt.h>
 #else
 #include <cerrno>
 #include <fcntl.h>
@@ -13,21 +12,17 @@
 
 #include <nlohmann/json.hpp>
 #include <hs/asset_manifest/generation_lock.hpp>
-#include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/core/sha256.hpp>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <charconv>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <iterator>
-#include <limits>
-#include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -47,19 +42,6 @@ fs::path Utf8Path(std::string_view value)
 {
     const auto *begin = reinterpret_cast<const char8_t *>(value.data());
     return fs::path(std::u8string(begin, begin + value.size()));
-}
-
-std::string DiagnosticPath(const fs::path &path)
-{
-    try
-    {
-        const auto utf8 = path.u8string();
-        return {reinterpret_cast<const char *>(utf8.data()), utf8.size()};
-    }
-    catch (const std::system_error &)
-    {
-        return "<path cannot be encoded as UTF-8>";
-    }
 }
 
 struct Failure : std::runtime_error
@@ -399,9 +381,7 @@ std::vector<Product> ParseProducts(const Json &document,
                                       : action_id,
                         from_manifest ? RequiredString(entry, "namespace_path", action_id)
                                       : result_namespace,
-                        from_manifest ? (document.value("schema_version", 0) == 3
-                                             ? std::string{}
-                                             : RequiredString(entry, "product_set_id", action_id))
+                        from_manifest ? RequiredString(entry, "product_set_id", action_id)
                                       : result_set_id,
                         RequiredString(entry, "logical_id", action_id),
                         RequiredString(entry, "locator", action_id),
@@ -502,40 +482,6 @@ void RequireUpstreamIdentity(
     }
 }
 
-std::vector<std::string> RequiredIds(const Json &manifest,
-                                     const std::vector<Product> &products,
-                                     const std::string &action_id)
-{
-    if (!manifest.contains("required_ids") ||
-        !manifest["required_ids"].is_array() ||
-        manifest["required_ids"].size() != products.size())
-        Fail("invalid-manifest", action_id, "required_ids/product count mismatch");
-    std::vector<std::string> ids;
-    ids.reserve(products.size());
-    for (const auto &entry : manifest["required_ids"])
-    {
-        if (!entry.is_string() || entry.get<std::string>().empty())
-            Fail("invalid-manifest", action_id, "invalid required logical ID");
-        ids.push_back(entry.get<std::string>());
-    }
-    for (std::size_t index = 0; index < products.size(); ++index)
-    {
-        if (ids[index] != products[index].logical_id)
-            Fail("invalid-manifest", action_id, "required_ids are not canonical products");
-    }
-    return ids;
-}
-
-std::vector<std::string> ActionIds(const std::vector<Product> &products)
-{
-    std::vector<std::string> ids;
-    for (const auto &product : products)
-        ids.push_back(product.action_id);
-    std::sort(ids.begin(), ids.end());
-    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
-    return ids;
-}
-
 void CheckProductNamespace(const Product &product)
 {
     if (!IsActionId(product.action_id) ||
@@ -581,107 +527,21 @@ Json UpstreamDependencyJson(const UpstreamProductDependency &dependency)
                 {"size", dependency.size}};
 }
 
-Json GenerationProductJson(const Product &product, bool with_locator, int version)
+Json BuildManifest(const std::string &scope,
+                   const std::vector<Product> &products,
+                   const std::vector<UpstreamProductDependency> &dependencies)
 {
-    if (version == 2)
-        return ProductJson(product);
-    Json json{{"action_id", product.action_id},
-              {"namespace_path", product.namespace_path},
-              {"logical_id", product.logical_id}};
-    if (with_locator)
-        json["locator"] = product.locator;
-    json["digest"] = product.digest;
-    json["size"] = product.size;
-    if (!product.dependencies.empty())
-        json["dependencies"] = product.dependencies;
-    return json;
-}
-
-std::string SnapshotLocator(const std::string &generation_id,
-                            const std::string &logical_id)
-{
-    return "Generations/" + generation_id + "/products/" +
-           HashBytes(logical_id) + ".bin";
-}
-
-void CheckGenerationProduct(const Product &product,
-                            const std::string &generation_id, int version)
-{
-    if (version == 2)
-    {
-        CheckProductNamespace(product);
-        return;
-    }
-    if (!IsActionId(product.action_id))
-        Fail("invalid-schema", product.action_id, "invalid action ID");
-    NamespacePath(product.namespace_path, product.action_id);
-    if (product.locator != SnapshotLocator(generation_id, product.logical_id))
-        Fail("invalid-locator", product.action_id,
-             "product locator does not belong to its Generation snapshot");
-}
-
-std::string GenerationId(const std::string &scope,
-                         const std::vector<std::string> &required_ids,
-                         const std::vector<Product> &products,
-                         const std::vector<UpstreamProductDependency> &dependencies,
-                         int version = 3)
-{
-    Json semantics{{"schema_version", version}, {"scope", scope},
-                   {"required_ids", required_ids},
-                   {"products", Json::array()},
-                   {"upstream_product_dependencies", Json::array()}};
-    for (const Product &product : products)
-        semantics["products"].push_back(GenerationProductJson(product, false, version));
-    for (const auto &dependency : dependencies)
-        semantics["upstream_product_dependencies"].push_back(
-            UpstreamDependencyJson(dependency));
-    return HashBytes(semantics.dump());
-}
-
-std::string ManifestBytes(const std::string &scope,
-                          const std::vector<std::string> &required_ids,
-                          const std::vector<Product> &products,
-                          const std::vector<UpstreamProductDependency> &dependencies,
-                          const std::string &generation_id, int version = 3)
-{
-    Json manifest{{"schema_version", version},
-                  {"generation_id", generation_id},
-                  {"scope", scope},
-                  {"required_ids", required_ids},
+    Json manifest{{"schema_version", 5}, {"scope", scope},
                   {"products", Json::array()},
                   {"upstream_product_dependencies", Json::array()}};
     for (const Product &product : products)
-        manifest["products"].push_back(GenerationProductJson(product, true, version));
+        manifest["products"].push_back(ProductJson(product));
     for (const auto &dependency : dependencies)
         manifest["upstream_product_dependencies"].push_back(
             UpstreamDependencyJson(dependency));
-    return manifest.dump(2) + "\n";
-}
-
-// Schema 1 is read only by GC so old immutable snapshots can keep their
-// ProductSets alive until their pointer, pin, and grace period expire.
-std::string LegacyGenerationId(const std::string &scope,
-                               const std::vector<std::string> &required_ids,
-                               const std::vector<Product> &products)
-{
-    Json semantics{{"schema_version", 1}, {"scope", scope},
-                   {"required_ids", required_ids}, {"products", Json::array()}};
-    for (const auto &product : products)
-        semantics["products"].push_back(ProductJson(product));
-    return HashBytes(semantics.dump());
-}
-
-std::string LegacyManifestBytes(const std::string &scope,
-                                const std::vector<std::string> &required_ids,
-                                const std::vector<Product> &products,
-                                const std::string &generation_id)
-{
-    Json manifest{{"schema_version", 1}, {"generation_id", generation_id},
-                  {"scope", scope}, {"required_ids", required_ids},
-                  {"products", Json::array()}};
-    for (const auto &product : products)
-        manifest["products"].push_back(ProductJson(product));
-    return manifest.dump(2) + "\n";
+    const auto id = HashBytes(manifest.dump());
+    manifest["generation_id"] = id;
+    return manifest;
 }
 
 std::string ScopeFileName(const std::string &scope)
@@ -713,6 +573,11 @@ std::string ScopeFileName(const std::string &scope)
     return encoded + ".json";
 }
 
+fs::path ManifestRelativePath(const std::string &scope)
+{
+    return fs::path("Generations") / "current" / ScopeFileName(scope);
+}
+
 fs::path BuildRoot(const std::string &value)
 {
     fs::path root = Utf8Path(value);
@@ -732,8 +597,7 @@ fs::path BuildRoot(const std::string &value)
 }
 
 void VerifyProducts(const fs::path &root, const std::vector<Product> &products,
-                    const std::string &action_id,
-                    const fs::path &snapshot_directory = {})
+                    const std::string &action_id)
 {
     for (const Product &product : products)
     {
@@ -757,18 +621,6 @@ void VerifyProducts(const fs::path &root, const std::vector<Product> &products,
             Fail("missing-product", action_id,
                  product.logical_id + ": cannot open product");
         }
-        std::ofstream output;
-        fs::path snapshot_relative;
-        if (!snapshot_directory.empty())
-        {
-            const auto destination = snapshot_directory / (HashBytes(product.logical_id) + ".bin");
-            snapshot_relative = destination.lexically_relative(root);
-            CheckPath(root, snapshot_relative, action_id);
-            // New snapshots copy the exact bytes being hashed without overwriting an existing file.
-            output.open(destination, std::ios::binary | std::ios::noreplace);
-            if (!output)
-                Fail("io-error", action_id, product.logical_id + ": cannot create snapshot product");
-        }
         Sha256 hash;
         std::array<unsigned char, 64 * 1024> buffer{};
         std::uint64_t actual_size = 0;
@@ -780,20 +632,7 @@ void VerifyProducts(const fs::path &root, const std::vector<Product> &products,
             {
                 hash.Add(buffer.data(), static_cast<std::size_t>(count));
                 actual_size += static_cast<std::uint64_t>(count);
-                if (output.is_open())
-                {
-                    output.write(reinterpret_cast<const char *>(buffer.data()), count);
-                    if (!output)
-                        Fail("io-error", action_id, product.logical_id + ": cannot write snapshot product");
-                }
             }
-        }
-        if (output.is_open())
-        {
-            output.close();
-            if (!output)
-                Fail("io-error", action_id, product.logical_id + ": cannot finalize snapshot product");
-            CheckPath(root, snapshot_relative, action_id);
         }
         if (input.bad() || actual_size != product.size ||
             "sha256:" + hash.Finish() != product.digest)
@@ -822,7 +661,7 @@ std::string TempSuffix()
 
 void AtomicReplace(const fs::path &destination, std::string_view bytes)
 {
-    if (fs::exists(destination) && ReadBytes(destination) == std::string(bytes))
+    if (fs::exists(destination) && ReadBytes(destination) == bytes)
         return;
     const std::string suffix = TempSuffix();
     fs::path temporary = destination;
@@ -852,62 +691,11 @@ void AtomicReplace(const fs::path &destination, std::string_view bytes)
 
 void CheckTree(const fs::path &root, const fs::path &path);
 
-constexpr std::uint64_t kMaximumPublicationManifestSize = 64 * 1024 * 1024;
-
-struct PendingPublication
-{
-    fs::path path;
-    std::string generation_id;
-    std::string manifest_digest;
-    std::uint64_t manifest_size;
-};
-
-PendingPublication LoadPendingPublication(const fs::path &root, const fs::path &path)
-{
-    CheckPath(root, path.lexically_relative(root), "-");
-    if (!fs::is_regular_file(path) || fs::file_size(path) > 1024)
-        Fail("invalid-publication", "-", "invalid pending Generation marker: " + path.string());
-    const auto marker = ReadJson(path, "invalid-publication", "-");
-    RequireVersion(marker, "-");
-    if (marker.size() != 5 || !marker.contains("kind") ||
-        !marker.contains("generation_id") || !marker.contains("manifest_digest") ||
-        !marker.contains("manifest_size") ||
-        RequiredString(marker, "kind", "-") != "project-hs-generation-publication")
-        Fail("invalid-publication", "-", "invalid pending Generation marker keys/kind");
-    PendingPublication publication{path, RequiredString(marker, "generation_id", "-"),
-        RequiredString(marker, "manifest_digest", "-"), 0};
-    if (!IsLowerSha256(publication.generation_id) ||
-        path.filename().string() != ".pending-" + publication.generation_id + ".json" ||
-        publication.manifest_digest.size() != 71 ||
-        !publication.manifest_digest.starts_with("sha256:") ||
-        !IsLowerSha256(std::string_view(publication.manifest_digest).substr(7)) ||
-        !marker["manifest_size"].is_number_unsigned())
-        Fail("invalid-publication", "-", "invalid pending Generation marker identity");
-    publication.manifest_size = marker["manifest_size"].get<std::uint64_t>();
-    if (publication.manifest_size == 0 ||
-        publication.manifest_size > kMaximumPublicationManifestSize)
-        Fail("invalid-publication", "-", "invalid pending Generation manifest size");
-    return publication;
-}
-
-std::string PendingPublicationBytes(const std::string &generation_id,
-                                    std::string_view manifest_bytes)
-{
-    if (manifest_bytes.empty() || manifest_bytes.size() > kMaximumPublicationManifestSize)
-        Fail("invalid-publication", "-", "Generation manifest exceeds publication size bound");
-    return Json{{"schema_version", 1}, {"kind", "project-hs-generation-publication"},
-                {"generation_id", generation_id},
-                {"manifest_digest", "sha256:" + HashBytes(manifest_bytes)},
-                {"manifest_size", manifest_bytes.size()}}.dump(2) + "\n";
-}
-
 void Compose(const fs::path &root, const std::string &scope,
-             const std::vector<fs::path> &result_paths,
-             std::vector<std::string> required_ids)
+             const std::vector<fs::path> &result_paths)
 {
-    std::vector<Product> available;
+    std::vector<Product> products;
     std::vector<UpstreamProductDependency> upstream_dependencies;
-    Json action_provenance = Json::array();
     std::set<std::string> seen_actions;
     for (const auto &result_path : result_paths)
     {
@@ -928,67 +716,30 @@ void Compose(const fs::path &root, const std::string &scope,
         if (!seen_actions.insert(action_id).second)
             Fail("duplicate-action", action_id, "duplicate ActionResult");
         RequireVersion(result, action_id);
-        const auto action_key = RequiredString(result, "action_key", action_id);
         const auto product_set_id = RequiredString(result, "product_set_id", action_id);
         if (!IsLowerSha256(product_set_id))
             Fail("invalid-schema", action_id, "invalid ProductSet ID");
-        action_provenance.push_back(Json{{"action_id", action_id},
-                                        {"namespace_path", namespace_path},
-                                        {"action_key", action_key},
-                                        {"product_set_id", product_set_id}});
-        auto products = ParseProducts(result, action_id, false,
-                                      namespace_path, product_set_id);
-        for (const auto &product : products)
+        auto action_products = ParseProducts(result, action_id, false,
+                                             namespace_path, product_set_id);
+        for (const auto &product : action_products)
             CheckProductNamespace(product);
-        available.insert(available.end(), products.begin(), products.end());
+        products.insert(products.end(),
+                        std::make_move_iterator(action_products.begin()),
+                        std::make_move_iterator(action_products.end()));
         auto dependencies = ParseUpstreamDependencies(result, action_id);
         upstream_dependencies.insert(upstream_dependencies.end(),
-                                     dependencies.begin(), dependencies.end());
+                                     std::make_move_iterator(dependencies.begin()),
+                                     std::make_move_iterator(dependencies.end()));
     }
-    std::sort(available.begin(), available.end(),
+    std::sort(products.begin(), products.end(),
               [](const Product &left, const Product &right) {
                   return left.logical_id < right.logical_id;
               });
-    for (std::size_t index = 1; index < available.size(); ++index)
-        if (available[index - 1].logical_id == available[index].logical_id)
+    for (std::size_t index = 1; index < products.size(); ++index)
+        if (products[index - 1].logical_id == products[index].logical_id)
             Fail("duplicate-logical-id", "-",
-                 "duplicate logical ID: " + available[index].logical_id);
-
-    if (required_ids.empty())
-    {
-        for (const auto &product : available)
-            required_ids.push_back(product.logical_id);
-    }
-    else
-    {
-        std::sort(required_ids.begin(), required_ids.end());
-        if (std::adjacent_find(required_ids.begin(), required_ids.end()) !=
-            required_ids.end())
-            Fail("duplicate-required-id", "-", "duplicate required logical ID");
-    }
-    std::vector<Product> products;
-    products.reserve(required_ids.size());
-    for (const auto &id : required_ids)
-    {
-        const auto found = std::lower_bound(
-            available.begin(), available.end(), id,
-            [](const Product &product, const std::string &key) {
-                return product.logical_id < key;
-            });
-        if (found == available.end() || found->logical_id != id)
-            Fail("missing-required-product", "-", "missing logical ID: " + id);
-        products.push_back(*found);
-    }
+                 "duplicate logical ID: " + products[index].logical_id);
     RequireDependencyClosure(products);
-    const auto action_ids = ActionIds(products);
-    upstream_dependencies.erase(
-        std::remove_if(upstream_dependencies.begin(), upstream_dependencies.end(),
-                       [&](const auto &dependency) {
-                           return !std::binary_search(action_ids.begin(),
-                                                      action_ids.end(),
-                                                      dependency.action_id);
-                       }),
-        upstream_dependencies.end());
     std::sort(upstream_dependencies.begin(), upstream_dependencies.end(),
                [](const auto &left, const auto &right) {
                    return std::tie(left.action_id, left.logical_id) <
@@ -996,190 +747,36 @@ void Compose(const fs::path &root, const std::string &scope,
                });
     RequireUpstreamIdentity(products, upstream_dependencies);
 
-    const std::string generation_id = GenerationId(
-        scope, required_ids, products, upstream_dependencies);
-    const auto source_products = products;
-    for (auto &product : products)
-        product.locator = SnapshotLocator(generation_id, product.logical_id);
-    const std::string manifest_bytes = ManifestBytes(
-        scope, required_ids, products, upstream_dependencies, generation_id);
-    const fs::path generations = root / "Generations";
-    const fs::path generation = generations / generation_id;
-    const fs::path manifest = generation / "generation.json";
-    const fs::path pending = generations / (".pending-" + generation_id + ".json");
-    // Reuse/repair still rejects damaged producer bytes before modifying an existing snapshot.
-    if (fs::exists(generation))
-        VerifyProducts(root, source_products, "-");
-    CheckPath(root, fs::path("Generations"), "-");
-    CheckPath(root, pending.lexically_relative(root), "-");
-    fs::create_directories(generations);
-    CheckPath(root, fs::path("Generations"), "-");
-    // A repair can stop between retiring its manifest and quarantining its tree.
-    // Restore the manifest beside the tree before retrying the normal repair path.
-    const auto quarantine = root / "CorruptGenerations";
-    CheckPath(root, "CorruptGenerations", "-");
-    if (fs::exists(quarantine))
-        for (const auto &entry : fs::directory_iterator(quarantine))
-        {
-            const auto name = entry.path().filename().string();
-            if (!name.starts_with(generation_id + ".tmp-") || !name.ends_with(".json"))
-                continue;
-            CheckPath(root, entry.path().lexically_relative(root), "-");
-            if (!entry.is_regular_file() || ReadBytes(entry.path()) != manifest_bytes)
-                Fail("generation-conflict", "-", "invalid retired repair manifest: " + generation_id);
-            auto retired_tree = entry.path();
-            retired_tree.replace_extension();
-            CheckPath(root, retired_tree.lexically_relative(root), "-");
-            const auto tree = fs::exists(retired_tree) ? retired_tree : generation;
-            CheckTree(root, tree);
-            if (!fs::is_directory(tree) || fs::exists(tree / "generation.json"))
-                Fail("generation-conflict", "-", "invalid interrupted repair tree: " + generation_id);
-            fs::rename(entry.path(), tree / "generation.json");
-        }
-    if (fs::exists(pending))
+    const Json manifest = BuildManifest(scope, products, upstream_dependencies);
+    const std::string generation_id = manifest["generation_id"].get<std::string>();
+    const std::string manifest_bytes = manifest.dump(2) + "\n";
+    VerifyProducts(root, products, "-");
+    std::set<std::pair<std::string, std::string>> product_sets;
+    for (const auto &product : products)
+        product_sets.insert(ProductNamespace(product));
+    for (const auto &[name_space, product_set_id] : product_sets)
     {
-        const auto publication = LoadPendingPublication(root, pending);
-        // A committed manifest wins over a stale, well-formed publication marker.
-        if (!fs::exists(manifest))
-        {
-            if (publication.manifest_size != manifest_bytes.size() ||
-                publication.manifest_digest != "sha256:" + HashBytes(manifest_bytes))
-                Fail("generation-conflict", "-", "pending Generation identity differs: " + generation_id);
-            if (fs::exists(generation))
-            {
-                CheckTree(root, generation);
-                fs::remove_all(generation);
-            }
-        }
+        const auto lease_directory = fs::path("Products") / name_space / ".leases";
+        CheckPath(root, lease_directory, "-");
+        fs::create_directories(root / lease_directory);
+        CheckPath(root, lease_directory, "-");
+        const auto lease_path = lease_directory / (product_set_id + ".lock");
+        CheckPath(root, lease_path, "-");
+        const hs::GenerationFileLock lease(root / lease_path,
+            hs::GenerationFileLock::Mode::Shared, true);
     }
-    if (fs::exists(generation) && !fs::exists(manifest))
-    {
-        // Finish a GC interrupted after retiring this manifest, before republish.
-        for (const auto &entry : fs::directory_iterator(generations))
-            if (entry.is_regular_file() && entry.path().filename().string().starts_with(".gc-" + generation_id + ".tmp-"))
-            {
-                CheckTree(root, generation);
-                fs::remove_all(generation);
-                break;
-            }
-    }
-    if (fs::exists(generation))
-    {
-        CheckPath(root, fs::path("Generations") / generation_id /
-                            "generation.json", "-");
-        if (!fs::is_regular_file(manifest) || ReadBytes(manifest) != manifest_bytes)
-        {
-            Fail("generation-conflict", "-",
-                 "existing generation differs: " + generation_id);
-        }
-        try
-        {
-            VerifyProducts(root, products, "-");
-        }
-        catch (const Failure &failure)
-        {
-            if (failure.code != "missing-product" && failure.code != "corrupt-product")
-                throw;
-            // Repair must not retire an active reader's canonical paths.
-            hs::GenerationFileLock repair_lock(manifest, hs::GenerationFileLock::Mode::TryExclusive);
-            if (!repair_lock.OwnsLock())
-                Fail("generation-in-use", "-", "cannot repair active Generation: " + generation_id);
-            // Repair replaces the complete snapshot; producer bytes never alias it.
-            const auto quarantine = root / "CorruptGenerations";
-            CheckPath(root, "CorruptGenerations", "-");
-            fs::create_directories(quarantine);
-            CheckPath(root, "CorruptGenerations", "-");
-            const auto destination = quarantine / (generation_id + TempSuffix());
-            const auto retired_manifest = fs::path(destination.string() + ".json");
-            fs::rename(manifest, retired_manifest);
-            repair_lock = {};
-            fs::rename(generation, destination);
-            fs::rename(retired_manifest, destination / "generation.json");
-        }
-    }
-    if (!fs::exists(generation))
-    {
-        // The external marker records ownership before any uncommitted tree exists.
-        AtomicReplace(pending, PendingPublicationBytes(generation_id, manifest_bytes));
-        if (!fs::create_directory(generation))
-            Fail("generation-conflict", "-", "Generation directory appeared during publication: " + generation_id);
-        try
-        {
-            fs::create_directory(generation / "products");
-            VerifyProducts(root, source_products, "-", generation / "products");
-            // Publishing the canonical manifest commits the immutable snapshot.
-            // Atomic visibility covers process crashes, not power-loss durability.
-            CheckPath(root, manifest.lexically_relative(root), "-");
-            AtomicReplace(manifest, manifest_bytes);
-        }
-        catch (...)
-        {
-            // Never remove a committed manifest/tree, including a failed pointer update.
-            try
-            {
-                if (!fs::exists(manifest))
-                {
-                    CheckTree(root, generation);
-                    std::error_code cleanup_error;
-                    fs::remove_all(generation, cleanup_error);
-                    if (!cleanup_error)
-                    {
-                        std::error_code ignored;
-                        fs::remove(pending, ignored);
-                    }
-                }
-            }
-            catch (...) {} // Preserve the original error and the recovery marker.
-            throw;
-        }
-    }
-    // Both existing and newly copied snapshots were fully verified above.
-    // Readers require only the committed manifest; marker removal is best effort.
-    std::error_code marker_cleanup_error;
-    fs::remove(pending, marker_cleanup_error);
 
-    const fs::path state_dir = root / "GenerationState";
-    CheckPath(root, fs::path("GenerationState"), "-");
-    fs::create_directories(state_dir);
-    CheckPath(root, fs::path("GenerationState"), "-");
-    const std::string locator = "Generations/" + generation_id + "/generation.json";
-    Json pointer{{"schema_version", 1},
-                 {"scope", scope},
-                 {"action_ids", action_ids},
-                 {"generation_id", generation_id},
-                 {"manifest_locator", locator}};
-    if (action_ids.size() == 1)
-        pointer["action_id"] = action_ids.front();
-    const fs::path state_relative = fs::path("GenerationState") / ScopeFileName(scope);
-    CheckPath(root, state_relative, "-");
-    AtomicReplace(root / state_relative, pointer.dump(2) + "\n");
-    // Physical producer provenance is observational, never immutable identity.
-    const auto receipts_relative = fs::path("GenerationReceipts") / ScopeFileName(scope);
-    CheckPath(root, receipts_relative, "-");
-    fs::create_directories(root / receipts_relative);
-    CheckPath(root, receipts_relative, "-");
-    Json receipt{{"schema_version", 1}, {"generation_id", generation_id},
-                 {"scope", scope}, {"actions", Json::array()},
-                 {"products", Json::array()}};
-    std::sort(action_provenance.begin(), action_provenance.end(),
-              [](const auto &left, const auto &right) {
-                  return left.at("action_id").template get<std::string>() <
-                         right.at("action_id").template get<std::string>();
-              });
-    for (const auto &action : action_provenance)
-        if (std::binary_search(action_ids.begin(), action_ids.end(),
-                               action.at("action_id").get<std::string>()))
-            receipt["actions"].push_back(action);
-    for (const auto &product : source_products)
-        receipt["products"].push_back(ProductJson(product));
-    WriteBytes(root / receipts_relative / ("compose" + TempSuffix() + ".json"),
-               receipt.dump(2) + "\n");
+    const auto manifest_relative = ManifestRelativePath(scope);
+    CheckPath(root, manifest_relative, "-");
+    fs::create_directories((root / manifest_relative).parent_path());
+    CheckPath(root, manifest_relative, "-");
+    AtomicReplace(root / manifest_relative, manifest_bytes);
     std::cout << "generation.compose generation_id=" << generation_id
               << " scope=" << scope << '\n';
 }
 
-std::vector<fs::path> ReadResultList(const fs::path &root,
-                                     const fs::path &list_path)
+void AppendResultList(const fs::path &root, const fs::path &list_path,
+                      std::vector<fs::path> &paths)
 {
     if (!list_path.is_absolute() || list_path != list_path.lexically_normal())
         Fail("invalid-result-list", "-", "result list must be a canonical absolute path");
@@ -1190,7 +787,6 @@ std::vector<fs::path> ReadResultList(const fs::path &root,
     if (bytes.empty() || bytes.starts_with("\xef\xbb\xbf"))
         Fail("invalid-result-list", "-", "result list is empty or has a UTF-8 BOM");
 
-    std::vector<fs::path> paths;
     std::set<fs::path> seen;
     std::size_t begin = 0;
     while (begin < bytes.size())
@@ -1216,24 +812,18 @@ std::vector<fs::path> ReadResultList(const fs::path &root,
             break;
         begin = end + 1;
     }
-    return paths;
 }
 
 struct GenerationData
 {
-    std::string scope;
+    std::string id;
     std::vector<Product> products;
-    int version = 1;
 };
 
 GenerationData LoadGeneration(const fs::path &root,
-                              const std::string &generation_id,
-                              bool allow_legacy_for_gc = false)
+                              const std::string &expected_scope)
 {
-    if (!IsLowerSha256(generation_id))
-        Fail("invalid-generation-id", "-", "invalid Generation ID");
-    const auto relative = fs::path("Generations") / generation_id /
-                          "generation.json";
+    const auto relative = ManifestRelativePath(expected_scope);
     CheckPath(root, relative, "-");
     const auto path = root / relative;
     std::ifstream input(path, std::ios::binary);
@@ -1250,187 +840,39 @@ GenerationData LoadGeneration(const fs::path &root,
         Fail("invalid-schema", "-", path.string() + ": " + error.what());
     }
     if (!manifest.is_object() || !manifest.contains("schema_version") ||
-        !manifest["schema_version"].is_number_integer())
-        Fail("invalid-schema", "-", allow_legacy_for_gc
-            ? "missing Generation schema_version" : "expected Generation schema_version=2 or 3");
-    const auto schema_version = manifest["schema_version"].get<std::int64_t>();
-    const bool legacy = schema_version == 1 && allow_legacy_for_gc;
-    if (!legacy && schema_version != 2 && schema_version != 3)
-        Fail("invalid-schema", "-", allow_legacy_for_gc
-            ? "unsupported GC Generation schema" : "expected Generation schema_version=2 or 3");
-    const auto version = static_cast<int>(schema_version);
+        !manifest["schema_version"].is_number_integer() ||
+        manifest["schema_version"].get<std::int64_t>() != 5)
+        Fail("invalid-schema", "-", "expected Generation schema_version=5");
     const auto scope = RequiredString(manifest, "scope", "-");
-    ScopeFileName(scope);
-    if (RequiredString(manifest, "generation_id", "-") != generation_id)
-        Fail("invalid-manifest", "-", legacy
-            ? "legacy manifest Generation ID mismatch" : "manifest Generation ID mismatch");
+    if (ScopeFileName(scope) != relative.filename().string())
+        Fail("invalid-manifest", "-", "manifest scope/path mismatch");
+    if (scope != expected_scope)
+        Fail("invalid-manifest", "-", "manifest scope mismatch");
+    const auto generation_id = RequiredString(manifest, "generation_id", "-");
+    if (!IsLowerSha256(generation_id))
+        Fail("invalid-generation-id", "-", "invalid Generation ID");
     const auto products = ParseProducts(manifest, "-", true);
-    const auto required_ids = RequiredIds(manifest, products, "-");
-    if (legacy)
-    {
-        for (const auto &product : products)
-            ProductNamespace(product);
-        RequireDependencyClosure(products);
-        if (LegacyGenerationId(scope, required_ids, products) != generation_id ||
-            bytes != LegacyManifestBytes(scope, required_ids, products, generation_id))
-            Fail("invalid-manifest", "-", "legacy manifest identity/canonical bytes mismatch");
-        return {scope, products};
-    }
     const auto upstream_dependencies =
         ParseUpstreamDependencies(manifest, "-", true);
     for (const auto &product : products)
-        CheckGenerationProduct(product, generation_id, version);
+        CheckProductNamespace(product);
     RequireDependencyClosure(products);
     RequireUpstreamIdentity(products, upstream_dependencies);
-    if (GenerationId(scope, required_ids, products, upstream_dependencies, version) !=
-            generation_id ||
-        bytes !=
-            ManifestBytes(scope, required_ids, products,
-                          upstream_dependencies, generation_id, version))
+    const auto canonical_manifest = BuildManifest(scope, products, upstream_dependencies);
+    if (canonical_manifest["generation_id"].get<std::string>() != generation_id ||
+        bytes != canonical_manifest.dump(2) + "\n")
         Fail("invalid-manifest", "-", "manifest identity/canonical bytes mismatch");
-    return {scope, products, version};
+    return {generation_id, products};
 }
-
-std::string LoadPointerId(const fs::path &root, const fs::path &relative,
-                          const std::string *expected_scope,
-                          bool allow_legacy_for_gc = false,
-                          const std::set<std::string> *unpublished_generations = nullptr,
-                          const Json *snapshot = nullptr,
-                          GenerationData *loaded_generation = nullptr)
-{
-    CheckPath(root, relative, "-");
-    const Json pointer = snapshot ? *snapshot : ReadJson(root / relative, "missing-pointer", "-");
-    RequireVersion(pointer, "-");
-    const std::string pointer_scope = RequiredString(pointer, "scope", "-");
-    if (expected_scope && pointer_scope != *expected_scope)
-        Fail("invalid-pointer", "-", "pointer scope mismatch");
-    // Scoped readers choose the filename; GC also retains valid pointer aliases.
-    const std::string generation_id = RequiredString(pointer, "generation_id", "-");
-    const std::string locator = RequiredString(pointer, "manifest_locator", "-");
-    if (!IsLowerSha256(generation_id) ||
-        locator != "Generations/" + generation_id + "/generation.json")
-        Fail("invalid-pointer", "-", "pointer scope, identity, or locator mismatch");
-    if (!pointer.contains("action_ids") || !pointer["action_ids"].is_array())
-        Fail("invalid-pointer", "-", "missing action_ids");
-    std::vector<std::string> pointer_actions;
-    for (const auto &entry : pointer["action_ids"])
-    {
-        if (!entry.is_string() || !IsActionId(entry.get<std::string>()))
-            Fail("invalid-pointer", "-", "invalid action ID");
-        pointer_actions.push_back(entry.get<std::string>());
-    }
-    if (pointer_actions.empty() ||
-        !std::is_sorted(pointer_actions.begin(), pointer_actions.end()) ||
-        std::adjacent_find(pointer_actions.begin(), pointer_actions.end()) !=
-            pointer_actions.end())
-        Fail("invalid-pointer", "-", "action_ids are not canonical");
-    if (pointer_actions.size() == 1)
-    {
-        if (RequiredString(pointer, "action_id", "-") != pointer_actions.front())
-            Fail("invalid-pointer", "-", "single action_id mismatch");
-    }
-    else if (pointer.contains("action_id"))
-        Fail("invalid-pointer", "-", "multi-action pointer has action_id");
-
-    // GC retains a marked unpublished identity without treating its tree as data.
-    if (allow_legacy_for_gc && unpublished_generations &&
-        unpublished_generations->contains(generation_id))
-        return generation_id;
-    auto generation = LoadGeneration(root, generation_id, allow_legacy_for_gc);
-    if (generation.scope != pointer_scope ||
-        ActionIds(generation.products) != pointer_actions)
-        Fail("invalid-pointer", "-", "pointer/manifest mismatch");
-    if (loaded_generation) *loaded_generation = std::move(generation);
-    return generation_id;
-}
-
-struct SelectedSnapshot
-{
-    std::string pointer_bytes, id;
-    hs::GenerationFileLock lease;
-    GenerationData generation;
-
-    SelectedSnapshot(const fs::path &root, const std::string &scope)
-    {
-        const auto relative = fs::path("GenerationState") / ScopeFileName(scope);
-        CheckPath(root, relative, "-");
-        if (auto read = hs::ReadGenerationPointer(root / relative, pointer_bytes); !read)
-            Fail("missing-pointer", "-", std::string(read.Message()));
-        const auto pointer = Json::parse(pointer_bytes);
-        id = RequiredString(pointer, "generation_id", "-");
-        if (!IsLowerSha256(id) ||
-            RequiredString(pointer, "manifest_locator", "-") != "Generations/" + id + "/generation.json")
-            Fail("invalid-pointer", "-", "invalid snapshot manifest locator");
-        const auto manifest = fs::path("Generations") / id / "generation.json";
-        CheckPath(root, manifest, "-");
-        // Hold the exact immutable generation while its products are read or
-        // copied. Atomic publication may replace the pointer without replacing
-        // this snapshot; GC must keep it until the reader lease ends.
-        lease = hs::GenerationFileLock(root / manifest, hs::GenerationFileLock::Mode::Shared);
-        id = LoadPointerId(root, relative, &scope, false, nullptr, &pointer, &generation);
-    }
-};
 
 void Verify(const fs::path &root, const std::string &scope)
 {
-    const SelectedSnapshot snapshot(root, scope);
-    VerifyProducts(root, snapshot.generation.products, "-");
-    std::cout << "generation.verify generation_id=" << snapshot.id
-              << " scope=" << scope << " products=" << snapshot.generation.products.size() << '\n';
-}
-
-void ExportSnapshot(const fs::path &root, const std::string &scope, const std::string &destination_arg)
-{
-    const auto destination = BuildRoot(destination_arg);
-    if (fs::equivalent(root, destination))
-        Fail("invalid-destination", "-", "snapshot destination must differ from the source root");
-    // Serialize publication and GC at the destination, while the source needs
-    // only its selected manifest's shared reader lease.
-    hs::GenerationFileLock publication(destination / ".generation-mutation.lock",
-        hs::GenerationFileLock::Mode::Exclusive, true);
-    const SelectedSnapshot snapshot(root, scope);
-    VerifyProducts(root, snapshot.generation.products, "-");
-    const auto manifest_relative = fs::path("Generations") / snapshot.id / "generation.json";
-    const auto manifest_bytes = ReadBytes(root / manifest_relative);
-    const auto pending_relative = fs::path("Generations") / (".pending-" + snapshot.id + ".json");
-    CheckPath(destination, pending_relative, "-");
-    fs::create_directories((destination / pending_relative).parent_path());
-    if (!fs::exists(destination / manifest_relative))
-        AtomicReplace(destination / pending_relative, PendingPublicationBytes(snapshot.id, manifest_bytes));
-    for (const auto &product : snapshot.generation.products)
-    {
-        const auto relative = RelativeLocator(product.locator, "-");
-        CheckPath(destination, relative, "-");
-        const auto target = destination / relative;
-        if (fs::exists(target)) continue; // Existing immutable bytes are verified below, never overwritten.
-        fs::create_directories(target.parent_path());
-        CheckPath(destination, relative, "-");
-        const auto temporary = target.parent_path() / TempSuffix();
-        try
-        {
-            fs::copy_file(root / relative, temporary);
-            fs::rename(temporary, target);
-        }
-        catch (...)
-        {
-            std::error_code ignored; fs::remove(temporary, ignored); throw;
-        }
-    }
-    CheckPath(destination, manifest_relative, "-");
-    fs::create_directories((destination / manifest_relative).parent_path());
-    if (fs::exists(destination / manifest_relative) && ReadBytes(destination / manifest_relative) != manifest_bytes)
-        Fail("corrupt-manifest", "-", "destination contains conflicting immutable manifest bytes");
-    AtomicReplace(destination / manifest_relative, manifest_bytes);
-    const auto relocated = LoadGeneration(destination, snapshot.id);
-    VerifyProducts(destination, relocated.products, "-");
-    std::error_code marker_error;
-    fs::remove(destination / pending_relative, marker_error);
-    const auto pointer_relative = fs::path("GenerationState") / ScopeFileName(scope);
-    CheckPath(destination, pointer_relative, "-");
-    fs::create_directories((destination / pointer_relative).parent_path());
-    AtomicReplace(destination / pointer_relative, snapshot.pointer_bytes);
-    std::cout << "generation.export generation_id=" << snapshot.id << " scope=" << scope
-              << " products=" << relocated.products.size() << " destination=" << destination.string() << '\n';
+    hs::GenerationFileLock read_lock(root / ".generation-mutation.lock",
+        hs::GenerationFileLock::Mode::Shared, true);
+    const auto generation = LoadGeneration(root, scope);
+    VerifyProducts(root, generation.products, "-");
+    std::cout << "generation.verify generation_id=" << generation.id
+              << " scope=" << scope << " products=" << generation.products.size() << '\n';
 }
 
 void CheckTree(const fs::path &root, const fs::path &directory)
@@ -1442,262 +884,24 @@ void CheckTree(const fs::path &root, const fs::path &directory)
         CheckPath(root, entry.path().lexically_relative(root), "-");
 }
 
-bool PastGracePeriod(const fs::path &path, std::uint64_t grace_seconds)
-{
-    if (grace_seconds == 0)
-        return true;
-    return fs::last_write_time(path) <=
-           fs::file_time_type::clock::now() -
-               std::chrono::seconds(static_cast<std::int64_t>(grace_seconds));
-}
-
-struct RetiredGeneration
-{
-    fs::path path;
-    hs::GenerationFileLock lock;
-    fs::path pending_marker;
-    std::string reason;
-};
-
 struct RetiredProductSet
 {
     fs::path path;
     fs::path lease_path;
-    hs::GenerationFileLock reader_lock;
+    hs::GenerationFileLock lock;
     bool had_lease_file{};
+    bool remove{};
 };
 
-struct GarbageCollectionPlan
-{
-    std::vector<RetiredGeneration> obsolete_generations;
-    std::vector<fs::path> stale_retirements;
-    std::vector<fs::path> stale_publications;
-    std::vector<RetiredProductSet> obsolete_sets;
-    std::map<std::string, std::set<std::string>> retained_generation_reasons;
-};
-
-std::uint64_t TreeBytes(const fs::path &root, const fs::path &path)
-{
-    std::uint64_t bytes = 0;
-    for (const auto &entry : fs::recursive_directory_iterator(path))
-    {
-        CheckPath(root, entry.path().lexically_relative(root), "-");
-        std::error_code error;
-        if (!entry.is_regular_file(error))
-        {
-            if (error)
-                Fail("path-error", "-", "cannot inspect candidate: " + entry.path().string());
-            continue;
-        }
-        const auto size = entry.file_size(error);
-        if (error || size > std::numeric_limits<std::uint64_t>::max() - bytes)
-            Fail("path-error", "-", "candidate size cannot be estimated: " + entry.path().string());
-        bytes += size;
-    }
-    return bytes;
-}
-
-std::uint64_t FileBytes(const fs::path &root, const fs::path &path)
-{
-    CheckPath(root, path.lexically_relative(root), "-");
-    std::error_code error;
-    if (!fs::is_regular_file(path, error) || error)
-        Fail("path-error", "-", "cannot estimate metadata candidate: " + path.string());
-    const auto size = fs::file_size(path, error);
-    if (error)
-        Fail("path-error", "-", "cannot estimate metadata candidate: " + path.string());
-    return size;
-}
-
-void PrintGarbageCollectionDryRun(
-    const fs::path &root, std::uint64_t grace_seconds,
-    const GarbageCollectionPlan &plan, bool json)
-{
-    std::vector<std::uint64_t> generation_sizes;
-    std::vector<std::uint64_t> product_set_sizes;
-    std::vector<std::uint64_t> metadata_sizes;
-    std::uint64_t generation_bytes = 0;
-    std::uint64_t product_set_bytes = 0;
-    std::uint64_t metadata_bytes = 0;
-    const auto add_size = [](std::uint64_t &total, std::uint64_t size) {
-        if (size > std::numeric_limits<std::uint64_t>::max() - total)
-            Fail("path-error", "-", "candidate size total overflow");
-        total += size;
-    };
-    for (const auto &candidate : plan.obsolete_generations)
-    {
-        const auto size = TreeBytes(root, candidate.path);
-        generation_sizes.push_back(size);
-        add_size(generation_bytes, size);
-    }
-    for (const auto &candidate : plan.obsolete_sets)
-    {
-        const auto size = TreeBytes(root, candidate.path);
-        product_set_sizes.push_back(size);
-        add_size(product_set_bytes, size);
-    }
-    for (const auto &candidate : plan.stale_retirements)
-    {
-        const auto size = FileBytes(root, candidate);
-        metadata_sizes.push_back(size);
-        add_size(metadata_bytes, size);
-    }
-    for (const auto &candidate : plan.stale_publications)
-    {
-        const auto size = FileBytes(root, candidate);
-        metadata_sizes.push_back(size);
-        add_size(metadata_bytes, size);
-    }
-
-    if (json)
-    {
-        Json report{{"schema_version", 1},
-                    {"command", "gc"},
-                    {"dry_run", true},
-                    {"build_root", root.generic_string()},
-                    {"grace_seconds", grace_seconds},
-                    {"candidates", Json{{"generations", Json::array()},
-                                         {"product_sets", Json::array()},
-                                         {"metadata_cleanup", Json::array()}}},
-                    {"retained", Json::array()},
-                    {"totals", Json{{"generation_count", plan.obsolete_generations.size()},
-                                     {"generation_bytes", generation_bytes},
-                                     {"product_set_count", plan.obsolete_sets.size()},
-                                     {"product_set_bytes", product_set_bytes},
-                                     {"metadata_cleanup_count", metadata_sizes.size()},
-                                     {"metadata_cleanup_bytes", metadata_bytes}}}};
-        for (std::size_t index = 0; index < plan.obsolete_generations.size(); ++index)
-        {
-            const auto &candidate = plan.obsolete_generations[index];
-            report["candidates"]["generations"].push_back(
-                Json{{"locator", candidate.path.lexically_relative(root).generic_string()},
-                     {"estimated_bytes", generation_sizes[index]},
-                     {"reason", candidate.reason}});
-        }
-        for (std::size_t index = 0; index < plan.obsolete_sets.size(); ++index)
-        {
-            const auto &candidate = plan.obsolete_sets[index];
-            report["candidates"]["product_sets"].push_back(
-                Json{{"locator", candidate.path.lexically_relative(root).generic_string()},
-                     {"estimated_bytes", product_set_sizes[index]},
-                     {"reason", "unreferenced ProductSet past grace period"}});
-        }
-        std::size_t metadata_index = 0;
-        for (const auto &candidate : plan.stale_retirements)
-        {
-            report["candidates"]["metadata_cleanup"].push_back(
-                Json{{"locator", candidate.lexically_relative(root).generic_string()},
-                     {"estimated_bytes", metadata_sizes[metadata_index++]},
-                     {"reason", "retired generation metadata cleanup"}});
-        }
-        for (const auto &candidate : plan.stale_publications)
-        {
-            report["candidates"]["metadata_cleanup"].push_back(
-                Json{{"locator", candidate.lexically_relative(root).generic_string()},
-                     {"estimated_bytes", metadata_sizes[metadata_index++]},
-                     {"reason", "stale pending publication metadata cleanup"}});
-        }
-        for (const auto &[identity, reasons] : plan.retained_generation_reasons)
-        {
-            Json reason_list = Json::array();
-            for (const auto &reason : reasons)
-                reason_list.push_back(reason);
-            report["retained"].push_back(
-                Json{{"kind", "generation"}, {"identity", identity},
-                     {"reasons", std::move(reason_list)}});
-        }
-        std::cout << report.dump(2) << '\n';
-        return;
-    }
-
-    std::cout << "generation.gc dry_run=true build_root=" << root.generic_string()
-              << " grace_seconds=" << grace_seconds << '\n';
-    for (std::size_t index = 0; index < plan.obsolete_generations.size(); ++index)
-    {
-        const auto &candidate = plan.obsolete_generations[index];
-        std::cout << "generation.gc candidate_generation locator="
-                  << candidate.path.lexically_relative(root).generic_string()
-                  << " estimated_bytes=" << generation_sizes[index]
-                  << " reason=" << candidate.reason << '\n';
-    }
-    for (std::size_t index = 0; index < plan.obsolete_sets.size(); ++index)
-    {
-        const auto &candidate = plan.obsolete_sets[index];
-        std::cout << "generation.gc candidate_product_set locator="
-                  << candidate.path.lexically_relative(root).generic_string()
-                  << " estimated_bytes=" << product_set_sizes[index]
-                  << " reason=unreferenced ProductSet past grace period\n";
-    }
-    std::size_t metadata_index = 0;
-    for (const auto &candidate : plan.stale_retirements)
-        std::cout << "generation.gc candidate_metadata locator="
-                  << candidate.lexically_relative(root).generic_string()
-                  << " estimated_bytes=" << metadata_sizes[metadata_index++]
-                  << " reason=retired generation metadata cleanup\n";
-    for (const auto &candidate : plan.stale_publications)
-        std::cout << "generation.gc candidate_metadata locator="
-                  << candidate.lexically_relative(root).generic_string()
-                  << " estimated_bytes=" << metadata_sizes[metadata_index++]
-                  << " reason=stale pending publication metadata cleanup\n";
-    for (const auto &[identity, reasons] : plan.retained_generation_reasons)
-    {
-        std::cout << "generation.gc retained_generation identity=" << identity
-                  << " reasons=";
-        bool first = true;
-        for (const auto &reason : reasons)
-        {
-            if (!first)
-                std::cout << ',';
-            first = false;
-            std::cout << reason;
-        }
-        std::cout << '\n';
-    }
-    std::cout << "generation.gc totals generations=" << plan.obsolete_generations.size()
-              << " generation_bytes=" << generation_bytes
-              << " product_sets=" << plan.obsolete_sets.size()
-              << " product_set_bytes=" << product_set_bytes
-              << " metadata_cleanup=" << metadata_sizes.size()
-              << " metadata_cleanup_bytes=" << metadata_bytes << '\n';
-}
-
-void GarbageCollect(const fs::path &root, const std::vector<std::string> &pins,
-                    std::uint64_t grace_seconds, bool dry_run, bool json)
+void GarbageCollect(const fs::path &root)
 {
     using ProductSet = std::pair<std::string, std::string>;
     std::set<ProductSet> retained_sets;
-    std::set<std::string> known_namespaces;
-    std::set<std::string> retained_generations(pins.begin(), pins.end());
-    GarbageCollectionPlan plan;
-    for (const auto &pin : pins)
-        plan.retained_generation_reasons[pin].insert("pin");
-    const auto generations = root / "Generations";
-    CheckPath(root, "Generations", "-");
-    std::vector<PendingPublication> pending_publications;
-    std::set<std::string> unpublished_generations;
-    if (fs::exists(generations))
-        for (const auto &entry : fs::directory_iterator(generations))
+    const auto retain_products = [&](const std::vector<Product> &products) {
+        for (const auto &product : products)
         {
-            const auto name = entry.path().filename().string();
-            if (!name.starts_with(".pending-") || !name.ends_with(".json"))
-                continue;
-            auto publication = LoadPendingPublication(root, entry.path());
-            const auto manifest = generations / publication.generation_id / "generation.json";
-            CheckPath(root, manifest.lexically_relative(root), "-");
-            if (!fs::exists(manifest))
-                unpublished_generations.insert(publication.generation_id);
-            pending_publications.push_back(std::move(publication));
-        }
-    const auto retain_generation = [&](const std::string &id) {
-        if (unpublished_generations.contains(id))
-            return;
-        const auto generation = LoadGeneration(root, id, true);
-        // GC follows manifest ownership; composition and consumers verify payload bytes.
-        for (const auto &product : generation.products)
-        {
-            known_namespaces.insert(product.namespace_path);
-            if (generation.version != 3)
-                retained_sets.insert(ProductNamespace(product));
+            const auto identity = ProductNamespace(product);
+            retained_sets.insert(identity);
         }
     };
 
@@ -1705,151 +909,53 @@ void GarbageCollect(const fs::path &root, const std::vector<std::string> &pins,
     CheckPath(root, "Actions", "-");
     if (fs::exists(actions))
     {
-        std::set<std::string> current_action_ids;
+        std::set<std::string> action_ids;
         for (const auto &entry : fs::recursive_directory_iterator(actions))
         {
-            CheckPath(root, entry.path().lexically_relative(root), "-");
-            if (!entry.is_regular_file() ||
-                entry.path().filename() != "result.json")
+            const auto relative = entry.path().lexically_relative(root);
+            CheckPath(root, relative, "-");
+            if (!entry.is_regular_file() || entry.path().filename() != "result.json")
                 continue;
-            const auto relative_namespace =
-                entry.path().parent_path().lexically_relative(actions);
-            const auto expected_namespace = relative_namespace.generic_string();
-            NamespacePath(expected_namespace, "-");
-            const auto result = ReadJson(entry.path(),
-                                         "missing-action-result", "-");
+            const auto namespace_path =
+                entry.path().parent_path().lexically_relative(actions).generic_string();
+            NamespacePath(namespace_path, "-");
+            const auto result = ReadJson(entry.path(), "missing-action-result", "-");
             const auto action_id = RequiredString(result, "action_id", "-");
-            if (!IsActionId(action_id) ||
-                ResultNamespace(result, action_id) != expected_namespace)
-                Fail("invalid-action-result", action_id, "ActionResult namespace mismatch");
-            if (!current_action_ids.insert(action_id).second)
+            if (!IsActionId(action_id) || ResultNamespace(result, action_id) != namespace_path ||
+                entry.path() != actions / NamespacePath(namespace_path, action_id) / "result.json")
+                Fail("invalid-action-result", action_id, "ActionResult path/namespace mismatch");
+            if (!action_ids.insert(action_id).second)
                 Fail("duplicate-action", action_id, "duplicate current ActionResult");
             RequireVersion(result, action_id);
             const auto product_set_id = RequiredString(result, "product_set_id", action_id);
-            if (!IsLowerSha256(product_set_id))
-                Fail("invalid-schema", action_id, "invalid ProductSet ID");
-            const auto products = ParseProducts(result, action_id, false,
-                                                expected_namespace,
-                                                product_set_id);
+            auto products = ParseProducts(result, action_id, false,
+                                          namespace_path, product_set_id);
             for (const auto &product : products)
                 CheckProductNamespace(product);
-            retained_sets.emplace(expected_namespace, product_set_id);
-            known_namespaces.insert(expected_namespace);
+            retain_products(products);
         }
     }
 
-    const auto state = root / "GenerationState";
-    CheckPath(root, "GenerationState", "-");
-    if (fs::exists(state))
+    const auto current = root / "Generations" / "current";
+    CheckPath(root, "Generations", "-");
+    CheckPath(root, fs::path("Generations") / "current", "-");
+    if (fs::exists(current))
     {
-        for (const auto &entry : fs::directory_iterator(state))
+        for (const auto &entry : fs::directory_iterator(current))
         {
-            const auto relative = entry.path().lexically_relative(root);
-            CheckPath(root, relative, "-");
+            CheckPath(root, entry.path().lexically_relative(root), "-");
             if (!entry.is_regular_file() || entry.path().extension() != ".json")
                 continue;
-            const auto id = LoadPointerId(root, relative, nullptr, true,
-                                          &unpublished_generations);
-            retained_generations.insert(id);
-            plan.retained_generation_reasons[id].insert(
-                "current pointer:" + relative.generic_string());
-        }
-    }
-    for (const auto &id : retained_generations)
-        retain_generation(id);
-
-    std::set<std::string> retired_ids;
-    for (const auto &publication : pending_publications)
-    {
-        const auto tree = generations / publication.generation_id;
-        if (!unpublished_generations.contains(publication.generation_id))
-        {
-            // Validate the committed manifest before removing its stale marker.
-            LoadGeneration(root, publication.generation_id, true);
-            plan.stale_publications.push_back(publication.path);
-        }
-        else if (!retained_generations.contains(publication.generation_id) &&
-                 PastGracePeriod(publication.path, grace_seconds) && !fs::exists(tree))
-            plan.stale_publications.push_back(publication.path);
-    }
-    if (fs::exists(generations))
-    {
-        for (const auto &entry : fs::directory_iterator(generations))
-        {
-            if (!entry.path().filename().string().starts_with(".gc-") || !entry.is_regular_file())
-                continue;
-            CheckPath(root, entry.path().lexically_relative(root), "-");
             const auto manifest = ReadJson(entry.path(), "missing-manifest", "-");
-            const auto id = RequiredString(manifest, "generation_id", "-");
-            if (!IsLowerSha256(id) || !entry.path().filename().string().starts_with(".gc-" + id + ".tmp-"))
-                Fail("invalid-manifest", "-", "invalid retired Generation identity");
-            for (const auto &product : ParseProducts(manifest, "-", true))
-                known_namespaces.insert(product.namespace_path);
-            retired_ids.insert(id);
-            plan.stale_retirements.push_back(entry.path());
-        }
-        for (const auto &entry : fs::directory_iterator(generations))
-        {
-            const auto relative = entry.path().lexically_relative(root);
-            CheckPath(root, relative, "-");
-            const auto id = entry.path().filename().string();
-            if (!IsLowerSha256(id) || !entry.is_directory())
-                continue;
-            if (unpublished_generations.contains(id))
-            {
-                const auto pending = generations / (".pending-" + id + ".json");
-                if (dry_run) CheckTree(root, entry.path());
-                if (!retained_generations.contains(id) &&
-                    PastGracePeriod(entry.path(), grace_seconds) &&
-                    PastGracePeriod(pending, grace_seconds))
-                    plan.obsolete_generations.push_back(
-                        {entry.path(), {}, pending,
-                         "unpublished pending generation past grace period"});
-                else if (retained_generations.contains(id))
-                    plan.retained_generation_reasons[id].insert("pending publication");
-                else
-                {
-                    plan.retained_generation_reasons[id].insert("pending publication");
-                    plan.retained_generation_reasons[id].insert("grace period");
-                }
-                continue;
-            }
-            if (retired_ids.contains(id) && !fs::exists(entry.path() / "generation.json"))
-            {
-                if (dry_run) CheckTree(root, entry.path());
-                plan.obsolete_generations.push_back(
-                    {entry.path(), {}, {}, "retired generation cleanup"});
-                continue;
-            }
-            const auto generation = LoadGeneration(root, id, true);
-            const bool explicitly_retained = retained_generations.contains(id);
-            bool keep = explicitly_retained || !PastGracePeriod(entry.path(), grace_seconds);
-            if (keep && !explicitly_retained)
-                plan.retained_generation_reasons[id].insert("grace period");
-            hs::GenerationFileLock reader_lock;
-            if (!keep)
-            {
-                reader_lock = hs::GenerationFileLock(entry.path() / "generation.json",
-                    hs::GenerationFileLock::Mode::TryExclusive);
-                keep = !reader_lock.OwnsLock();
-                if (keep)
-                    plan.retained_generation_reasons[id].insert("reader lease");
-            }
-            for (const auto &product : generation.products)
-            {
-                known_namespaces.insert(product.namespace_path);
-                if (keep && generation.version != 3)
-                    retained_sets.insert(ProductNamespace(product));
-            }
-            if (keep)
-                continue;
-            if (dry_run) CheckTree(root, entry.path());
-            plan.obsolete_generations.push_back(
-                {entry.path(), std::move(reader_lock), {},
-                 "unreferenced generation past grace period"});
+            const auto scope = RequiredString(manifest, "scope", "-");
+            if (entry.path().filename().string() != ScopeFileName(scope))
+                Fail("invalid-manifest", "-", "current manifest scope/path mismatch");
+            const auto generation = LoadGeneration(root, scope);
+            retain_products(generation.products);
         }
     }
 
+    std::vector<RetiredProductSet> candidates;
     const auto products_root = root / "Products";
     CheckPath(root, "Products", "-");
     if (fs::exists(products_root))
@@ -1861,264 +967,130 @@ void GarbageCollect(const fs::path &root, const std::vector<std::string> &pins,
             CheckPath(root, entry.path().lexically_relative(root), "-");
             if (!entry.is_directory())
                 continue;
-            const auto set_id = entry.path().filename().string();
-            if (!IsLowerSha256(set_id))
-                continue;
-            const auto namespace_relative =
-                entry.path().parent_path().lexically_relative(products_root);
-            const auto namespace_path = namespace_relative.generic_string();
-            NamespacePath(namespace_path, "-");
-            if (!known_namespaces.contains(namespace_path))
-                continue;
-            bool contains_file = false;
-            bool contains_directory = false;
-            for (const auto &child : fs::directory_iterator(entry.path()))
+            if (entry.path().filename() == ".leases")
             {
-                CheckPath(root, child.path().lexically_relative(root), "-");
-                contains_file |= child.is_regular_file();
-                contains_directory |= child.is_directory();
+                iterator.disable_recursion_pending();
+                continue;
             }
-            if (contains_directory || !contains_file)
+            const auto product_set_id = entry.path().filename().string();
+            if (!IsLowerSha256(product_set_id))
                 continue;
+            const auto name_space = entry.path().parent_path()
+                .lexically_relative(products_root).generic_string();
+            NamespacePath(name_space, "-");
             iterator.disable_recursion_pending();
-            if (retained_sets.contains({namespace_path, set_id}) ||
-                !PastGracePeriod(entry.path(), grace_seconds))
+            if (retained_sets.contains({name_space, product_set_id}))
                 continue;
-            if (dry_run) CheckTree(root, entry.path());
-            const auto lease_path = entry.path().parent_path() / ".leases" /
-                (set_id + ".lock");
-            RetiredProductSet candidate{entry.path(), lease_path, {}, fs::exists(lease_path)};
-            bool reader_active = false;
+            const auto lease_directory = entry.path().parent_path() / ".leases";
+            const auto lease_path = lease_directory / (product_set_id + ".lock");
+            CheckPath(root, lease_directory.lexically_relative(root), "-");
+            CheckPath(root, lease_path.lexically_relative(root), "-");
+            candidates.push_back({entry.path(), lease_path, {}, fs::exists(lease_path), false});
+        }
+    }
+
+    for (auto &candidate : candidates)
+    {
+        if (candidate.had_lease_file)
+        {
+            candidate.lock = hs::GenerationFileLock(
+                candidate.lease_path, hs::GenerationFileLock::Mode::TryExclusive);
+            candidate.remove = candidate.lock.OwnsLock();
+        }
+        else
+            candidate.remove = true;
+    }
+    // Validate the complete deletion set before removing any ProductSet.
+    for (const auto &candidate : candidates)
+        if (candidate.remove)
+        {
+            CheckTree(root, candidate.path);
+            CheckPath(root, candidate.lease_path.lexically_relative(root), "-");
+        }
+
+    std::size_t removed = 0;
+    for (auto &candidate : candidates)
+        if (candidate.remove)
+        {
+            fs::remove_all(candidate.path);
             if (candidate.had_lease_file)
             {
-                candidate.reader_lock = hs::GenerationFileLock(lease_path,
-                    hs::GenerationFileLock::Mode::TryExclusive);
-                if (!candidate.reader_lock.OwnsLock())
-                {
-                    reader_active = true;
-                }
+                candidate.lock = {};
+                fs::remove(candidate.lease_path);
+                std::error_code ignored;
+                fs::remove(candidate.lease_path.parent_path(), ignored);
             }
-            if (!reader_active)
-                plan.obsolete_sets.push_back(std::move(candidate));
+            ++removed;
         }
-    }
-
-    if (dry_run)
-    {
-        PrintGarbageCollectionDryRun(root, grace_seconds, plan, json);
-        return;
-    }
-
-    // Each independent tree is checked at deletion; dry-run checks during planning.
-    for (auto &candidate : plan.obsolete_generations)
-    {
-        CheckTree(root, candidate.path);
-        if (candidate.lock.OwnsLock())
-        {
-            const auto retired = generations / (".gc-" + candidate.path.filename().string() + TempSuffix() + ".json");
-            // Windows permits renaming the shared-delete file, not its open parent.
-            fs::rename(candidate.path / "generation.json", retired);
-            candidate.lock = {};
-            plan.stale_retirements.push_back(retired);
-        }
-        fs::remove_all(candidate.path);
-        if (!candidate.pending_marker.empty())
-            fs::remove(candidate.pending_marker);
-    }
-    for (auto &candidate : plan.obsolete_sets)
-    {
-        CheckTree(root, candidate.path);
-        fs::remove_all(candidate.path);
-        if (candidate.had_lease_file)
-            fs::remove(candidate.lease_path);
-        candidate.reader_lock = {};
-        if (candidate.had_lease_file)
-        {
-            std::error_code ignored;
-            fs::remove(candidate.lease_path.parent_path(), ignored);
-        }
-    }
-    // Retired manifests retain namespace discovery until ProductSet sweep completes.
-    for (const auto &path : plan.stale_retirements)
-        fs::remove_all(path);
-    for (const auto &path : plan.stale_publications)
-        fs::remove(path);
-    std::cout << "generation.gc removed_generations=" << plan.obsolete_generations.size()
-              << " removed_product_sets=" << plan.obsolete_sets.size() << '\n';
+    std::cout << "generation.gc removed_product_sets=" << removed << '\n';
 }
-
 } // namespace
 
 int main(int argc, char **argv)
 {
-    bool compose = false;
-    bool verify = false;
-    bool export_snapshot = false;
-    bool gc = false;
-    bool dry_run = false;
-    bool json = false;
-    std::string root_arg;
-    std::string scope;
-    std::string destination_arg;
+    bool compose = false, verify = false, gc = false;
+    std::string root_arg, scope, result_list_arg;
     std::vector<fs::path> result_paths;
-    std::string result_list_arg;
-    bool result_list_supplied = false;
-    std::vector<std::string> required_ids;
-    std::vector<std::string> pins;
-    std::uint64_t grace_seconds = 24 * 60 * 60;
-    bool grace_supplied = false;
-    const auto report_failure = [&](std::string_view error_code, std::string_view action_id,
-                                    std::string_view reason) {
-        Json results = Json::array();
-        for (const auto &path : result_paths)
-            results.push_back(DiagnosticPath(path));
-        const Json diagnostic{
-            {"schema_version", 1}, {"error_code", error_code},
-            {"producer_id", "hs_generation"}, {"action_id", action_id}, {"reason", reason},
-            {"build_root", root_arg}, {"scope", scope},
-            {"compose", compose}, {"verify", verify}, {"export_snapshot", export_snapshot},
-            {"gc", gc}, {"destination", destination_arg},
-            {"dependency", {{"results", results}, {"result_list", result_list_arg},
-                            {"required_products", required_ids}}},
-            {"remediation", "Check the reported Generation inputs and dependencies, correct the failure, and rerun the command."}};
-        std::cerr << diagnostic.dump(-1, ' ', false, Json::error_handler_t::replace) << '\n';
+    const auto report_failure = [](std::string_view code, std::string_view action,
+                                   std::string_view reason) {
+        std::cerr << "generation.error code=" << code << " action=" << action
+                  << " reason=" << reason << '\n';
     };
     try
     {
         for (int index = 1; index < argc; ++index)
         {
             const std::string_view argument(argv[index]);
-            if (argument == "--compose")
-            {
-                compose = true;
-            }
-            else if (argument == "--verify")
-            {
-                verify = true;
-            }
-            else if (argument == "--export-snapshot")
-            {
-                export_snapshot = true;
-            }
-            else if (argument == "--gc")
-            {
-                gc = true;
-            }
-            else if (argument == "--dry-run")
-            {
-                dry_run = true;
-            }
-            else if (argument == "--json")
-            {
-                json = true;
-            }
+            if (argument == "--compose") compose = true;
+            else if (argument == "--verify") verify = true;
+            else if (argument == "--gc") gc = true;
             else if ((argument == "--build-root" || argument == "--scope" ||
-                      argument == "--result" || argument == "--result-list" ||
-                      argument == "--require" ||
-                      argument == "--pin" || argument == "--grace-seconds" || argument == "--destination") &&
+                      argument == "--result" || argument == "--result-list") &&
                      index + 1 < argc)
             {
                 const std::string value = argv[++index];
-                if (argument == "--build-root")
-                {
-                    root_arg = value;
-                }
-                else if (argument == "--scope")
-                {
-                    scope = value;
-                }
-                else if (argument == "--destination")
-                {
-                    if (!destination_arg.empty() || value.empty())
-                        Fail("invalid-arguments", "-", "destination must be supplied once");
-                    destination_arg = value;
-                }
-                else if (argument == "--result")
-                {
-                    result_paths.push_back(Utf8Path(value));
-                }
+                if (argument == "--build-root") root_arg = value;
+                else if (argument == "--scope") scope = value;
+                else if (argument == "--result") result_paths.push_back(Utf8Path(value));
                 else if (argument == "--result-list")
                 {
-                    if (result_list_supplied || value.empty())
+                    if (!result_list_arg.empty() || value.empty())
                         Fail("invalid-arguments", "-", "result list must be supplied once");
                     result_list_arg = value;
-                    result_list_supplied = true;
-                }
-                else if (argument == "--require")
-                {
-                    if (value.empty())
-                        Fail("invalid-arguments", "-", "required logical ID is empty");
-                    required_ids.push_back(value);
-                }
-                else if (argument == "--pin")
-                {
-                    if (!IsLowerSha256(value))
-                        Fail("invalid-arguments", "-", "pin must be a Generation ID");
-                    pins.push_back(value);
-                }
-                else
-                {
-                    const auto *begin = value.data();
-                    const auto *end = begin + value.size();
-                    const auto parsed = std::from_chars(begin, end, grace_seconds);
-                    if (parsed.ec != std::errc{} || parsed.ptr != end ||
-                        grace_seconds > static_cast<std::uint64_t>(
-                            std::numeric_limits<std::int64_t>::max()))
-                        Fail("invalid-arguments", "-", "invalid grace seconds");
-                    grace_supplied = true;
                 }
             }
             else
-            {
                 Fail("invalid-arguments", "-", "unknown or incomplete argument");
-            }
         }
-        if (static_cast<int>(compose) + static_cast<int>(verify) +
-                static_cast<int>(gc) + static_cast<int>(export_snapshot) != 1 ||
+        const bool has_results = !result_paths.empty() || !result_list_arg.empty();
+        if (static_cast<int>(compose) + static_cast<int>(verify) + static_cast<int>(gc) != 1 ||
             root_arg.empty() ||
-            (export_snapshot != !destination_arg.empty()) ||
-            (gc && (!scope.empty() || !result_paths.empty() ||
-                    result_list_supplied || !required_ids.empty())) ||
-            (!gc && (scope.empty() || !pins.empty() || grace_supplied)) ||
-            (!gc && (dry_run || json)) ||
-            (json && !dry_run) ||
-            (compose && (result_paths.empty() == !result_list_supplied)) ||
-            ((verify || export_snapshot) && (!result_paths.empty() || result_list_supplied ||
-                        !required_ids.empty())))
-        {
+            (gc && !scope.empty()) ||
+            (!gc && scope.empty()) ||
+            compose != has_results)
             Fail("invalid-arguments", "-",
-                 "usage: hs_generation --compose --build-root <absolute> --scope <scope> "
-                 "(--result <absolute>... | --result-list <absolute-file>) "
-                 "[--require <logical-id>...] | "
+                 "usage: --compose --build-root <absolute> --scope <scope> "
+                 "[--result-list <absolute-file>] [--result <absolute>]... | "
                  "--verify --build-root <absolute> --scope <scope> | "
-                 "--export-snapshot --build-root <absolute> --scope <scope> --destination <existing-absolute> | "
-                 "--gc --build-root <absolute> [--pin <generation-id>...] "
-                 "[--grace-seconds <n>] [--dry-run [--json]]");
-        }
-        if (!gc)
-            ScopeFileName(scope);
+                 "--gc --build-root <absolute>");
+
+        if (!gc) ScopeFileName(scope);
         const fs::path root = BuildRoot(root_arg);
         if (compose)
         {
             hs::GenerationFileLock mutation(root / ".generation-mutation.lock",
                 hs::GenerationFileLock::Mode::Exclusive, true);
-            if (result_list_supplied)
-                result_paths = ReadResultList(root, Utf8Path(result_list_arg));
-            Compose(root, scope, result_paths, required_ids);
+            if (!result_list_arg.empty())
+                AppendResultList(root, Utf8Path(result_list_arg), result_paths);
+            Compose(root, scope, result_paths);
         }
         else if (verify)
-        {
             Verify(root, scope);
-        }
-        else if (export_snapshot)
-        {
-            ExportSnapshot(root, scope, destination_arg);
-        }
         else
         {
             hs::GenerationFileLock mutation(root / ".generation-mutation.lock",
                 hs::GenerationFileLock::Mode::Exclusive, true);
-            GarbageCollect(root, pins, grace_seconds, dry_run, json);
+            GarbageCollect(root);
         }
         return 0;
     }

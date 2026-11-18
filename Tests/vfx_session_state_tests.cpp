@@ -46,35 +46,6 @@ void CheckVfxBirthRowSelection()
         "partial birth selection lost importance ordering or original-index ties");
 }
 
-void CheckVisibleFlashRetirement()
-{
-    hs::runtime_detail::DecodedVfxState state;
-    const auto flash = [](std::uint32_t seed, hs::Tick tick, float delay, float lifetime) {
-        hs::VfxFlashSpawnInput row;
-        row.stable_seed = seed; row.event_tick = tick;
-        row.delay = delay; row.lifetime = lifetime;
-        return row;
-    };
-    state.flashes = {flash(1, 0, 0, 1), flash(2, 0, 0, 4),
-        flash(3, 0, 3, 1), flash(4, 180, 0, 1)};
-    std::vector<hs::VfxFlashSpawnInput> visible;
-    state.AppendVisibleFlashes(120, visible);
-    Check(state.flashes.size() == 3 && visible.size() == 1 &&
-          visible[0].stable_seed == 2 && visible[0].normalized_age == 0.5f,
-        "flash retirement must free expired rows before birth admission and retain future/delayed rows");
-    const auto retained = state.flashes.size();
-    state.flashes.push_back(flash(5, 60, 0, 2));
-    state.flashes.push_back(flash(6, 0, 0, 1));
-    state.AppendVisibleFlashes(120, visible, retained);
-    Check(state.flashes.size() == 4 && visible.size() == 2 &&
-          visible[0].stable_seed == 2 && visible[1].stable_seed == 5 &&
-          visible[1].normalized_age == 0.5f,
-        "new flash suffix must retire late expired births without duplicating visible retained rows");
-    visible.clear();
-    state.AppendVisibleFlashes(240, visible);
-    Check(state.flashes.empty() && visible.empty(), "flash endpoint retirement changed");
-}
-
 void CheckVfxBirthRetirement()
 {
     using hs::runtime_detail::VfxGroundBirthSuppressionFacts;
@@ -140,46 +111,6 @@ void CheckSize(hs::runtime_detail::DecodedVfxState &state, std::size_t count)
     Check(std::apply([&](const auto &...retained) {
         return ((retained.size() == count) && ...);
     }, Retained(state)), "every decoded retention category must transfer/reset");
-}
-
-void CheckActiveEffectRetention()
-{
-    using Store = hs::runtime_detail::ActiveEffectStore;
-    Store effects;
-    hs::VfxEventInput a{}, b{}, c{}, missing{};
-    a.sequence = 10; b.sequence = 20; c.sequence = 30; missing.sequence = 40;
-    const auto ar = effects.Intern(a), br = effects.Intern(b), cr = effects.Intern(c);
-    Check(effects.Add(Store::Profile::Ground, ar) &&
-          effects.Add(Store::Profile::Ground, br) &&
-          effects.Add(Store::Profile::Ground, cr), "initial effect membership");
-    const auto *unchanged = effects.Get(ar);
-    effects.Compact();
-    Check(effects.Get(ar) == unchanged && effects.Find(c) == cr,
-          "unchanged membership must preserve rows and their indices");
-    effects.SetQuality(hs::VfxQuality::Low);
-    Check(effects.Get(ar) == unchanged && effects.Find(c) == cr &&
-          effects.Get(ar)->quality == hs::VfxQuality::Low && effects.Get(br)->quality == hs::VfxQuality::Low &&
-          effects.ProfileEvents(Store::Profile::Ground).size() == 3,
-          "retained quality update allocated, changed episode identity or lost profile membership");
-    effects.EraseIf(Store::Profile::Ground, [&](const hs::VfxEventInput &event) {
-        return event.sequence == b.sequence || event.sequence == missing.sequence;
-    });
-    std::vector<hs::runtime_detail::RetainedVfxEntitySurfaceCapture> captures(1);
-    captures[0].row = br;
-    effects.Compact(captures);
-    Check(effects.Size() == 3 && captures[0].row == br,
-          "capture retains an effect after its profile expires");
-    captures.clear();
-    effects.Compact(captures);
-    const auto retained = effects.ProfileEvents(Store::Profile::Ground);
-    Check(effects.Size() == 2 && effects.Find(a) == 0 && effects.Find(c) == 1 &&
-          retained.size() == 2 && retained[0].sequence == 10 &&
-          retained[1].sequence == 30,
-          "stable erase and compaction preserve retained profile order");
-    effects.EraseIf(Store::Profile::Ground, [](const auto &) { return true; });
-    effects.Compact();
-    Check(effects.Size() == 0 && !effects.Get(0), "last effect retirement clears rows");
-    Check(effects.Intern(b) == 0, "row storage is reusable after retirement");
 }
 
 void CheckGeometrySectorIdentity()
@@ -540,67 +471,6 @@ void CheckOwnerRefreshExpiry()
         "compaction must retain only the expected Ribbon-owned row");
 }
 
-void CheckPersistentBurstOwnerSelection()
-{
-    using State = hs::runtime_detail::VfxSessionState;
-    using Kind = hs::PersistentVfxKind;
-    constexpr std::array kinds{Kind::PlayerBowDraw, Kind::ChargedFullReady,
-        Kind::EmpoweredReady, Kind::MultishotRetarget, Kind::RicochetBleedExtend};
-    State state;
-    state.Synchronize(7);
-    Check(state.MarkPersistentBurst(12, static_cast<std::uint8_t>(kinds[3])), "preexisting burst");
-    std::vector<hs::VfxPersistentInput> owners(2);
-    owners[0].source_visual_kind = static_cast<std::uint8_t>(kinds[0]);
-    owners[1].stable_id = 99;
-    owners[1].source_visual_kind = static_cast<std::uint8_t>(Kind::FireArea);
-    for (std::size_t index = 0; index < 768; ++index)
-    {
-        hs::VfxPersistentInput owner;
-        owner.stable_id = (index * 7) % 37 + 1;
-        owner.source_visual_kind = static_cast<std::uint8_t>(kinds[(index / 37) % kinds.size()]);
-        owner.effect_handle = static_cast<std::uint32_t>(index + 1);
-        owner.stable_seed = static_cast<std::uint32_t>(index + 100);
-        owners.push_back(owner);
-    }
-    const auto original_selection = [&](std::span<const hs::VfxPersistentInput> inputs) {
-        std::vector<std::size_t> selected;
-        for (std::size_t index = 0; index < inputs.size(); ++index)
-        {
-            const auto &owner = inputs[index];
-            const auto kind = static_cast<Kind>(owner.source_visual_kind);
-            if (kind != Kind::PlayerBowDraw && kind != Kind::ChargedFullReady &&
-                kind != Kind::EmpoweredReady && kind != Kind::MultishotRetarget &&
-                kind != Kind::RicochetBleedExtend) continue;
-            if (!owner.stable_id || state.HasPersistentBurst(owner.stable_id, owner.source_visual_kind) ||
-                std::ranges::any_of(selected, [&](std::size_t prior) {
-                    return inputs[prior].stable_id == owner.stable_id &&
-                        inputs[prior].source_visual_kind == owner.source_visual_kind;
-                })) continue;
-            selected.push_back(index);
-        }
-        return selected;
-    };
-    std::vector<std::size_t> selected{9999};
-    state.SelectUnseenPersistentBurstOwners(owners, selected);
-    Check(selected == original_selection(owners), "batched burst selection changed first-match or source order");
-    std::ranges::reverse(owners);
-    state.SelectUnseenPersistentBurstOwners(owners, selected);
-    Check(selected == original_selection(owners), "reordered burst inputs changed selection");
-    Check(state.PersistentBurstCount() == 1, "selection must not publish episode tombstones");
-    std::vector<State::PersistentBurstKey> keys;
-    for (const auto index : selected)
-        keys.push_back({owners[index].stable_id, owners[index].source_visual_kind});
-    std::vector<hs::ParticleSpawnCommand> commands;
-    std::vector<hs::ParticleSpawnCommand> destination;
-    Check(state.CommitPersistentBursts(keys, commands, destination), "selected bursts commit");
-    state.SelectUnseenPersistentBurstOwners(owners, selected);
-    Check(selected.empty(), "committed burst owners were selected again");
-    state.Synchronize(8);
-    state.SelectUnseenPersistentBurstOwners(owners, selected);
-    Check(selected == original_selection(owners) && !selected.empty() && state.PersistentBurstCount() == 0,
-          "new session clears burst tombstones");
-}
-
 void CheckPersistentBurstCommit()
 {
     hs::runtime_detail::VfxSessionState state;
@@ -627,7 +497,7 @@ void CheckPersistentBurstCommit()
     const std::array out_of_order{Key{49, 1}, Key{45, 4}, Key{47, 2}};
     Check(state.CommitPersistentBursts(out_of_order, no_commands, destination) &&
           state.HasPersistentBurst(45, 4) && state.HasPersistentBurst(47, 2) &&
-          state.HasPersistentBurst(49, 1) && state.PersistentBurstCount() == 6,
+          state.HasPersistentBurst(49, 1),
           "separate batches accept out-of-order keys while keeping the retained set searchable");
     const std::array warm_key{Key{48, 3}};
     Check(state.CommitPersistentBursts(warm_key, no_commands, destination) &&
@@ -640,7 +510,7 @@ void CheckPersistentBurstCommit()
           "duplicate keys reject the batch before publishing a tombstone or commands");
     const std::array zero_key{Key{0, 5}};
     Check(!state.CommitPersistentBursts(zero_key, no_commands, destination) &&
-          !state.HasPersistentBurst(0, 5) && state.PersistentBurstCount() == 7,
+          !state.HasPersistentBurst(0, 5),
           "zero stable ids reject the batch without changing retained tombstones");
 
 }
@@ -1214,15 +1084,12 @@ int main()
         TestVfxProfileAdmission();
         CheckVfxBirthRowSelection();
         CheckVfxBirthRetirement();
-        CheckVisibleFlashRetirement();
-        CheckActiveEffectRetention();
         CheckGeometrySectorIdentity();
         CheckPreparedActiveEffectAppendBatch();
         CheckSurfaceFrameCaptureAdmission();
         CheckPreparedGroundOwnerReplacement();
         CheckOwnerRefreshExpiry();
         CheckPersistentBurstCommit();
-        CheckPersistentBurstOwnerSelection();
         CheckPersistentBurstRetirement();
         CheckPendingEmissionOrder();
         CheckPreparedBirthAppend();

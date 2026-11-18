@@ -1,7 +1,9 @@
 #include "world_transport_scene.hpp"
 #include <hs/render_data/render_snapshot_storage.hpp>
 
+#if defined(HS_OFFLINE_PROBE_BAKER)
 #include <hs/game_rules/simulation_rules_io.hpp>
+#endif
 #include <hs/presentation/environment_layout.hpp>
 
 #include <span>
@@ -11,6 +13,7 @@
 
 namespace hs::app
 {
+#if defined(HS_OFFLINE_PROBE_BAKER)
 std::shared_ptr<const StaticRenderScene> WorldTransportScene(
     const SelectedGeneration &generation, std::uint64_t seed)
 {
@@ -20,6 +23,13 @@ std::shared_ptr<const StaticRenderScene> WorldTransportScene(
     SimulationRules rules;
     const auto loaded = LoadSimulationRules(rules_path, rules);
     if (!loaded) throw std::runtime_error(std::string(loaded.Message()));
+    return WorldTransportScene(rules,generation.id,seed);
+}
+#endif
+
+std::shared_ptr<const StaticRenderScene> WorldTransportScene(
+    const SimulationRules &rules, std::string_view content_id, std::uint64_t seed)
+{
     if (rules.arena_obstacle_count > rules.arena_obstacles.size())
         throw std::runtime_error("simulation rules contain an invalid obstacle count");
     auto layout = BuildEnvironmentLayout(rules.arena_half_extent, rules.arena_boundary,
@@ -27,7 +37,7 @@ std::shared_ptr<const StaticRenderScene> WorldTransportScene(
     if (layout.eligible_static_members.empty())
         throw std::runtime_error("production arena has no HLOD eligible static members");
     auto scene = std::make_unique<StaticRenderSceneStorage>();
-    scene->content_generation_id = generation.id;
+    scene->content_generation_id = std::string(content_id);
     scene->scene_asset_id = MakeAssetId("render/hlod/arena.shl1");
     scene->layout_abi = layout.abi;
     scene->eligible_layout_digest = layout.eligible_digest;

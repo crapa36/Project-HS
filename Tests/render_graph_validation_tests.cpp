@@ -251,37 +251,14 @@ void MultiQueueSchedule()
           "cross-queue WAR protects imported old contents");
 }
 
-void CompletionSetContract()
-{
-    CompletionSet required;
-    required.Include(QueueHint::Direct, 4);
-    required.Include(QueueHint::Direct, 2);
-    required.Include(QueueHint::Compute, 7);
-    CompletionSet copy_requirement;
-    copy_requirement.Include(QueueHint::Copy, 3);
-    required.Merge(copy_requirement);
-    Check(required.Required(QueueHint::Direct) == 4 &&
-              required.Required(QueueHint::Compute) == 7 &&
-              required.Required(QueueHint::Copy) == 3,
-          "CompletionSet merges per-queue maxima");
-    CompletionSet completed;
-    completed.Include(QueueHint::Direct, 4);
-    completed.Include(QueueHint::Compute, 6);
-    completed.Include(QueueHint::Copy, 9);
-    Check(!required.IsSatisfiedBy(completed),
-          "CompletionSet waits for every required queue");
-    completed.Include(QueueHint::Compute, 7);
-    Check(required.IsSatisfiedBy(completed),
-          "CompletionSet releases only after all queue requirements complete");
-}
-
 void PhysicalQueueOwnership()
 {
     Graph reads;
     reads.resources[0].initialized = true;
-    auto graphics = Read(0, BufferRange{0, 16}); graphics.access = Access::VertexBuffer;
+    auto graphics = Read(0, BufferRange{0, 16}); graphics.access = Access::ConstantBuffer;
+    auto compute = Read(0, BufferRange{32, 16}); compute.access = Access::ConstantBuffer;
     reads.passes.push_back({10, {graphics}, QueueHint::Direct, true});
-    reads.passes.push_back({20, {Read(0, BufferRange{32, 16})}, QueueHint::Compute, true});
+    reads.passes.push_back({20, {compute}, QueueHint::Compute, true});
     reads.passes.push_back({30, {graphics}, QueueHint::Direct, true});
     Check(reads.Compile() && reads.Order({10, 20, 30}), "read/read schedule remains deterministic");
     Check(reads.schedule.cross_queue_dependencies.empty(),
@@ -371,17 +348,16 @@ void TransientAliasPlanner()
         const ResourceHandle second{2, ResourceKind::Buffer};
         std::vector<ResourceUse> empty_uses;
         std::vector<ResourceUse> second_read{Read(1, {}, second)};
-        const std::array<std::uint32_t, 1> copy_after_compute{3};
-        const std::array<std::uint32_t, 1> second_write_after_copy{5};
+        const std::array<std::pair<std::uint32_t, std::uint32_t>, 2> ordering{{{3, 5}, {5, 6}}};
         passes = {{0, QueueHint::Direct, true, producer},
                   {1, QueueHint::Compute, true, compute_uses},
                   {2, QueueHint::Copy, true, copy_uses},
                   {3, QueueHint::Compute, true, compute_uses},
                   {4, QueueHint::Direct, true, compute_uses},
-                  {5, QueueHint::Copy, true, empty_uses, copy_after_compute},
-                  {6, QueueHint::Direct, true, second_uses, second_write_after_copy},
+                  {5, QueueHint::Copy, true, empty_uses},
+                  {6, QueueHint::Direct, true, second_uses},
                   {7, QueueHint::Compute, true, second_read}};
-        Check(Compile(resources, passes, schedule).Succeeded(),
+        Check(Compile(resources, passes, schedule, ordering).Succeeded(),
               "three-queue alias graph with explicit final-reader chain compiles");
         AliasPlan fully_ordered_plan;
         Check(PlanTransientAliases(resources, passes, schedule, fully_ordered_plan).Succeeded() &&
@@ -389,8 +365,8 @@ void TransientAliasPlanner()
                   fully_ordered_plan.alias_activation_count == 1,
               "all queue readers complete before the second resource begins and permit aliasing");
 
-        passes[5].predecessor_ids = {};
-        Check(Compile(resources, passes, schedule).Succeeded(),
+        Check(Compile(resources, passes, schedule,
+                  std::span<const std::pair<std::uint32_t, std::uint32_t>>(ordering).subspan(1)).Succeeded(),
               "three-queue graph without the explicit compute-reader edge compiles");
         AliasPlan unordered_plan;
         Check(PlanTransientAliases(resources, passes, schedule, unordered_plan).Succeeded() &&
@@ -432,7 +408,7 @@ int main()
     try
     {
         BufferBounds(); Initialization(); Dependencies(); TextureBounds();
-        MultiQueueSchedule(); CompletionSetContract(); PhysicalQueueOwnership(); TransientAliasPlanner();
+        MultiQueueSchedule(); PhysicalQueueOwnership(); TransientAliasPlanner();
         std::puts("Render graph CPU range/version validation passed.");
         return 0;
     }

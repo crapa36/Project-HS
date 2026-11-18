@@ -1,4 +1,5 @@
 #pragma once
+#include <vector>
 #include <hs/core/cooked_particle_effects.hpp>
 #include <hs/renderer/vfx_program.hpp>
 #include <hs/render_data/vfx_spawn_command.hpp>
@@ -87,21 +88,25 @@ inline constexpr std::uint32_t kVfxGroundEntityCrown = 1u << 9;
 inline constexpr std::uint32_t kVfxGroundEntityPickup = 1u << 10;
 inline constexpr std::uint32_t kVfxGroundEntityRelic = 1u << 11;
 inline constexpr std::uint32_t kVfxGroundEntityCharged = 1u << 12;
+enum VfxGroundEventOutput : std::uint8_t
+{
+    GroundDirectShape = 1, GroundExpandingRing = 2, GroundHexConstellation = 4,
+    GroundBossSignature = 8, GroundContactShape = 16
+};
 struct VfxGroundRecipe
 {
-    std::uint64_t effect_id{};
-    std::uint32_t effect_handle{}, source_index{}, source_stable_id{}, output_index{}, gradient_row{};
+    // The first row of each source group carries its length.
+    std::uint32_t source_index{}, source_row_count{}, output_index{}, gradient_row{};
     std::uint32_t payload_kind{}, timing_kind{}, min_quality{};
-    VfxSourceType source_type{};
-    VfxOutputProfile profile{VfxOutputProfile::GroundSdfSoft};
-    VfxMotionKind motion{};
     VfxGroundRecipeKind kind{VfxGroundRecipeKind::Ring};
+    VfxGroundShape shape{VfxGroundShape::Circle};
+    bool direct_output{};
     std::uint32_t knot_count{};
     std::array<float,4> knots{};
     VfxRange pulse_curve_keys{};
     std::uint32_t pulse_curve_interpolation{}, tick_count{};
     float seconds{}, primary{}, secondary{};
-    Float3 rgb{};
+    Float3 hdr_rgb{};
     float hdr{}, alpha{}, motion_rate_hz{}, motion_amplitude{}, motion_inset_fraction{};
     float tertiary{};
     struct MaskVariant
@@ -112,8 +117,8 @@ struct VfxGroundRecipe
     };
     std::array<MaskVariant,3> mask_variants{};
     bool texture_contract_valid{};
-    std::uint32_t source_output_count{};
-    bool source_parameters_empty{};
+    bool wave_source_supported{};
+    std::uint8_t source_event_outputs{}; // First row of the source group.
     // Aggregated once per effect; only the first row in its range carries these bits.
     std::uint32_t admission_profiles{};
 };
@@ -198,6 +203,12 @@ inline constexpr std::uint32_t kVfxMoteChargedPresence = 1u << 14;
 inline constexpr std::uint32_t kVfxMoteSuicidePresence = 1u << 15;
 inline constexpr std::uint32_t kVfxMoteProjectileSpark = 1u << 16;
 inline constexpr std::uint32_t kVfxMoteSafeSector = 1u << 17;
+struct VfxSparkSchedule
+{
+    std::uint32_t output_index{};
+    float lifetime{};
+    std::vector<std::uint16_t> birth_ticks;
+};
 struct VfxMoteSourceRecipe
 {
     std::uint32_t count{};
@@ -205,10 +216,11 @@ struct VfxMoteSourceRecipe
     float curl{.2f}, drag{.8f}, speed{}, cone_degrees{};
     bool common_params_valid{}, rate_valid{}, residual_valid{}, spark_valid{};
     std::uint64_t effect_id{};
-    std::uint32_t effect_handle{}, effect_routes{}, stable_id{};
+    std::uint32_t effect_routes{}, stable_id{};
     VfxRange output_range{};
     std::array<float,2> knots{};
-    bool output_range_valid{}, common_route_valid{}, residual_route_valid{}, rate_route_valid{}, tick_route_valid{}, spark_route_valid{};
+    std::uint32_t spark_schedule{0xffffffffu};
+    bool output_range_valid{}, common_route_valid{}, residual_route_valid{}, rate_route_valid{}, tick_route_valid{};
     bool cosmetic{};
 };
 struct VfxMoteOutputRecipe
@@ -222,7 +234,7 @@ struct VfxMoteOutputRecipe
     std::uint8_t mask_present_mask{}, mask_quality_mask{0x7};
     bool output_color_valid{}, persistent_params_valid{}, spark_textures_valid{};
     std::uint32_t common_recipe_index{0xffffffffu};
-    bool empty_parameters_valid{}, residual_route_valid{}, rate_route_valid{}, tick_route_valid{}, persistent_route_valid{}, spark_route_valid{};
+    bool empty_parameters_valid{}, residual_route_valid{}, rate_route_valid{}, tick_route_valid{}, persistent_route_valid{};
 };
 enum class VfxScreenRoute : std::uint8_t { Unsupported=0, EventHit=1, PersistentLowHealth=2 };
 struct VfxScreenEffectRecipe
@@ -278,59 +290,6 @@ struct VfxEntitySurfaceRouteHandles
 {
     std::uint32_t phase_effect{}, death_effect{}, trap_point_rate_effect{};
 };
-enum class VfxRibbonTextureAsset : std::uint8_t
-{
-    Other, Gradient, Curve, FlowCurl, OptionalDetail, DetailArray, Stbn, NoiseVolume
-};
-struct VfxRibbonEffectRecipe
-{
-    std::uint64_t effect_id{};
-    std::uint32_t handle{}, importance{}, payload_kind{}, input_mode{}, timing_kind{}, lookup_count{}, identity_count{};
-    float seconds{};
-    VfxRange sources{};
-    bool valid_handle{};
-};
-struct VfxRibbonSourceRecipe
-{
-    std::uint32_t effect{}, source_index{}, stable_id{}, parameter_count{};
-    VfxSourceType type{};
-    std::uint32_t knot_count{};
-    std::array<float,4> knots{};
-    VfxRange outputs{};
-    std::uint32_t authoritative{};
-    float history_seconds{};
-    std::uint32_t ground_lock_bits{};
-      bool history_present{}, history_valid{}, ground_lock_present{}, ground_lock_valid{}, knots_valid{};
-};
-struct VfxRibbonOutputRecipe
-{
-    std::uint32_t source{}, shape{}, shape_domain{}, shape_scale_rule{}, shape_component_kind{};
-    VfxOutputProfile profile{};
-    VfxMotionKind motion{};
-    std::uint32_t coverage_type{}, coverage_ref{}, min_quality{}, surface_target{}, gradient_row{}, parameter_count{};
-    VfxRange textures{};
-    Float4 rgba{};
-    float hdr{}, motion_rate_hz{}, motion_amplitude{}, motion_inset_fraction{};
-    std::uint32_t first_parameter_key{}, second_parameter_key{};
-    float arc_degrees{}, width_head{}, width_tail{}, noise_warp{}, phase_offset{}, width{}, taper{}, width_multiplier{}, reverse_flow{};
-    std::uint32_t segments{};
-    bool arc_present{}, arc_valid{}, width_head_present{}, width_head_valid{}, width_tail_present{}, width_tail_valid{};
-    bool noise_warp_present{}, noise_warp_valid{}, phase_offset_present{}, phase_offset_valid{};
-    bool width_present{}, width_valid{}, taper_present{}, taper_valid{}, width_multiplier_present{}, width_multiplier_valid{};
-    bool reverse_flow_present{}, reverse_flow_valid{}, segments_present{}, segments_valid{};
-    bool travel_pulse_present{}, travel_pulse_valid{};
-      bool color_contract_valid{};
-};
-struct VfxRibbonTextureRecipe
-{
-    std::uint32_t role{}, selection{}, min_quality{};
-    VfxRibbonTextureAsset asset{};
-    float strength{};
-    VfxRange slices{};
-    std::uint32_t first_frame{}, frame_count{};
-    float fps{};
-    bool valid_path{};
-};
 // Accepted paired ground wake output. Authored route, source envelope,
 // parameter and detail texture contracts are resolved at image admission.
 struct VfxRibbonWakeRecipe
@@ -350,8 +309,8 @@ struct VfxRibbonFixedRecipe
 };
 struct VfxRibbonProjectileSourceRecipe
 {
-    std::uint32_t effect_handle{}, source_id{}, knot_count{};
-    float history_seconds{};
+    std::uint32_t source_id{}, knot_count{};
+    float history_seconds{}, fade_seconds{};
     std::array<float,4> knots{};
     VfxRange outputs{};
 };
@@ -406,12 +365,10 @@ struct VfxRibbonEventSourceRecipe
     std::array<float,4> knots{};
     float history_seconds{}, start_seconds{}, end_seconds{};
     std::array<float,3> recoil_arc_by_quality{35.0f,35.0f,35.0f};
-    std::array<float,3> axial_arc_by_quality{35.0f,35.0f,35.0f};
     VfxRange outputs{};
 };
 struct VfxRibbonEventEffectRecipe
 {
-    std::uint64_t effect_id{};
     std::uint32_t effect_handle{}, importance{}, payload_kind{};
     float seconds{};
     VfxRange sources{};
@@ -419,7 +376,7 @@ struct VfxRibbonEventEffectRecipe
 struct VfxRibbonEventOutputRecipe
 {
     std::uint32_t min_quality{};
-    bool axial{}, arc_present{};
+    bool arc_present{};
     float arc_degrees{};
     VfxRibbonOutputInput output{};
     VfxRange detail_slices{};
@@ -482,6 +439,7 @@ struct VfxImage
     std::span<const VfxOwnedStatusTickRecipe> owned_status_tick_recipes;
     std::span<const VfxMoteSourceRecipe> mote_source_recipes;
     std::span<const VfxMoteOutputRecipe> mote_output_recipes;
+    std::span<const VfxSparkSchedule> spark_schedules;
     std::span<const VfxScreenEffectRecipe> screen_effect_recipes;
     std::span<const VfxScreenRecipe> screen_recipes;
     std::span<const VfxVolumeEffectRecipe> volume_effect_recipes;
@@ -489,8 +447,6 @@ struct VfxImage
     std::span<const VfxEntitySurfaceEffectRecipe> entity_surface_effect_recipes;
     std::span<const VfxEntitySurfaceRecipe> entity_surface_recipes;
     VfxEntitySurfaceRouteHandles entity_surface_routes{};
-    std::span<const VfxRibbonEffectRecipe> ribbon_effect_recipes;
-    std::span<const std::uint32_t> ribbon_slice_indices;
     std::span<const VfxRange> ribbon_wake_effect_ranges;
     std::span<const VfxRibbonWakeRecipe> ribbon_wake_recipes;
     std::span<const VfxRange> ribbon_fixed_effect_ranges;
@@ -537,13 +493,6 @@ struct VfxImage
         const auto range = ground_effect_ranges[handle - 1];
         return range.count && range.first <= ground_recipes.size() &&
             range.count <= ground_recipes.size() - range.first;
-    }
-    [[nodiscard]] bool HasFlashRecipes(std::uint32_t handle) const noexcept
-    {
-        if (!handle || handle > flash_effect_recipes.size()) return false;
-        const auto range = flash_effect_recipes[handle - 1].outputs;
-        return range.count && range.first <= flash_recipes.size() &&
-            range.count <= flash_recipes.size() - range.first;
     }
 };
 }

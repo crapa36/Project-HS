@@ -1,4 +1,5 @@
 #include "asset_test_room.hpp"
+#include <hs/render_data/vfx_payload_ids.hpp>
 
 #if defined(HS_DEVELOPMENT_TOOLS)
 #include <hs/presentation/meadow_surface.hpp>
@@ -160,9 +161,7 @@ AssetTestRoom::AssetTestRoom(const std::vector<RendererCharacterAnimationClip> &
                 }
                 if (entry.screen_effect) return 9.0f;
                 const auto kind = entry.payload_kind;
-                const auto hash = VfxRibbonBoundsHash32;
-                if (kind == hash("SourceTargetPayload") || kind == hash("ProjectilePathPayload") ||
-                    kind == hash("LinePayload") || kind == hash("RingPayload")) return 7.0f;
+                if (kind == hs::vfx_payload::SourceTarget || kind == hs::vfx_payload::ProjectilePath) return 7.0f;
                 const auto output = profile(entry);
                 if (output == static_cast<std::uint32_t>(VfxOutputProfile::RibbonAdd) ||
                     output == static_cast<std::uint32_t>(VfxOutputProfile::RibbonOit) ||

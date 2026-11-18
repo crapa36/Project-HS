@@ -63,6 +63,13 @@ void TestPauseDoesNotAdvance()
     const auto unchanged = simulation.TickFixed(waiting);
     Check(unchanged.tick == paused.tick && unchanged.checksum == paused.checksum,
           "paused simulation does not advance");
+    const std::array reroll{hs::UiAction{hs::UiActionKind::Reroll}};
+    waiting.ui_actions = reroll;
+    const auto player = simulation.GetObservation().player_position;
+    waiting.held.aim_world = {player.x, 0.0f, player.y};
+    const auto rejected = simulation.TickFixed(waiting);
+    Check(!rejected.world_changed && rejected.tick == paused.tick,
+          "rejected paused UI action leaves the simulation unchanged");
 }
 
 void TestScopedTickReadView()
@@ -142,6 +149,23 @@ void TestQueuedResumePreservesQuit()
     Check(unchanged.phase == hs::SessionPhase::MainMenu && unchanged.tick == 0 &&
               unchanged.checksum == before,
           "stale Resume cannot start a session from MainMenu");
+}
+
+void TestBatchedUiOrder()
+{
+    hs::GameSimulation individual, batched;
+    Check(individual.Initialize({81}).Succeeded() && batched.Initialize({81}).Succeeded(),
+          "UI batch initialize");
+    const std::array actions{
+        hs::UiAction{hs::UiActionKind::ReturnToMainMenu},
+        hs::UiAction{hs::UiActionKind::StartSession},
+        hs::UiAction{hs::UiActionKind::SwapLoadoutSlots, 0, 1},
+        hs::UiAction{hs::UiActionKind::Quit}};
+    for (const auto &action : actions) individual.ApplyUiAction(action);
+    const auto expected = individual.TickFixed({1});
+    const auto actual = batched.TickFixed({1, {}, {}, actions});
+    Check(actual.checksum == expected.checksum && actual.phase == expected.phase &&
+              actual.tick == expected.tick, "batched UI preserves ordered final observation");
 }
 
 void TestSameTickFinalBossVictory()
@@ -401,6 +425,7 @@ int main()
         TestPauseDoesNotAdvance();
         TestScopedTickReadView();
         TestQueuedResumePreservesQuit();
+        TestBatchedUiOrder();
         TestSameTickFinalBossVictory();
         TestTerminalPhaseKeepsPickups();
         TestMultipleChestRewards();

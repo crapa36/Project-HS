@@ -82,7 +82,6 @@ constexpr std::array kProjectPrograms{
     ProgramOutput{"vfx_flash_ps.dxil", L"VfxFlashPS", L"ps_6_0"},
     ProgramOutput{"vfx_sprite_oit_ps.dxil", L"VfxSpriteOitPS", L"ps_6_0"},
     ProgramOutput{"particle_ps.dxil", L"ParticlePS", L"ps_6_0"},
-    ProgramOutput{"particle_cs.dxil", L"ParticleCS", L"cs_6_0"},
     ProgramOutput{"ribbon_update_cs.dxil", L"RibbonUpdateCS", L"cs_6_0"},
     ProgramOutput{"ribbon_args_cs.dxil", L"RibbonArgsCS", L"cs_6_0"},
     ProgramOutput{"ribbon_vs.dxil", L"RibbonVS", L"vs_6_0"},
@@ -129,6 +128,10 @@ constexpr std::array kStaticVisibilityPrograms{
 constexpr std::array kDepthPyramidPrograms{
     ProgramOutput{"depth_pyramid_init_cs.dxil", L"DepthPyramidInitCS", L"cs_6_0"},
     ProgramOutput{"depth_pyramid_reduce_cs.dxil", L"DepthPyramidReduceCS", L"cs_6_0"},
+};
+
+constexpr std::array kParticleSimulationPrograms{
+    ProgramOutput{"particle_cs.dxil", L"ParticleCS", L"cs_6_0"},
 };
 
 constexpr std::array kSkinCachePrograms{
@@ -182,7 +185,8 @@ std::span<const ShaderFamily> ShaderFamilies()
         ProgramOutput{"virtual_shadow_publish_cs.dxil", L"PublishCS", L"cs_6_0"},
         ProgramOutput{"virtual_shadow_clear_vs.dxil", L"ClearVS", L"vs_6_0"},
         ProgramOutput{"virtual_shadow_clear_ps.dxil", L"ClearPS", L"ps_6_0"},
-        ProgramOutput{"virtual_shadow_seed_ps.dxil", L"SeedPS", L"ps_6_0"}};
+        ProgramOutput{"virtual_shadow_seed_ps.dxil", L"SeedPS", L"ps_6_0"},
+        ProgramOutput{"virtual_shadow_dynamic_seed_ps.dxil", L"DynamicSeedPS", L"ps_6_0"}};
     static constexpr std::array volumetric_programs{
         ProgramOutput{"volumetric_density_cs.dxil", L"VolumetricDensityCS", L"cs_6_0"},
         ProgramOutput{"volumetric_hero_density_cs.dxil", L"VolumetricHeroDensityCS", L"cs_6_0"},
@@ -204,9 +208,7 @@ std::span<const ShaderFamily> ShaderFamilies()
         ProgramOutput{"ui_draw_vs.dxil", L"UiDrawVS", L"vs_6_0"},
         ProgramOutput{"ui_draw_ps.dxil", L"UiDrawPS", L"ps_6_0"}};
     static constexpr std::array terrain_pages{
-        ProgramOutput{"terrain_page_bake_color_cs.dxil", L"BakeColorCS", L"cs_6_0"},
-        ProgramOutput{"terrain_page_bake_base_cs.dxil", L"BakeBaseCS", L"cs_6_0"},
-        ProgramOutput{"terrain_page_bake_weight_cs.dxil", L"BakeWeightCS", L"cs_6_0"},
+        ProgramOutput{"terrain_page_bake_cs.dxil", L"BakeCS", L"cs_6_0"},
         ProgramOutput{"terrain_page_mip_cs.dxil", L"MipCS", L"cs_6_0"}};
     static constexpr std::array fullscreen_programs{
         ProgramOutput{"fullscreen_vs.dxil", L"FullScreenVS", L"vs_6_0"}};
@@ -215,6 +217,7 @@ std::span<const ShaderFamily> ShaderFamilies()
         ShaderFamily{"ui-draw", "Content/Shaders/ui_draw.hlsl", ui_draw_programs},
         ShaderFamily{"fullscreen", "Content/Shaders/project_hs.hlsl", fullscreen_programs},
         ShaderFamily{"project", "Content/Shaders/project_hs.hlsl", kProjectPrograms},
+        ShaderFamily{"particle-simulation", "Content/Shaders/particle_simulation.hlsl", kParticleSimulationPrograms},
         ShaderFamily{"geometry", "Content/Shaders/geometry.hlsl", kGeometryPrograms},
         ShaderFamily{"visibility", "Content/Shaders/visibility_buffer.hlsl", kVisibilityPrograms},
         ShaderFamily{"visibility-classification", "Content/Shaders/visibility_classification.hlsl", kVisibilityClassificationPrograms},
@@ -419,13 +422,14 @@ std::vector<ap::Input> DiscoverInputs(const ShaderFamily &family, const fs::path
     const auto dependency_directory = stage / "dependencies";
     ap::MakeDirectory(dependency_directory);
     std::set<std::string> logical_paths;
-    for (std::size_t index = 0; index < family.programs.size(); ++index)
+    // A family has one source and one set of defines. DXC's target profile can change its includes.
+    std::set<std::wstring_view> scanned_profiles;
+    for (const auto &program : family.programs)
     {
-        const auto &program = family.programs[index];
-        const auto dependency_file = dependency_directory /
-            (std::to_string(index) + ".d");
-        const auto diagnostics = dependency_directory /
-            (std::to_string(index) + ".diagnostics.txt");
+        if (!scanned_profiles.emplace(program.profile).second)
+            continue;
+        const auto dependency_file = dependency_directory / "inputs.d";
+        const auto diagnostics = dependency_directory / "diagnostics.txt";
         RunDependencyScan(dxc, source_root, stage, dependency_file, diagnostics,
                           family.source_relative, program.entry, program.profile);
         for (const auto &dependency : ParseDependencyFile(dependency_file))
@@ -437,6 +441,8 @@ std::vector<ap::Input> DiscoverInputs(const ShaderFamily &family, const fs::path
                logical == "Content/Shaders/light_list.hlsli" ||
                logical == "Content/Shaders/geometry.hlsli";
     });
+    if (logical_paths.contains("Content/Shaders/light_list.hlsli"))
+        logical_paths.insert("Content/Shaders/light_list_abi.hlsli");
     if (uses_shadow_closure)
     {
         logical_paths.insert("Content/Shaders/local_shadow.hlsli");
@@ -537,12 +543,12 @@ std::string ProductId(const ShaderFamily &family, const ProgramOutput &program)
     if (family.name == "terrain-page")
     {
         const std::wstring_view entry = program.entry;
-        if (entry == L"BakeColorCS") return "terrain/producer/bake_color_cs.dxil";
-        if (entry == L"BakeBaseCS") return "terrain/producer/bake_base_cs.dxil";
-        if (entry == L"BakeWeightCS") return "terrain/producer/bake_weight_cs.dxil";
+        if (entry == L"BakeCS") return "terrain/producer/bake_cs.dxil";
         if (entry == L"MipCS") return "terrain/producer/mip_cs.dxil";
         throw std::runtime_error("Unknown terrain page shader entry.");
     }
+    if (family.name == "local-probe-bake")
+        return "lighting/producer/" + std::string(program.filename);
     return "render/shader/" + std::string(program.filename);
 }
 
@@ -586,7 +592,7 @@ void Produce(const ShaderFamily &family, const fs::path &source_root,
     ap::ActionSpec spec;
     spec.action_id = "render.shader.runtime." + std::string(family.name);
     spec.recipe_id = "project-hs.render.runtime-shader/" + std::string(family.name);
-    spec.recipe_version = 1;
+    spec.recipe_version = family.name == "local-probe-bake" ? 2 : 1;
     spec.namespace_path = namespace_path;
 
     const auto result_path = build_root / "Actions" / namespace_path / "result.json";
@@ -605,7 +611,6 @@ void Produce(const ShaderFamily &family, const fs::path &source_root,
             spec.inputs = ResolveCachedInputs(cached_result->InputMetadata(), family, source_root, dxc);
             if (TryCurrentReceipt(*cached_result, family, spec, product_read_attempted))
             {
-                ap::TouchActionResult(result_path);
                 return;
             }
         }
@@ -622,7 +627,6 @@ void Produce(const ShaderFamily &family, const fs::path &source_root,
             {
                 if (TryCurrentReceipt(*cached_result, family, spec, product_read_attempted))
                 {
-                    ap::TouchActionResult(result_path);
                     ap::RemoveStage(stage);
                     return;
                 }

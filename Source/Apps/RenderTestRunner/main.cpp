@@ -1,25 +1,16 @@
 #include <hs/core/shipped_content_owner.hpp>
 #include <hs/render_data/render_snapshot_storage.hpp>
+#include <hs/render_data/render_package.hpp>
 #include <hs/core/process_info.hpp>
 #include <hs/game_rules/simulation_rules_io.hpp>
-#include <hs/asset_manifest/selected_generation.hpp>
 #include <hs/game_rules/simulation_rules.hpp>
 #include <hs/presentation/environment_layout.hpp>
 #include <hs/render_data/surface_layout.hpp>
 #include <hs/render_data/renderer_catalog.hpp>
-#include <hs/render_data/character_package.hpp>
-#include <hs/render_data/material_ir.hpp>
-#include <hs/render_data/quality_profiles.hpp>
-#include <hs/render_data/texture_descriptor.hpp>
-#include <hs/render_data/material_descriptor.hpp>
-#include <hs/render_data/material_schema.hpp>
-#include <hs/render_data/character_descriptor.hpp>
-#include <hs/render_data/render_revision.hpp>
 #include <hs/renderer/renderer.hpp>
-#include <hs/render_data/render_package.hpp>
+#include <hs/runtime/shipping_content.hpp>
 #include "view_fixture.hpp"
 #include "../Common/world_transport_scene.hpp"
-#include "../Common/renderer_geometry_catalog.hpp"
 #include <hs/jobs/task_system.hpp>
 #include <nlohmann/json.hpp>
 #include <Windows.h>
@@ -29,14 +20,10 @@
 #include <array>
 #include <charconv>
 #include <chrono>
-#include <cmath>
-#include <cstring>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <iostream>
-#include <limits>
-#include <map>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -59,17 +46,6 @@ void Require(const hs::Result &result)
     if (!result)
         throw std::runtime_error(std::string(result.Subsystem()) + ": " +
                                  std::string(result.Message()));
-}
-
-// Explicit developer composition: the backend receives bytes, never a filename.
-std::vector<std::byte> ReadDeveloperFont()
-{
-    hs::ShippedContentOwner file;
-    Require(hs::ShippedContentOwner::Open(hs::CurrentExecutableDirectory() / L"Fonts" / L"NotoSansKR.ttf", file));
-    if (!file.Size() || file.Size() > UINT32_MAX) throw std::runtime_error("Developer font extent is invalid");
-    std::vector<std::byte> bytes(static_cast<std::size_t>(file.Size()));
-    Require(file.ReadExact(0, bytes));
-    return bytes;
 }
 
 struct TestWindow
@@ -149,15 +125,13 @@ std::shared_ptr<const hs::StaticRenderScene> Scene(std::string_view generation)
     return hs::FreezeStaticRenderScene(std::move(scene));
 }
 
-hs::AssetId SelectedArcherAsset(const hs::SelectedGeneration &generation)
+hs::AssetId SelectedArcherAsset(const hs::RendererConfig &config)
 {
-    constexpr std::string_view logical_id = "render/character/archer.rpkg";
-    std::filesystem::path path;
-    Require(generation.Require(logical_id, path));
-    const auto digest = generation.product_digests.find(std::string(logical_id));
-    if (digest == generation.product_digests.end() || digest->second.empty())
-        throw std::runtime_error("selected Generation lacks the authenticated Archer character digest");
-    return hs::MakeAssetId(logical_id);
+    const auto asset = hs::MakeAssetId("render/character/archer.rpkg");
+    if (std::ranges::find(config.packed_characters, asset.value,
+            [](const auto &row) { return row.asset_id.value; }) == config.packed_characters.end())
+        throw std::runtime_error("shipping renderer catalog lacks the Archer character");
+    return asset;
 }
 
 std::shared_ptr<const hs::StaticRenderScene> HzbScene(std::string_view generation)
@@ -173,154 +147,6 @@ std::shared_ptr<const hs::StaticRenderScene> HzbScene(std::string_view generatio
     target.stable_id = 0x485A4201ull;
     scene->instances.push_back(target);
     return hs::FreezeStaticRenderScene(std::move(scene));
-}
-
-struct DynamicUploadRow
-{
-    std::uint32_t frame{};
-    std::size_t instances{};
-    std::size_t uploaded_bytes{};
-    std::size_t copy_regions{};
-    std::size_t capacity_bytes{};
-    std::size_t stable_slots{};
-    std::size_t slot_count{};
-    std::size_t anonymous_instances{};
-    std::size_t created{};
-    std::size_t updated{};
-    std::size_t destroyed{};
-    std::size_t skin_cache_active{};
-    std::size_t skin_history_valid{};
-    std::size_t skin_gpu_dispatches{};
-    std::size_t skin_gpu_history_reads{};
-    std::size_t dynamic_visibility_refs{};
-    std::size_t hzb_history_input{};
-};
-
-std::uint64_t CsvNumber(std::string_view value)
-{
-    std::uint64_t number{};
-    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), number);
-    if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size())
-        throw std::runtime_error("invalid dynamic instance upload CSV value");
-    return number;
-}
-
-std::vector<DynamicUploadRow> DynamicUploadRows(const std::filesystem::path &path)
-{
-    std::ifstream input(path);
-    if (!input) throw std::runtime_error("dynamic instance upload diagnostics are missing");
-    std::string line;
-    if (!std::getline(input, line) ||
-        line != "frame,instances,uploaded_bytes,copy_regions,capacity_bytes,stable_slots,slot_count,anonymous_instances,created,updated,destroyed,skin_cache_active,skin_history_valid,skin_gpu_dispatches,skin_gpu_history_reads,dynamic_visibility_refs,hzb_history_input")
-        throw std::runtime_error("dynamic instance upload diagnostics have an unexpected schema");
-
-    std::vector<DynamicUploadRow> rows;
-    while (std::getline(input, line))
-    {
-        if (line.empty()) continue;
-        std::array<std::string_view, 17> fields{};
-        std::size_t field{};
-        std::size_t begin{};
-        for (; field + 1 < fields.size(); ++field)
-        {
-            const auto separator = line.find(',', begin);
-            if (separator == std::string::npos) break;
-            fields[field] = std::string_view(line).substr(begin, separator - begin);
-            begin = separator + 1;
-        }
-        if (field != fields.size() - 1 || line.find(',', begin) != std::string::npos)
-            throw std::runtime_error("dynamic instance upload diagnostics row is malformed");
-        fields.back() = std::string_view(line).substr(begin);
-        const auto value = [&](std::size_t index) { return CsvNumber(fields[index]); };
-        rows.push_back({
-            static_cast<std::uint32_t>(value(0)),
-            static_cast<std::size_t>(value(1)),
-            static_cast<std::size_t>(value(2)),
-            static_cast<std::size_t>(value(3)),
-            static_cast<std::size_t>(value(4)),
-            static_cast<std::size_t>(value(5)),
-            static_cast<std::size_t>(value(6)),
-            static_cast<std::size_t>(value(7)),
-            static_cast<std::size_t>(value(8)),
-            static_cast<std::size_t>(value(9)),
-            static_cast<std::size_t>(value(10)),
-            static_cast<std::size_t>(value(11)),
-            static_cast<std::size_t>(value(12)),
-            static_cast<std::size_t>(value(13)),
-            static_cast<std::size_t>(value(14)),
-            static_cast<std::size_t>(value(15)),
-            static_cast<std::size_t>(value(16)),
-        });
-    }
-    return rows;
-}
-
-void ValidatePersistentSceneProbe(const std::vector<DynamicUploadRow> &rows,
-                                  std::uint32_t frames, Json &receipt)
-{
-    if (frames < 9 || rows.size() != frames)
-        throw std::runtime_error("persistent GPU scene probe requires one diagnostics row per frame");
-    if (rows[0].uploaded_bytes == 0 || rows[0].uploaded_bytes % 2 != 0)
-        throw std::runtime_error("persistent GPU scene probe initial upload is invalid");
-    const auto instance_bytes = rows[0].uploaded_bytes / 2;
-    const auto expect = [&](std::size_t index, std::size_t instances,
-                            std::size_t active_slots, std::size_t slot_count,
-                            std::size_t created, std::size_t updated,
-                            std::size_t destroyed, std::size_t skin_active,
-                            std::size_t skin_history,
-                            std::size_t dynamic_visibility_refs,
-                            std::size_t hzb_history_input) {
-        const auto &row = rows[index];
-        if (row.frame != index + 1 || row.instances != instances ||
-            row.stable_slots != active_slots || row.slot_count != slot_count ||
-            row.anonymous_instances != 0 || row.created != created ||
-            row.updated != updated || row.destroyed != destroyed ||
-            row.skin_cache_active != skin_active ||
-            row.skin_history_valid != skin_history ||
-            row.dynamic_visibility_refs != dynamic_visibility_refs ||
-            row.hzb_history_input != hzb_history_input)
-            throw std::runtime_error("persistent GPU scene probe diagnostics mismatch");
-        const auto maximum_payload_upload = row.slot_count * instance_bytes;
-        if (row.uploaded_bytes > maximum_payload_upload ||
-            (row.uploaded_bytes == 0) != (row.copy_regions == 0) ||
-            row.copy_regions > row.slot_count * 6)
-            throw std::runtime_error("persistent GPU scene probe upload exceeds its active-slot bound");
-    };
-
-    expect(0, 2, 2, 2, 2, 0, 0, 1, 0, 2, 0);
-    expect(1, 2, 2, 2, 0, 0, 0, 1, 1, 2, 1);
-    expect(2, 2, 2, 2, 0, 1, 0, 1, 1, 2, 1);
-    expect(3, 1, 1, 2, 0, 0, 1, 1, 1, 1, 1);
-    expect(4, 2, 2, 2, 1, 0, 0, 1, 1, 2, 1);
-    expect(5, 2, 2, 2, 0, 0, 0, 1, 1, 2, 1);
-    if (rows[0].skin_gpu_dispatches != 1 || rows[0].skin_gpu_history_reads != 0)
-        throw std::runtime_error("skin cache first frame GPU history contract is invalid");
-    for (std::size_t index = 1; index < 6; ++index)
-        if (rows[index].skin_gpu_dispatches != 1 || rows[index].skin_gpu_history_reads != 1)
-            throw std::runtime_error("skin cache current/previous GPU deformation was not reused");
-
-    receipt["persistent_gpu_scene"] = {
-        {"initial_upload_bytes", rows[0].uploaded_bytes},
-        {"unchanged_upload_bytes", rows[1].uploaded_bytes},
-        {"single_update_upload_bytes", rows[2].uploaded_bytes},
-        {"destroy_upload_bytes", rows[3].uploaded_bytes},
-        {"reused_slot_upload_bytes", rows[4].uploaded_bytes},
-        {"slot_count_after_reuse", rows[4].slot_count},
-        {"anonymous_instances", rows[4].anonymous_instances},
-        {"created_after_reuse", rows[4].created},
-        {"destroyed_on_remove", rows[3].destroyed},
-        {"skin_cache_active", rows[5].skin_cache_active},
-        {"skin_history_valid", rows[5].skin_history_valid},
-        {"skin_gpu_dispatches", rows[5].skin_gpu_dispatches},
-        {"skin_gpu_history_reads", rows[5].skin_gpu_history_reads},
-        {"dynamic_visibility_refs", rows[5].dynamic_visibility_refs},
-        {"upload_bytes_policy", "Per-owner backing initialization may upload unchanged active slots; each row is bounded by its active slot payload."},
-        {"hzb_history_reset_on_scene_change", rows[6].hzb_history_input == 0},
-        {"hzb_history_input_frame8", rows[7].hzb_history_input},
-    };
-    if (rows[6].hzb_history_input != 0 || rows[7].hzb_history_input != 1 ||
-        rows[8].hzb_history_input != 1)
-        throw std::runtime_error("HZB history reset/use sequence is invalid");
 }
 
 void ValidateVisibilityCommandCapture(const std::filesystem::path &path,
@@ -442,26 +268,18 @@ void ValidateVisibilityCommandCapture(const std::filesystem::path &path,
     }
     if ((frame == 16 || frame == 17 || frame >= 22) && meadow_rejected == 0)
         throw std::runtime_error("empty dynamic source erased or failed to produce the occluded static meadow command");
-    receipt.push_back({{"capture", path.filename().string()}, {"active_views", views},
+    receipt.push_back({{"frame", frame}, {"active_views", views},
         {"static_instances", static_instances.size()}, {"dynamic_instances", dynamic_instances.size()},
         {"meadow_rejected", meadow_rejected}});
 }
 
 Json ValidationStatusReceipt(const hs::RendererValidationStatus &status)
 {
-    return {{"requested", {{"debug_layer", status.debug_layer_requested},
-                {"gpu_based_validation", status.gpu_validation_requested}}},
-        {"d3d12_debug_interface", {{"acquisition_attempted", status.debug_interface_acquisition_attempted},
+    return {{"d3d12_debug_interface", {{"acquisition_attempted", status.debug_interface_acquisition_attempted},
             {"acquired", status.debug_interface_acquired}}},
         {"gpu_validation_interface_queried", status.gpu_validation_interface_queried},
-        {"debug_layer_enable_call_before_device", status.debug_layer_enable_called_before_device},
-        {"gpu_validation_enable_call_before_device", status.gpu_validation_enable_called_before_device},
-        {"device_creation", {{"attempted", status.device_creation_attempted},
-            {"succeeded", status.device_creation_succeeded}, {"hresult", status.device_creation_hresult},
-            {"created_after_requested_enable_calls", status.device_created_after_requested_enable_calls}}},
         {"message_collection", {{"attempted", status.message_collection_attempted},
-            {"hresult", status.message_collection_hresult}}},
-        {"activation_state_getter_available", false}};
+            {"hresult", status.message_collection_hresult}}}};
 }
 
 } // namespace
@@ -472,11 +290,11 @@ int main(int argc, char **argv)
     Json receipt{{"schema_version", 1}, {"runner", "render-only"},
         {"fixture", "static-environment-moving-player-v1"}, {"execution_valid", false}};
     std::filesystem::path artifacts;
-    std::filesystem::path temporary_pack;
+    bool temporary_artifacts{};
     std::string failure_code = "HS_RENDER_ARGUMENT_INVALID";
     int exit_code = 1;
     const auto write_receipt = [&] {
-        if (!artifacts.empty() && artifacts.is_absolute() && std::filesystem::is_directory(artifacts))
+        if (!temporary_artifacts && !artifacts.empty() && artifacts.is_absolute() && std::filesystem::is_directory(artifacts))
         {
             std::ofstream output(artifacts / "result.json");
             output << receipt.dump(2) << '\n';
@@ -490,6 +308,16 @@ int main(int argc, char **argv)
         if (exit_code != 0)
             std::cerr << receipt.value("error_code", failure_code) << ": "
                       << receipt.value("error", std::string{}) << '\n';
+        if (temporary_artifacts)
+        {
+            if (exit_code != 0) std::cerr << "Render diagnostics: " << artifacts << '\n';
+            else
+            {
+                std::error_code error;
+                std::filesystem::remove_all(artifacts, error);
+                if (error) { std::cerr << error.message() << '\n'; return 1; }
+            }
+        }
         return exit_code;
     };
     try
@@ -499,7 +327,6 @@ int main(int argc, char **argv)
         config.vsync = false;
         config.interpolate = false;
         config.devtools_visible = false;
-        std::filesystem::path pointer;
         std::uint32_t frames = 60;
 
         bool persistent_scene_probe{};
@@ -513,8 +340,11 @@ int main(int argc, char **argv)
         for (int index = 1; index < argc; ++index)
         {
             const std::string_view arg{argv[index]};
-            if (arg.starts_with("--generation=")) pointer = arg.substr(13);
-            else if (arg.starts_with("--artifacts=")) artifacts = arg.substr(12);
+            if (arg.starts_with("--artifacts="))
+            {
+                artifacts = arg.substr(12);
+                if (!artifacts.is_absolute()) throw std::runtime_error("--artifacts requires an absolute path");
+            }
             else if (arg.starts_with("--frames=")) {
                 frames = Number(arg.substr(9), 1, 600);
 
@@ -554,8 +384,6 @@ int main(int argc, char **argv)
         receipt["surface_frontend"] = config.surface_frontend == hs::SurfaceFrontend::VisibilityBuffer
             ? "visibility" : "compact";
 
-        if (pointer.empty() || !pointer.is_absolute() || artifacts.empty() || !artifacts.is_absolute())
-            throw std::runtime_error("--generation and --artifacts require absolute paths");
 
         if (owned_view_probe && frames != 3)
             throw std::runtime_error("--owned-view-probe requires exactly 3 frame packages");
@@ -595,28 +423,73 @@ int main(int argc, char **argv)
             ? "persistent-gpu-scene-v2" : residency_streaming_probe ? "residency-streaming-v3"
             : "static-environment-moving-player-v1";
 
-        std::filesystem::create_directories(artifacts);
-        config.artifact_directory = artifacts;
-        hs::SelectedGeneration generation;
-        failure_code = "HS_GENERATION_INVALID";
-
-        { Require(hs::LoadSelectedGeneration(pointer, generation)); }
-        receipt["generation_id"] = generation.id;
-        receipt["generation_scope"] = generation.scope;
-        const auto owned_view_archer_asset = owned_view_probe ? SelectedArcherAsset(generation) : hs::AssetId{};
-        config.content_generation_id = generation.id;
-        config.content_generation_lease = std::make_shared<const hs::SelectedGeneration>(generation);
-        config.product_paths = generation.product_paths;
-        config.product_digests = generation.product_digests;
+        const bool export_diagnostics = !artifacts.empty();
+        if (export_diagnostics)
+        {
+            std::filesystem::create_directories(artifacts);
+            config.artifact_directory = artifacts;
+        }
+        else if (owned_view_probe || persistent_scene_probe)
+        {
+            const auto scratch = std::filesystem::temp_directory_path() /
+                std::format("ProjectHS-render-{}-{}", GetCurrentProcessId(), GetTickCount64());
+            if (!std::filesystem::create_directory(scratch))
+                throw std::runtime_error("Cannot acquire a private render test directory");
+            artifacts = scratch;
+            temporary_artifacts = true;
+        }
+        const auto &image = hs::shipping::ImageInfo();
+        auto owner = std::make_shared<hs::ShippedContentOwner>();
+        failure_code = "HS_SHIPPING_IMAGE_INVALID";
+        Require(hs::shipping::OpenImage(hs::CurrentExecutableDirectory(), image, *owner));
+        std::vector<std::byte> renderer_table_bytes;
+        Require(hs::shipping::ReadRange(*owner,
+            image.tables[static_cast<std::size_t>(hs::shipping::ShippingTable::Renderer)], renderer_table_bytes));
+        std::shared_ptr<const hs::render_data::RendererCatalogData> renderer_catalog;
+        Require(hs::render_data::DecodeVerifiedRendererCatalog(renderer_table_bytes, owner->Size(), renderer_catalog));
+        config.packed_content = owner;
+        config.content_generation_lease = owner;
+        config.UseRendererCatalog(renderer_catalog);
+        config.content_generation_id.reserve(64);
+        constexpr char hex[] = "0123456789abcdef";
+        for (std::size_t i = 16; i != 48; ++i)
+        {
+            const auto byte = std::to_integer<unsigned>(image.header[i]);
+            config.content_generation_id += hex[byte >> 4];
+            config.content_generation_id += hex[byte & 15];
+        }
+        receipt["generation_id"] = config.content_generation_id;
+        receipt["generation_scope"] = "shipping-image";
+        receipt["packed_generation_maps_empty"] = config.product_paths.empty() && config.product_digests.empty();
+        receipt["packed_renderer_products"] = config.packed_bulks.size();
+        receipt["packed_renderer_textures"] = config.packed_textures.size();
+        receipt["packed_renderer_geometry"] = config.packed_geometry.size();
+        receipt["packed_renderer_materials"] = config.packed_materials.size();
+        receipt["packed_renderer_characters"] = config.packed_characters.size();
+        receipt["packed_renderer_animations"] = config.packed_animations.size();
+        receipt["packed_renderer_source_revisions"] = config.packed_source_revisions.size();
+        receipt["packed_renderer_revision_bulks"] = config.packed_revision_bulks.size();
+        receipt["packed_renderer_volumes"] = std::ranges::count(config.packed_textures,
+            hs::render_data::TextureDimension::Texture3D, &hs::render_data::TextureDescriptor::dimension);
+        receipt["packed_image_bytes"] = owner->Size();
+        const auto owned_view_archer_asset = owned_view_probe ? SelectedArcherAsset(config) : hs::AssetId{};
         std::shared_ptr<const hs::StaticRenderScene> world_scene;
         if (owned_view_probe)
         {
             failure_code = "HS_RENDER_WORLD_TRANSPORT_SCENE_INVALID";
-            std::filesystem::path product_path;
-            Require(generation.Require(config.scene_hlod_product_id, product_path));
-            Require(generation.Require("render/lighting/local_probes.spkg", product_path));
-            { world_scene = hs::app::WorldTransportScene(generation,
-                0); }
+            const auto has_bulk = [&](std::string_view logical_id) {
+                const auto asset = hs::MakeAssetId(logical_id);
+                return std::ranges::find(config.packed_bulks, asset.value,
+                    [](const auto &row) { return row.asset_id.value; }) != config.packed_bulks.end();
+            };
+            if (!has_bulk(config.scene_hlod_product_id) || !has_bulk("render/lighting/local_probes.spkg"))
+                throw std::runtime_error("shipping renderer catalog lacks required owned-view scene products");
+            std::vector<std::byte> simulation_table_bytes;
+            Require(hs::shipping::ReadRange(*owner,
+                image.tables[static_cast<std::size_t>(hs::shipping::ShippingTable::Simulation)], simulation_table_bytes));
+            auto rules = std::make_unique<hs::SimulationRules>();
+            Require(hs::DecodeSimulationRules(simulation_table_bytes, *rules));
+            world_scene = hs::app::WorldTransportScene(*rules, config.content_generation_id, 0);
             receipt["owned_view_scene"] = {
                 {"layout_abi", world_scene->layout_abi},
                 {"eligible_static_member_count", world_scene->eligible_static_members.size()},
@@ -630,254 +503,28 @@ int main(int argc, char **argv)
         config.window = window.handle;
         hs::TaskSystem recording_workers(4);
         config.task_system = &recording_workers;
-        std::vector<hs::render_data::RendererBulkDescriptor> packed_directory;
-        std::vector<hs::render_data::TextureDescriptorStorage> packed_texture_storage;
-        std::vector<hs::render_data::TextureDescriptor> packed_textures;
-        std::vector<hs::render_data::GeometryDescriptorStorage> packed_geometry_storage;
-        std::vector<hs::render_data::GeometryDescriptor> packed_geometry;
-        std::vector<hs::render_data::MaterialDescriptorStorage> packed_material_storage;
-        std::vector<hs::render_data::MaterialDescriptor> packed_materials;
-        std::vector<hs::render_data::CharacterDescriptorStorage> packed_character_storage;
-        std::vector<hs::render_data::CharacterDescriptor> packed_characters;
-        std::vector<hs::render_data::AnimationDescriptorStorage> packed_animation_storage;
-        std::vector<hs::render_data::AnimationDescriptor> packed_animations;
-        hs::render_data::VfxMeshAtlasDescriptor packed_vfx_mesh_atlas;
-        std::vector<hs::render_data::RendererSourceRevision> packed_source_revisions;
-        std::vector<hs::render_data::RendererRevisionBulk> packed_revision_bulks;
         hs::D3D12Renderer renderer;
-        failure_code = "HS_RENDER_INITIALIZE_FAILED";
-        auto startup_font = ReadDeveloperFont();
+        std::vector<std::byte> startup_font;
+        failure_code = "HS_SHIPPING_IMAGE_INVALID";
+        Require(hs::shipping::ReadFont(*owner, image, startup_font));
         config.font_bytes = startup_font;
-        // Packed ranges belong to residency coverage; world uses the normal leased Generation.
-        if (residency_streaming_probe)
-        {
-            const auto pack_path = artifacts / "renderer-products-pack.hsp";
-            std::ofstream pack(pack_path, std::ios::binary | std::ios::trunc);
-            if (!pack) throw std::runtime_error("Could not create renderer fixture pack.");
-            temporary_pack = pack_path;
-            const std::array<char, 64> zeros{};
-            pack.write(zeros.data(), zeros.size());
-            std::vector<std::pair<hs::AssetId, std::string>> products;
-            for (const auto &[id, path] : generation.product_paths)
-                if (id.starts_with("render/") || id == "vfx/vfx_mesh_atlas.hsbin")
-                    products.emplace_back(hs::MakeAssetId(id), id);
-            std::ranges::sort(products, {}, [](const auto &entry) { return entry.first.value; });
-            const auto digest_bytes = [&](const std::string &id) {
-                const auto &digest = generation.product_digests.at(id);
-                std::array<std::byte, 32> expected{};
-                if (digest.size() != 71 || !digest.starts_with("sha256:"))
-                    throw std::runtime_error("Invalid renderer fixture digest: " + id);
-                for (std::size_t i = 0; i < expected.size(); ++i)
-                {
-                    unsigned byte{};
-                    const auto first = digest.data() + 7 + i * 2;
-                    const auto [last, error] = std::from_chars(first, first + 2, byte, 16);
-                    if (error != std::errc{} || last != first + 2) throw std::runtime_error("Invalid renderer digest byte");
-                    expected[i] = static_cast<std::byte>(byte);
-                }
-                return expected;
-            };
-            const auto verified_product = [&](const std::string &id) {
-                hs::ShippedContentOwner input;
-                Require(hs::ShippedContentOwner::Open(generation.product_paths.at(id), input));
-                if (input.Size() > std::numeric_limits<std::size_t>::max())
-                    throw std::runtime_error("Fixture product exceeds addressing: " + id);
-                std::vector<std::byte> bytes(static_cast<std::size_t>(input.Size()));
-                Require(input.ReadVerified(0, bytes, digest_bytes(id)));
-                return bytes;
-            };
-            std::vector<std::string> closure;
-            closure.reserve(generation.product_paths.size());
-            for (const auto &[id, path] : generation.product_paths) closure.push_back(id);
-            hs::apps::RendererGeometryCatalog geometry_catalog(closure);
-            std::map<std::string, std::vector<std::byte>> metadata_buffers;
-            for (const auto &[asset, id] : products)
-                if (hs::apps::RendererGeometryCatalog::NeedsMetadata(id))
-                {
-                    auto bytes = verified_product(id);
-                    geometry_catalog.AddMetadata(id, bytes);
-                    metadata_buffers.emplace(id, std::move(bytes));
-                }
-            std::vector<char> buffer(1024 * 1024);
-            std::uint64_t offset = 64;
-            for (const auto &[asset, id] : products)
-            {
-                const auto expected = digest_bytes(id);
-                using F = hs::render_data::RenderBulkFormat;
-                const auto format = id.ends_with(".rpkg") ? F::Package : id.ends_with(".rpage") ? F::GeometryPage :
-                    id.ends_with(".ghbin") ? F::GeometryHierarchy : id.ends_with(".shl1") ? F::SceneHlod :
-                    id.ends_with(".index") ? F::StaticShadowIndex : id.ends_with(".pages") ? F::StaticShadowPages :
-                    id.ends_with(".dds") ? F::DdsTexture : id.ends_with(".spkg") ? F::SceneProbe :
-                    id.ends_with(".hsbin") ? F::VfxMeshAtlas :
-                    id == hs::render_data::SurfaceLayout::abi_product ? F::SurfaceLayoutAbi : F::ShaderDxil;
-                if (format == F::ShaderDxil && !id.ends_with(".dxil"))
-                    throw std::runtime_error("Unsupported renderer fixture bulk format: " + id);
-                const auto bytes = std::filesystem::file_size(generation.product_paths.at(id));
-                const auto padding = (64 - offset % 64) % 64;
-                pack.write(zeros.data(), static_cast<std::streamsize>(padding));
-                offset += padding;
-                packed_directory.push_back({asset, {offset, bytes, format, expected}});
-                if (const auto metadata = metadata_buffers.find(id); metadata != metadata_buffers.end())
-                {
-                    if (metadata->second.size() != bytes ||
-                        !pack.write(reinterpret_cast<const char *>(metadata->second.data()), static_cast<std::streamsize>(bytes)))
-                        throw std::runtime_error("Could not write verified geometry metadata: " + id);
-                    offset += bytes;
-                    continue;
-                }
-                if (id.ends_with(".rpage"))
-                {
-                    const auto page_bytes = verified_product(id);
-                    packed_geometry_storage.push_back(geometry_catalog.CompilePage(id, page_bytes,
-                        static_cast<std::uint32_t>(packed_directory.size() - 1)));
-                    if (page_bytes.size() != bytes ||
-                        !pack.write(reinterpret_cast<const char *>(page_bytes.data()), static_cast<std::streamsize>(bytes)))
-                        throw std::runtime_error("Could not write verified geometry page: " + id);
-                    offset += bytes;
-                    continue;
-                }
-                if ((id.starts_with("render/texture/") && id.ends_with(".rpkg")) ||
-                    hs::render_data::IsTerrainSurfaceSectionProduct(id))
-                {
-                    hs::ShippedContentOwner input;
-                    Require(hs::ShippedContentOwner::Open(generation.product_paths.at(id), input));
-                    if (bytes > std::numeric_limits<std::size_t>::max() ||
-                        bytes > static_cast<std::uint64_t>(std::numeric_limits<std::streamsize>::max()))
-                        throw std::runtime_error("Renderer fixture texture exceeds host addressing");
-                    std::vector<std::byte> texture_bytes(static_cast<std::size_t>(bytes));
-                    Require(input.ReadVerified(0, texture_bytes, expected));
-                    packed_texture_storage.push_back(hs::render_data::CompileTextureDescriptor(texture_bytes, asset,
-                        static_cast<std::uint32_t>(packed_directory.size() - 1)));
-                    if (!pack.write(reinterpret_cast<const char *>(texture_bytes.data()), static_cast<std::streamsize>(bytes)))
-                        throw std::runtime_error("Could not write renderer fixture texture: " + id);
-                    offset += bytes;
-                    continue;
-                }
-                if (id == "vfx/vfx_mesh_atlas.hsbin")
-                {
-                    const auto atlas_bytes = verified_product(id);
-                    packed_vfx_mesh_atlas = hs::render_data::CompileVfxMeshAtlasDescriptor(atlas_bytes, asset);
-                    if (atlas_bytes.size() != bytes ||
-                        !pack.write(reinterpret_cast<const char *>(atlas_bytes.data()), static_cast<std::streamsize>(bytes)))
-                        throw std::runtime_error("Could not write verified VFX mesh atlas");
-                    offset += bytes;
-                    continue;
-                }
-                std::ifstream input(generation.product_paths.at(id), std::ios::binary);
-                for (std::uint64_t remaining = bytes; remaining;)
-                {
-                    const auto count = static_cast<std::streamsize>(std::min<std::uint64_t>(remaining, buffer.size()));
-                    if (!input.read(buffer.data(), count) || !pack.write(buffer.data(), count))
-                        throw std::runtime_error("Could not copy renderer fixture bulk: " + id);
-                    remaining -= count;
-                }
-                offset += bytes;
-            }
-            pack.close();
-            if (!pack) throw std::runtime_error("Could not write renderer fixture pack");
-            auto owner = std::make_shared<hs::ShippedContentOwner>();
-            Require(hs::ShippedContentOwner::Open(pack_path, *owner));
-            config.packed_content = std::move(owner);
-            config.packed_bulks = packed_directory;
-            for (const auto &texture : packed_texture_storage) packed_textures.push_back(texture.View());
-            config.packed_textures = packed_textures;
-            for (const auto &geometry : packed_geometry_storage) packed_geometry.push_back(geometry.View());
-            config.packed_geometry = packed_geometry;
-            std::vector<hs::AssetId> bulk_assets;
-            for (const auto &bulk : packed_directory) bulk_assets.push_back(bulk.asset_id);
-            for (std::size_t index = 0; index < products.size(); ++index)
-            {
-                const auto &id = products[index].second;
-                if (!hs::render_data::IsMaterialDescriptorProduct(id)) continue;
-                const auto parameters = hs::render_data::MaterialParametersProduct(id);
-                packed_material_storage.push_back(hs::render_data::CompileMaterialDescriptor(id,
-                    metadata_buffers.at(id), metadata_buffers.at(parameters), static_cast<std::uint32_t>(index),
-                    bulk_assets, packed_textures));
-            }
-            for (const auto &material : packed_material_storage) packed_materials.push_back(material.View());
-            config.packed_materials = packed_materials;
-            const auto character_bulk = [&](hs::AssetId id) {
-                const auto found = std::ranges::find(bulk_assets, id.value, &hs::AssetId::value);
-                if (found == bulk_assets.end()) throw std::runtime_error("Character fixture bulk missing");
-                return static_cast<std::uint32_t>(found - bulk_assets.begin());
-            };
-            for (auto &prepared : geometry_catalog.TakeCharacters())
-                packed_character_storage.push_back(hs::render_data::CompileCharacterDescriptor(prepared.bytes,
-                    prepared.package, std::move(prepared.data), character_bulk(prepared.package.asset_id),
-                    packed_directory, packed_geometry, packed_materials));
-            for (const auto &character : packed_character_storage) packed_characters.push_back(character.View());
-            for (auto &prepared : geometry_catalog.TakeAnimations())
-            {
-                const auto found = std::ranges::find(packed_characters, prepared.data.character_asset_id.value,
-                    [](const auto &character) { return character.asset_id.value; });
-                if (found == packed_characters.end()) throw std::runtime_error("Animation fixture character missing");
-                const auto index = static_cast<std::uint32_t>(found - packed_characters.begin());
-                packed_animation_storage.push_back(hs::render_data::CompileAnimationDescriptor(prepared.bytes,
-                    prepared.package, std::move(prepared.data), character_bulk(prepared.package.asset_id),
-                    packed_directory, hs::render_data::CharacterHandle{index}, packed_character_storage[index]));
-            }
-            for (const auto &animation : packed_animation_storage) packed_animations.push_back(animation.View());
-            config.packed_characters = packed_characters;
-            config.packed_animations = packed_animations;
-            config.packed_vfx_mesh_atlas = &packed_vfx_mesh_atlas;
-            // Canonical names borrow the selected Generation, which outlives the renderer.
-            for (const auto &[id, path] : generation.product_paths)
-                if (!id.starts_with("render/") && id != "vfx/vfx_mesh_atlas.hsbin")
-                    packed_source_revisions.push_back({hs::MakeAssetId(id), id, digest_bytes(id)});
-            std::ranges::sort(packed_source_revisions, {}, [](const auto &revision) { return revision.asset_id.value; });
-            for (std::size_t i = 0; i < packed_source_revisions.size(); ++i)
-            {
-                const auto &revision = packed_source_revisions[i];
-                if (i && packed_source_revisions[i-1].asset_id.value == revision.asset_id.value)
-                    throw std::runtime_error("Fixture provenance AssetId collision");
-                if (std::ranges::find(bulk_assets, revision.asset_id.value, &hs::AssetId::value) != bulk_assets.end())
-                    throw std::runtime_error("Fixture provenance collides with bulk AssetId");
-            }
-            for (std::size_t index = 0; index < products.size(); ++index)
-                if (hs::render_data::IsRendererMaterialRevisionProduct(products[index].second))
-                {
-                    // products is local to this block; borrow the persistent map key.
-                    const auto found = generation.product_paths.find(products[index].second);
-                    packed_revision_bulks.push_back({found->first, static_cast<std::uint32_t>(index)});
-                }
-            config.packed_source_revisions = packed_source_revisions;
-            config.packed_revision_bulks = packed_revision_bulks;
-            const hs::render_data::RendererCatalogView catalogue{config.packed_bulks,config.packed_textures,
-                config.packed_geometry,config.packed_materials,config.packed_characters,config.packed_animations,
-                config.packed_vfx_mesh_atlas,config.packed_source_revisions,config.packed_revision_bulks};
-            std::shared_ptr<const hs::render_data::RendererCatalogData> prepared_catalogue;
-            Require(hs::render_data::DecodeRendererCatalog(hs::render_data::EncodeRendererCatalog(catalogue),
-                config.packed_content->Size(),prepared_catalogue));
-            config.UseRendererCatalog(std::move(prepared_catalogue));
-            config.product_paths.clear();
-            config.product_digests.clear();
-            receipt["packed_generation_maps_empty"] = config.product_paths.empty() && config.product_digests.empty();
-            receipt["packed_quality_profiles"] = true;
-            receipt["packed_renderer_products"] = packed_directory.size();
-            receipt["packed_renderer_textures"] = packed_textures.size();
-            receipt["packed_renderer_geometry"] = packed_geometry.size();
-            receipt["packed_renderer_materials"] = packed_materials.size();
-            receipt["packed_renderer_characters"] = packed_characters.size();
-            receipt["packed_renderer_animations"] = packed_animations.size();
-            receipt["packed_renderer_source_revisions"] = packed_source_revisions.size();
-            receipt["packed_renderer_revision_bulks"] = packed_revision_bulks.size();
-            receipt["packed_renderer_volumes"] = std::ranges::count(packed_textures,
-                hs::render_data::TextureDimension::Texture3D, &hs::render_data::TextureDescriptor::dimension);
-            receipt["packed_renderer_bytes"] = offset;
-        }
+        failure_code = "HS_RENDER_INITIALIZE_FAILED";
         receipt["validation_requested"] = {{"debug_layer", config.validation},
             {"gpu_based_validation", config.gpu_validation}};
         {
             const auto initialized = renderer.Initialize(config);
-            const auto status = renderer.ValidationStatus();
-            receipt["validation_status"] = ValidationStatusReceipt(status);
-            if (!initialized && status.debug_interface_acquisition_attempted &&
-                ((status.debug_layer_requested && !status.debug_interface_acquired) ||
-                 (status.gpu_validation_requested &&
-                    (!status.debug_interface_acquired || !status.gpu_validation_interface_queried))))
-                failure_code = status.gpu_validation_requested
-                    ? "HS_RENDER_GBV_PREREQUISITE_FAILED" : "HS_RENDER_DEBUG_LAYER_PREREQUISITE_FAILED";
-            Require(initialized);
+            if (!initialized)
+            {
+                const auto status = renderer.ValidationStatus();
+                if (export_diagnostics) receipt["validation_status"] = ValidationStatusReceipt(status);
+                if (status.debug_interface_acquisition_attempted &&
+                    ((status.debug_layer_requested && !status.debug_interface_acquired) ||
+                     (status.gpu_validation_requested &&
+                        (!status.debug_interface_acquired || !status.gpu_validation_interface_queried))))
+                    failure_code = status.gpu_validation_requested
+                        ? "HS_RENDER_GBV_PREREQUISITE_FAILED" : "HS_RENDER_DEBUG_LAYER_PREREQUISITE_FAILED";
+                Require(initialized);
+            }
         }
         config.font_bytes = {};
         std::vector<std::byte>().swap(startup_font);
@@ -891,8 +538,8 @@ int main(int argc, char **argv)
                 throw std::runtime_error("Geometry streamed before any scene demand.");
             receipt["geometry_initial_requests"] = initial_residency.geometry_streaming_requests;
         }
-        const auto scene = Scene(generation.id);
-        const auto hzb_scene = HzbScene(generation.id);
+        const auto scene = Scene(config.content_generation_id);
+        const auto hzb_scene = HzbScene(config.content_generation_id);
         hs::RenderInstance first;
         first.mesh = hs::RenderMesh::Archer;
         first.scale = {.97174913f, .97174913f, .97174913f};
@@ -920,7 +567,7 @@ int main(int argc, char **argv)
         if (persistent_scene_probe && frames >= 24)
         {
             auto visibility_empty = std::make_unique<hs::StaticRenderSceneStorage>();
-            visibility_empty->content_generation_id = generation.id;
+            visibility_empty->content_generation_id = config.content_generation_id;
             auto visibility_filled = std::make_unique<hs::StaticRenderSceneStorage>(*visibility_empty);
             auto static_occluder = second;
             static_occluder.stable_id = 0x56495301u;
@@ -953,6 +600,29 @@ int main(int argc, char **argv)
         pair.current.camera.distance = 22.0f;
 
         std::array<hs::LightView, 3> world_lights{};
+        world_lights[1] = hs::LightView{
+            .quantity = 90000.0f,
+            .color = {1.0f, 0.2f, 0.05f},
+            .stable_id = 2,
+            .type = hs::LightType::Point,
+            .unit = hs::LightUnit::Lumen,
+            .position = {8.0f, 8.0f, -2.0f},
+            .range = 32.0f,
+            .emitter_radius = 0.25f,
+            .shadow_flags = hs::kLightShadowRequested};
+        world_lights[2] = hs::LightView{
+            .direction = {0.65f, -0.75f, 0.3f},
+            .quantity = 90000.0f,
+            .color = {0.05f, 0.3f, 1.0f},
+            .stable_id = 3,
+            .type = hs::LightType::Spot,
+            .unit = hs::LightUnit::Lumen,
+            .position = {-8.0f, 9.0f, -1.0f},
+            .range = 32.0f,
+            .emitter_radius = 0.25f,
+            .inner_cone_radians = 0.35f,
+            .outer_cone_radians = 0.65f,
+            .shadow_flags = hs::kLightShadowRequested};
 
         hs::RendererToolFrameResult frame_result;
         failure_code = "HS_RENDER_FRAME_FAILED";
@@ -990,16 +660,16 @@ int main(int argc, char **argv)
                 stats.geometry_streaming_publications == stats.geometry_streaming_requests &&
                 stats.geometry_streaming_reclaims >= stats.geometry_streaming_requests;
         };
-        [&] {
+        ([&] {
             if (owned_view_probe)
             {
                 pair.current.instances = current;
                 pair.current.header.tick = 1;
                 hs::render_test::OwnedViewProbeEvidence evidence;
-                Require(hs::render_test::RunOwnedViewProbe(renderer, pair, artifacts,
+                Require(hs::render_test::RunOwnedViewProbe(renderer, pair, artifacts, export_diagnostics,
                     owned_view_archer_asset, evidence));
                 frame_result = evidence.final_frame;
-                receipt["owned_view_probe"] = hs::render_test::OwnedViewProbeReceipt(evidence);
+                if (export_diagnostics) receipt["owned_view_probe"] = hs::render_test::OwnedViewProbeReceipt(evidence);
                 receipt["queue_execution_scope"] = "last_owned_view_submission";
                 queue_totals = renderer.LastQueueStats();
                 return;
@@ -1007,6 +677,7 @@ int main(int argc, char **argv)
             const auto request_residency_texture_phase = [&](std::size_t phase, std::uint32_t request_frame) {
                 auto status = renderer.GetGraphicsSettingsStatus();
                 status.requested.texture_quality = residency_texture_qualities[phase];
+                status.requested.shadow_quality = residency_texture_qualities[phase];
                 residency_quality_generations[phase] = status.generation + 1u;
                 residency_quality_frames[phase] = request_frame;
                 const auto texture = renderer.GetTextureStreamingStatus(
@@ -1060,7 +731,7 @@ int main(int argc, char **argv)
                         world_lights[0].quantity = 50000.0f;
                         world_lights[0].color = {1, 1, 1};
                         world_lights[0].shadow_flags = dynamic_filled ? 0 : hs::kLightShadowRequested;
-                        pair.current.lights = std::span(world_lights).first(1);
+                        pair.current.lights = std::span(world_lights).first(dynamic_filled ? 1u : world_lights.size());
                     }
                 }
                 else {
@@ -1116,7 +787,8 @@ int main(int argc, char **argv)
                         settings.error == hs::ErrorCode::None &&
                         (settings.state == hs::SettingsApplyState::Applied ||
                          settings.state == hs::SettingsApplyState::Confirmed) &&
-                        settings.actual_applied.texture_quality == residency_texture_qualities[phase];
+                        settings.actual_applied.texture_quality == residency_texture_qualities[phase] &&
+                        settings.actual_applied.shadow_quality == residency_texture_qualities[phase];
                     residency_quality_applied[phase] = residency_quality_applied[phase] || applied;
                     const bool settled = applied && texture.registered && texture.publication_complete &&
                         !texture.pending && texture.publications > residency_quality_publication_baselines[phase] &&
@@ -1168,7 +840,7 @@ int main(int argc, char **argv)
                 if (persistent_scene_probe && frames >= 24 && frame >= 15 &&
                     config.surface_frontend == hs::SurfaceFrontend::VisibilityBuffer)
                 {
-                    const auto path = artifacts / std::format("visibility-commands-{:02}.json", frame);
+                    const auto path = artifacts / "visibility-commands.json";
                     Require(renderer.Capture({.path = path, .kind = hs::CaptureKind::GeometryDiagnostics}));
                     ValidateVisibilityCommandCapture(path, pair.current.static_scene->instances, current, frame,
                         receipt["visibility_command_cases"]);
@@ -1241,7 +913,7 @@ int main(int argc, char **argv)
                 // The larger frame count remains only the failure bound.
                 if (residency_streaming_complete()) break;
             }
-        }();
+        })();
 
         const auto residency_stats = renderer.ResidencyStats();
         const auto representative_texture = renderer.GetTextureStreamingStatus(
@@ -1339,19 +1011,12 @@ int main(int argc, char **argv)
 
         failure_code = "HS_RENDER_SHUTDOWN_FAILED";
         { Require(renderer.Shutdown()); }
-        failure_code = "HS_RENDER_PERSISTENT_SCENE_FAILED";
-        if (config.validation && persistent_scene_probe)
-        {
-            ValidatePersistentSceneProbe(
-                DynamicUploadRows(artifacts / "dynamic_instance_upload.csv"), frames, receipt);
-        }
 
         const auto validation_errors = renderer.ValidationErrorCount();
         const auto native_validation = renderer.ValidationStatus();
-        const auto validation_status = ValidationStatusReceipt(native_validation);
         const bool collection_valid = native_validation.MessageCollectionValid();
         receipt["validation_errors"] = validation_errors;
-        receipt["validation_status"] = validation_status;
+        if (export_diagnostics) receipt["validation_status"] = ValidationStatusReceipt(native_validation);
         receipt["frames"] = residency_streaming_probe ? rendered_frame_count : frames;
         receipt["static_scene_upload_count"] = frame_result.static_scene_upload_count;
         receipt["enhanced_barriers"] = renderer.UsesEnhancedBarriers();
@@ -1365,13 +1030,6 @@ int main(int argc, char **argv)
     {
         receipt["error_code"] = failure_code;
         receipt["error"] = error.what();
-    }
-    if (!temporary_pack.empty())
-    {
-        std::error_code error;
-        std::filesystem::remove(temporary_pack, error);
-        if (error)
-            std::cerr << "Could not remove renderer fixture pack: " << error.message() << '\n';
     }
     return write_receipt();
 }

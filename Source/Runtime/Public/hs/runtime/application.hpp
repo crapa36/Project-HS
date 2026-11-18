@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace hs
@@ -33,6 +34,8 @@ struct ApplicationConfig
     float test_room_time{0.5f};
     bool smoke{};
     bool smoke_render_lockstep{};
+    bool capture_smoke_frame{true};
+    std::string smoke_capture_name;
     bool warp{};
     bool visible{true};
     bool validation{};
@@ -88,7 +91,7 @@ struct ApplicationConfig
     std::uint64_t seed{1};
     Tick maximum_ticks{180};
     BarrierMode barrier_mode{BarrierMode::Automatic};
-    std::filesystem::path artifact_directory{"Artifacts/runtime"};
+    std::filesystem::path artifact_directory;
     std::filesystem::path generation_pointer;
     std::filesystem::path playtest_output_directory;
     std::filesystem::path replay_directory;

@@ -11,11 +11,9 @@
 
 #ifdef _WIN32
 #include <windows.h>
-#include <bcrypt.h>
 #else
 #include <cerrno>
 #include <fcntl.h>
-#include <sys/random.h>
 #include <unistd.h>
 #endif
 
@@ -23,9 +21,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
-#include <cstdio>
 #include <fstream>
-#include <format>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -70,13 +66,9 @@ void Require(bool condition, const std::string &message)
 }
 
 #ifdef _WIN32
-using UtcTime = SYSTEMTIME;
-UtcTime UtcNow() { UtcTime value{}; GetSystemTime(&value); return value; }
 auto ProcessId() { return GetCurrentProcessId(); }
 auto TickCount() { return GetTickCount64(); }
 #else
-using UtcTime = std::chrono::system_clock::time_point;
-UtcTime UtcNow() { return std::chrono::system_clock::now(); }
 auto ProcessId() { return getpid(); }
 auto TickCount()
 {
@@ -84,47 +76,6 @@ auto TickCount()
         std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 #endif
-
-struct InvocationClock
-{
-    UtcTime started_utc = UtcNow();
-    std::chrono::steady_clock::time_point started_steady =
-        std::chrono::steady_clock::now();
-};
-
-const InvocationClock invocation_clock;
-
-std::string UtcTimestamp(const UtcTime &time)
-{
-#ifdef _WIN32
-    return std::format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
-                       time.wYear, time.wMonth, time.wDay, time.wHour,
-                       time.wMinute, time.wSecond, time.wMilliseconds);
-#else
-    const auto day = std::chrono::floor<std::chrono::days>(time);
-    const std::chrono::year_month_day date(day);
-    const std::chrono::hh_mm_ss clock(std::chrono::floor<std::chrono::milliseconds>(time - day));
-    return std::format("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z", int(date.year()), unsigned(date.month()),
-                       unsigned(date.day()), clock.hours().count(), clock.minutes().count(),
-                       clock.seconds().count(), clock.subseconds().count());
-#endif
-}
-
-std::string UtcFilename(const UtcTime &time)
-{
-#ifdef _WIN32
-    return std::format("{:04}{:02}{:02}T{:02}{:02}{:02}{:03}Z",
-                       time.wYear, time.wMonth, time.wDay, time.wHour,
-                       time.wMinute, time.wSecond, time.wMilliseconds);
-#else
-    const auto day = std::chrono::floor<std::chrono::days>(time);
-    const std::chrono::year_month_day date(day);
-    const std::chrono::hh_mm_ss clock(std::chrono::floor<std::chrono::milliseconds>(time - day));
-    return std::format("{:04}{:02}{:02}T{:02}{:02}{:02}{:03}Z", int(date.year()), unsigned(date.month()),
-                       unsigned(date.day()), clock.hours().count(), clock.minutes().count(),
-                       clock.seconds().count(), clock.subseconds().count());
-#endif
-}
 
 class Sha256
 {
@@ -364,151 +315,6 @@ void Quarantine(const fs::path &published, const fs::path &build_root,
     Require(false, "cannot allocate ProductSet quarantine path");
 }
 
-fs::path ReceiptDirectory(const fs::path &result_path)
-{
-    Require(result_path.filename() == "result.json", "invalid ActionResult receipt path");
-    const auto action_directory = result_path.parent_path();
-    auto actions = action_directory;
-    while (!actions.empty() && actions.filename() != "Actions")
-    {
-        if (actions.parent_path() == actions)
-            break;
-        actions = actions.parent_path();
-    }
-    Require(actions.filename() == "Actions", "ActionResult receipt path is outside Actions");
-    const auto namespace_path = action_directory.lexically_relative(actions);
-    ValidateNamespace(namespace_path.generic_string());
-    return actions.parent_path() / "ActionReceipts" / namespace_path;
-}
-
-Json ExecutionReceipt(std::string_view outcome, const Json &current,
-                      const Json &previous, const UtcTime &ended_utc,
-                      std::chrono::steady_clock::time_point ended_steady)
-{
-    const bool had_previous = previous.is_object();
-    const Json previous_key = had_previous ? previous.at("action_key") : Json(nullptr);
-    const Json previous_set = had_previous ? previous.at("product_set_id") : Json(nullptr);
-    return {
-        {"schema_version", 1},
-        {"action_id", current.at("action_id")},
-        {"action_key", current.at("action_key")},
-        {"product_set_id", current.at("product_set_id")},
-        {"outcome", std::string(outcome)},
-        {"previous_action_key", previous_key},
-        {"previous_product_set_id", previous_set},
-        {"started_utc", UtcTimestamp(invocation_clock.started_utc)},
-        {"ended_utc", UtcTimestamp(ended_utc)},
-        {"elapsed_ms", std::chrono::duration_cast<std::chrono::milliseconds>(
-                           ended_steady - invocation_clock.started_steady).count()},
-        {"semantic_delta", {
-            {"action_key_changed", had_previous ? Json(previous_key != current.at("action_key"))
-                                                : Json(nullptr)},
-            {"product_set_changed", had_previous ? Json(previous_set != current.at("product_set_id"))
-                                                 : Json(nullptr)},
-        }},
-        {"scheduler_reason", nullptr},
-    };
-}
-
-void WriteExecutionReceipt(const fs::path &result_path, std::string_view outcome,
-                           const Json &current, const Json &previous)
-{
-    const UtcTime ended_utc = UtcNow();
-    const auto ended_steady = std::chrono::steady_clock::now();
-    const auto receipt = ExecutionReceipt(outcome, current, previous,
-                                          ended_utc, ended_steady).dump(2) + "\n";
-    const auto directory = ReceiptDirectory(result_path);
-    MakeDirectory(directory);
-    constexpr char hex[] = "0123456789abcdef";
-    for (unsigned attempt = 0; attempt < 32; ++attempt)
-    {
-        std::array<unsigned char, 16> nonce{};
-#ifdef _WIN32
-        Require(BCryptGenRandom(nullptr, nonce.data(), static_cast<ULONG>(nonce.size()),
-                                BCRYPT_USE_SYSTEM_PREFERRED_RNG) >= 0,
-                "cannot generate receipt filename");
-#else
-        std::size_t filled = 0;
-        while (filled < nonce.size())
-        {
-            const auto count = getrandom(nonce.data() + filled, nonce.size() - filled, 0);
-            if (count < 0 && errno == EINTR)
-                continue;
-            Require(count > 0, "cannot generate receipt filename");
-            filled += static_cast<std::size_t>(count);
-        }
-#endif
-        std::string suffix;
-        suffix.reserve(nonce.size() * 2);
-        for (const auto byte : nonce)
-        {
-            suffix += hex[byte >> 4];
-            suffix += hex[byte & 15];
-        }
-        const auto name = UtcFilename(ended_utc) + "-" +
-            std::to_string(ProcessId()) + "-" + suffix + ".json";
-        const auto final_path = directory / name;
-        const auto temporary = directory / ("." + name + ".tmp");
-        RejectReparseAncestors(temporary);
-#ifdef _WIN32
-        const HANDLE reservation = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0,
-                                                nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
-                                                nullptr);
-        if (reservation == INVALID_HANDLE_VALUE)
-        {
-            const auto error = GetLastError();
-            if (error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS)
-                continue;
-            Require(false, "cannot reserve receipt file: " + temporary.string());
-        }
-        CloseHandle(reservation);
-#else
-        const int reservation = open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
-        if (reservation < 0)
-        {
-            if (errno == EEXIST)
-                continue;
-            Require(false, "cannot reserve receipt file: " + temporary.string());
-        }
-        Require(close(reservation) == 0, "cannot close reserved receipt file");
-#endif
-        try
-        {
-            WriteBytes(temporary, std::as_bytes(std::span(receipt.data(), receipt.size())));
-#ifdef _WIN32
-            if (MoveFileExW(temporary.c_str(), final_path.c_str(), MOVEFILE_WRITE_THROUGH))
-                return;
-            const auto error = GetLastError();
-            if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS)
-                Require(false, "cannot atomically publish receipt: " + final_path.string());
-#else
-            if (renameat2(AT_FDCWD, temporary.c_str(), AT_FDCWD, final_path.c_str(), RENAME_NOREPLACE) == 0)
-                return;
-            Require(errno == EEXIST, "cannot atomically publish receipt: " + final_path.string());
-#endif
-        }
-        catch (...)
-        {
-            std::error_code error;
-            fs::remove(temporary, error);
-            throw;
-        }
-        std::error_code error;
-        fs::remove(temporary, error);
-    }
-    Require(false, "cannot allocate unique receipt filename");
-}
-
-void TryWriteExecutionReceipt(const fs::path &result_path, std::string_view outcome,
-                              const Json &current, const Json &previous) noexcept
-{
-    try { WriteExecutionReceipt(result_path, outcome, current, previous); }
-    catch (const std::exception &error)
-    {
-        std::fprintf(stderr, "asset action: receipt unavailable: %s\n", error.what());
-    }
-    catch (...) { std::fprintf(stderr, "asset action: receipt unavailable\n"); }
-}
 } // namespace
 
 struct Sha256Stream::Impl
@@ -894,21 +700,6 @@ void AtomicWriteIfDifferent(const fs::path &path, std::string_view bytes)
     }
 }
 
-void TouchActionResult(const fs::path &path)
-{
-    // Preserve the stable output mtime so Ninja restat can prune downstream work.
-    RequireRegularFile(path);
-    try
-    {
-        const auto current = Json::parse(ReadBytes(path));
-        TryWriteExecutionReceipt(path, "current", current, current);
-    }
-    catch (const std::exception &error)
-    {
-        std::fprintf(stderr, "asset action: receipt unavailable: %s\n", error.what());
-    }
-}
-
 fs::path CreateStage(const fs::path &actions)
 {
     MakeDirectory(actions);
@@ -1003,11 +794,9 @@ void Publish(const fs::path &build_root, const ActionSpec &spec,
     MakeDirectory(products_root);
     const auto published = products_root / id;
     const auto result_path = actions / "result.json";
-    Json previous = nullptr;
     if (fs::exists(result_path))
     {
         const auto old = Json::parse(ReadBytes(result_path));
-        previous = old;
         Require(old.at("action_key") != key || old.at("product_set_id") == id,
                 "same ActionKey produced a different ProductSetId");
         if (old.at("product_set_id") == id)
@@ -1032,9 +821,6 @@ void Publish(const fs::path &build_root, const ActionSpec &spec,
             }
         }
     }
-    // Schema2 readers resolve into ProductSets; retain exclusive manifest leases
-    // through repair so their healthy sibling paths cannot disappear mid-read.
-    std::vector<hs::GenerationFileLock> legacy_repair_leases;
     if (fs::exists(published))
     {
         try { VerifyPublished(published, products); }
@@ -1048,35 +834,6 @@ void Publish(const fs::path &build_root, const ActionSpec &spec,
                     hs::GenerationFileLock::Mode::TryExclusive);
                 Require(product_reader.OwnsLock(),
                         "product-set-in-use: cannot repair a ProductSet held by a reader");
-            }
-            const auto generations = build_root / "Generations";
-            if (fs::exists(generations))
-            {
-                RequireDirectory(generations);
-                for (const auto &entry : fs::directory_iterator(generations))
-                {
-                    if (!IsProductSetId(entry.path().filename().string())) continue;
-                    RequireDirectory(entry.path());
-                    const auto manifest_path = entry.path() / "generation.json";
-                    if (!fs::exists(manifest_path)) continue; // Already retired by GC/repair.
-                    const auto manifest = Json::parse(ReadBytes(manifest_path));
-                    Require(manifest.at("schema_version").is_number_integer(),
-                            "invalid Generation schema during ProductSet repair");
-                    if (manifest.at("schema_version") != 2) continue;
-                    Require(manifest.at("products").is_array() && !manifest.at("products").empty(),
-                            "invalid Generation products during ProductSet repair");
-                    for (const auto &product : manifest.at("products"))
-                    {
-                        const auto text = product.at("locator").get<std::string>();
-                        const fs::path locator{std::u8string(text.begin(), text.end())};
-                        if (!fs::equivalent(build_root / locator.parent_path(), published)) continue;
-                        legacy_repair_leases.emplace_back(manifest_path,
-                            hs::GenerationFileLock::Mode::TryExclusive);
-                        Require(legacy_repair_leases.back().OwnsLock(),
-                                "generation-in-use: cannot repair ProductSet used by an active schema2 reader");
-                        break;
-                    }
-                }
             }
             Quarantine(published, build_root, spec.namespace_path, id);
         }
@@ -1140,7 +897,6 @@ void Publish(const fs::path &build_root, const ActionSpec &spec,
         result["products"].push_back(std::move(entry));
     }
     AtomicWriteIfDifferent(result_path, result.dump(2) + "\n");
-    TryWriteExecutionReceipt(result_path, "produced", result, previous);
 }
 
 } // namespace hs::asset_pipeline

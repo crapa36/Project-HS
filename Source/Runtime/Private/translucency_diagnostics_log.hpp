@@ -16,9 +16,9 @@ namespace hs::runtime_detail
 class TranslucencyDiagnosticsLog
 {
   public:
-    TranslucencyDiagnosticsLog(const std::filesystem::path &directory, DiagnosticClock clock)
+    explicit TranslucencyDiagnosticsLog(const std::filesystem::path &directory)
         : directory_(directory), output_(directory / "translucency_diagnostics.csv", std::ios::binary),
-          lines_(output_, true, Header(), clock) {}
+          lines_(output_, true, Header()) {}
     bool Failed() const noexcept { return !output_ || lines_.Failed(); }
     void Append(const RendererTranslucencyDiagnosticsSample &sample)
     {

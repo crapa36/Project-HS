@@ -61,7 +61,6 @@ struct RetainedVfxEntitySurfaceCapture
     bool retained_instance{};
     bool has_animation_pose{};
     AnimationPoseRef animation_pose{};
-    std::shared_ptr<const void> generation_lease;
 };
 
 class ActiveEffectStore
@@ -310,36 +309,26 @@ class ActiveEffectStore
         Row next{};
         for (std::size_t i = 0; i < rows_.size(); ++i)
         {
-            const auto key = KeyFor(rows_[i]);
             if (live_rows_[i])
             {
                 scratch_rows_[i] = next;
                 if (next != i)
                 {
-                    const auto old_destination = vfx_retained_size::RingGapPayload(rows_[next]);
-                    const auto old_source = vfx_retained_size::RingGapPayload(rows_[i]);
                     rows_[next] = std::move(rows_[i]);
-                    rows_payload_bytes_ -= old_destination;
-                    rows_payload_bytes_ -= old_source;
-                    rows_payload_bytes_ = vfx_retained_size::Add(
-                        rows_payload_bytes_,
-                        vfx_retained_size::Add(vfx_retained_size::RingGapPayload(rows_[next]),
-                            vfx_retained_size::RingGapPayload(rows_[i])));
                     profile_masks_[next] = profile_masks_[i];
-                    if (!index_dirty_) event_rows_.at(key) = next;
+                    if (!index_dirty_) event_rows_.at(KeyFor(rows_[next])) = next;
                 }
                 ++next;
             }
-            else if (!index_dirty_) event_rows_.erase(key);
+            else
+            {
+                rows_payload_bytes_ -= vfx_retained_size::RingGapPayload(rows_[i]);
+                if (!index_dirty_) event_rows_.erase(KeyFor(rows_[i]));
+            }
         }
         for (auto &profile : profiles_) for (auto &row : profile) row = scratch_rows_[row];
         for (auto &capture : captures) capture.row = scratch_rows_[capture.row];
         unreferenced_rows_ -= rows_.size() - next;
-        std::size_t removed_payload_bytes{};
-        for (std::size_t i = next; i < rows_.size(); ++i)
-            removed_payload_bytes = vfx_retained_size::Add(
-                removed_payload_bytes, vfx_retained_size::RingGapPayload(rows_[i]));
-        rows_payload_bytes_ -= removed_payload_bytes;
         rows_.resize(next);
         profile_masks_.resize(next);
         binding_indices_.resize(next);
@@ -374,22 +363,6 @@ class ActiveEffectStore
             sizeof(VfxEventInput) + sizeof(std::uint16_t) + sizeof(Row)), rows_payload_bytes_);
         for (const auto &profile : profiles_) bytes = vfx_retained_size::Add(bytes, Multiply(profile.size(), sizeof(Row)));
         return bytes;
-    }
-    [[nodiscard]] std::size_t LogicalCapacityBytes() const noexcept
-    {
-        using namespace vfx_retained_size;
-        auto bytes = vfx_retained_size::Add(Vector(rows_),
-            vfx_retained_size::Add(Vector(profile_masks_), Vector(binding_indices_)));
-        bytes = vfx_retained_size::Add(bytes, Vector(bound_rows_));
-        bytes = vfx_retained_size::Add(bytes, rows_payload_bytes_);
-        for (const auto &row : bound_rows_)
-            bytes = vfx_retained_size::Add(bytes, RingGapPayload(row));
-        bytes = vfx_retained_size::Add(bytes,
-            vfx_retained_size::Add(Vector(bound_row_ids_),
-                vfx_retained_size::Add(Vector(scratch_rows_), Vector(live_rows_))));
-        for (const auto &profile : profiles_)
-            bytes = vfx_retained_size::Add(bytes, Vector(profile));
-        return vfx_retained_size::Add(bytes, MapValues(event_rows_));
     }
 
   private:
@@ -473,12 +446,6 @@ class ActiveEffectStore
         return {input.sequence, input.status_episode_generation,
             input.geometry_owner_id, input.geometry_effect_id, input.event_tick,
             input.effect_handle, input.geometry_sector_index};
-    }
-    static bool SameEpisode(const VfxEventInput &a, const VfxEventInput &b) noexcept
-    {
-        return a.sequence == b.sequence && a.status_episode_generation == b.status_episode_generation &&
-            a.geometry_owner_id == b.geometry_owner_id && a.geometry_effect_id == b.geometry_effect_id &&
-            a.event_tick == b.event_tick && a.geometry_sector_index == b.geometry_sector_index;
     }
     std::vector<VfxEventInput> rows_;
     std::vector<std::uint16_t> profile_masks_;
@@ -565,25 +532,6 @@ struct ActiveEffectStore::PreparedAppendBatch
     std::size_t base_rows_{}, base_index_size_{};
     const ActiveEffectStore *owner_{};
     bool ready_{};
-
-  public:
-    [[nodiscard]] std::size_t LogicalCapacityBytes() const noexcept
-    {
-        using namespace vfx_retained_size;
-        auto bytes = vfx_retained_size::Add(Vector(new_rows_),
-            vfx_retained_size::Add(Vector(new_masks_), Vector(pending_rows_)));
-        for (const auto &row : new_rows_)
-            bytes = vfx_retained_size::Add(bytes, RingGapPayload(row));
-        bytes = vfx_retained_size::Add(bytes, Vector(pending_slots_));
-        bytes = vfx_retained_size::Add(bytes,
-            vfx_retained_size::Add(Vector(request_pending_indices_), Vector(cosmetic_memberships_)));
-        bytes = vfx_retained_size::Add(bytes, MapValues(new_index_));
-        bytes = vfx_retained_size::Add(bytes,
-            vfx_retained_size::Add(Vector(ground_replacements_), Vector(removed_ground_rows_)));
-        for (const auto &profile : profile_additions_)
-            bytes = vfx_retained_size::Add(bytes, Vector(profile));
-        return bytes;
-    }
 };
 
 inline bool ActiveEffectStore::PrepareAppendBatch(std::span<const AppendRequest> requests,
@@ -1337,12 +1285,6 @@ struct DecodedVfxState
                 Multiply(flashes.size(), sizeof(VfxFlashSpawnInput))));
     }
 
-    [[nodiscard]] std::size_t LogicalCapacityBytes() const noexcept
-    {
-        using namespace vfx_retained_size;
-        return Add(Vector(particle_spawns), Add(Vector(effect_lines),
-            Add(Vector(flashes), Vector(entity_surface_captures))));
-    }
 };
 
 struct TerminalPresentationClock
@@ -1368,9 +1310,6 @@ struct VfxSessionState
             vfx_retained_size::Multiply(particle_spawns.size(), sizeof(ParticleSpawnCommand)),
             vfx_retained_size::Multiply(effect_lines.size(), sizeof(VfxLineSpawnCommand))); }
 
-        [[nodiscard]] std::size_t LogicalCapacityBytes() const noexcept
-        { return vfx_retained_size::Add(vfx_retained_size::Vector(particle_spawns),
-            vfx_retained_size::Vector(effect_lines)); }
     };
 
     // The single simulation producer publishes monotone session/tick order.
@@ -1471,11 +1410,6 @@ struct VfxSessionState
             });
         }
 
-        [[nodiscard]] std::size_t LogicalCapacityBytes() const noexcept
-        {
-            using namespace vfx_retained_size;
-            return Add(Vector(in_flight.events), Vector(pending_));
-        }
 
         ReadyBatch in_flight;
 
@@ -1635,15 +1569,6 @@ struct VfxSessionState
             vfx_retained_size::Add(decoded.LogicalBytes(), native_batch.LogicalBytes()));
     }
 
-    [[nodiscard]] std::size_t PersistentBurstCount() const noexcept
-    { return seen_persistent_bursts_.size(); }
-
-    [[nodiscard]] std::size_t PersistentBurstCapacityBytes() const noexcept
-    {
-        using namespace vfx_retained_size;
-        return Add(Vector(seen_persistent_bursts_),
-            Add(Vector(new_persistent_burst_keys_), Vector(merged_persistent_burst_keys_)));
-    }
 
     std::uint64_t session_id{};
     VfxLowHealthPulseState low_health_pulse;

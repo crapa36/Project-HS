@@ -1,4 +1,5 @@
 #include "vfx_upgrade_dispatch.hpp"
+#include <hs/render_data/vfx_payload_ids.hpp>
 #include <hs/core/cooked_format.hpp>
 #include <hs/game_domain/game_types.hpp>
 #include <algorithm>
@@ -12,12 +13,6 @@ namespace hs::runtime_detail
 {
 namespace
 {
-constexpr std::uint32_t Hash32(std::string_view text) noexcept
-{
-    std::uint32_t hash=2166136261u;
-    for (unsigned char c:text) { hash^=c; hash*=16777619u; }
-    return hash;
-}
 Result Invalid(std::string_view message)
 {
     return Result::Failure(ErrorCode::InvalidArgument,"hs_vfx_upgrade_dispatch",std::string(message));
@@ -56,105 +51,105 @@ Result DispatchVfxUpgradeEvents(const VfxProgramView &program,
     static const auto retreat = MakeAssetId("skill.retreat_shot").value;
     static const std::array activations{
         Activation{explosive, 0, 3, "particle.upgrade.explosive.reexplosion",
-                    Hash32("CircleAreaPayload"), 0, PresentationGeometryKind::Circle, false},
+                    hs::vfx_payload::CircleArea, 0, PresentationGeometryKind::Circle, false},
         Activation{explosive, 1, 1, "particle.upgrade.explosive.mini_bomb.spawn",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{explosive, 1, 2, "particle.upgrade.explosive.mini_bomb.telegraph",
-                    Hash32("CircleAreaPayload"), 1, PresentationGeometryKind::Circle, true},
+                    hs::vfx_payload::CircleArea, 1, PresentationGeometryKind::Circle, true},
         Activation{explosive, 1, 3, "particle.upgrade.explosive.mini_bomb.explosion",
-                    Hash32("CircleAreaPayload"), 0, PresentationGeometryKind::Circle, false},
+                    hs::vfx_payload::CircleArea, 0, PresentationGeometryKind::Circle, false},
         Activation{explosive, 2, 1, "particle.upgrade.explosive.shard_radial",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{explosive, 3, 3, "particle.skill.fire_area.pulse",
-                    Hash32("CircleAreaPayload"), 0, PresentationGeometryKind::Circle, false},
+                    hs::vfx_payload::CircleArea, 0, PresentationGeometryKind::Circle, false},
         Activation{explosive, 4, 3, "particle.upgrade.explosive.blood_burst",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{charged, 0, 3, "particle.upgrade.charged.end_explosion",
-                     Hash32("CircleAreaPayload"), 0, PresentationGeometryKind::Circle, false},
+                     hs::vfx_payload::CircleArea, 0, PresentationGeometryKind::Circle, false},
         Activation{charged, 1, 1, "particle.skill.charged_shot.pulse",
-                   Hash32("PresentationContextPayload"), 0, PresentationGeometryKind::None, false},
+                   hs::vfx_payload::PresentationContext, 0, PresentationGeometryKind::None, false},
         Activation{charged, 6, 3, "particle.upgrade.charged.burn_explosion",
-                     Hash32("CircleAreaPayload"), 0, PresentationGeometryKind::Circle, false},
+                     hs::vfx_payload::CircleArea, 0, PresentationGeometryKind::Circle, false},
         Activation{charged, 7, 3, "particle.upgrade.cooldown_proc",
-                   Hash32("PresentationContextPayload"), 0, PresentationGeometryKind::None, false},
+                   hs::vfx_payload::PresentationContext, 0, PresentationGeometryKind::None, false},
         Activation{basic, 2, 1, "particle.upgrade.arrow.split",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{basic, 7, 1, "particle.upgrade.arrow.triple_release",
-                    Hash32("ConePayload"), 0, PresentationGeometryKind::Cone, false},
+                    hs::vfx_payload::Cone, 0, PresentationGeometryKind::Cone, false},
         Activation{piercing, 0, 1, "particle.upgrade.tracking_spawn",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{ricochet, 1, 1, "particle.upgrade.ricochet.branch",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{ricochet, 4, 1, "particle.upgrade.ricochet.kill_small_arrows",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{ricochet, 5, 1, "particle.upgrade.ricochet.kill_restart",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{ricochet, 6, 3, "particle.upgrade.cooldown_proc",
-                    Hash32("PresentationContextPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PresentationContext, 0, PresentationGeometryKind::None, false},
         Activation{arrow_rain, 4, 1, "particle.upgrade.arrow_rain.tracking_arrow",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{arrow_rain, 6, 1, "particle.upgrade.arrow_rain.tracking_arrow",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{arrow_rain, 1, 3, "particle.upgrade.arrow_rain.pull",
-                    Hash32("SourceTargetPayload"), 0, PresentationGeometryKind::Line, false},
+                    hs::vfx_payload::SourceTarget, 0, PresentationGeometryKind::Line, false},
         Activation{trap, 7, 1, "particle.upgrade.trap.mini_spawn",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{trap, 0, 1, "particle.skill.trap",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{trap, 2, 3, "particle.upgrade.trap.rearm",
-                   Hash32("CircleAreaPayload"), 0, PresentationGeometryKind::Circle, false},
+                   hs::vfx_payload::CircleArea, 0, PresentationGeometryKind::Circle, false},
         Activation{trap, 3, 3, "particle.upgrade.trap.bleed_variant",
-                   Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                   hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{trap, 5, 3, "particle.upgrade.trap.pull_in",
-                   Hash32("CircleAreaPayload"), 0, PresentationGeometryKind::Circle, false},
+                   hs::vfx_payload::CircleArea, 0, PresentationGeometryKind::Circle, false},
         Activation{trap, 6, 3, "particle.upgrade.trap.mark_burst",
-                   Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                   hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{retreat, 3, 1, "particle.upgrade.retreat.tracking_arrow",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{retreat, 4, 3, "particle.upgrade.retreat.land_shockwave",
-                   Hash32("CircleAreaPayload"), 0, PresentationGeometryKind::Circle, false},
+                   hs::vfx_payload::CircleArea, 0, PresentationGeometryKind::Circle, false},
         Activation{retreat, 6, 3, "particle.upgrade.heal_proc",
-                     Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                     hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{retreat, 5, 3, "particle.upgrade.cooldown_proc",
-                   Hash32("PresentationContextPayload"), 0, PresentationGeometryKind::None, false},
+                   hs::vfx_payload::PresentationContext, 0, PresentationGeometryKind::None, false},
         Activation{basic, 0, 1, "particle.upgrade.arrow.echo",
-                    Hash32("PresentationContextPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PresentationContext, 0, PresentationGeometryKind::None, false},
         Activation{basic, 5, 1, "particle.upgrade.cooldown_proc",
-                    Hash32("PresentationContextPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PresentationContext, 0, PresentationGeometryKind::None, false},
         Activation{basic, 1, 3, "particle.upgrade.arrow.pierce",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{piercing, 1, 1, "particle.upgrade.piercing.exit_split",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{piercing, 4, 1, "particle.upgrade.piercing.chain_release",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{multi, 1, 1, "particle.upgrade.arrow.split",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{multi, 2, 3, "particle.upgrade.arrow.pierce",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{charged, 5, 1, "particle.upgrade.charged.radial_split",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{explosive, 5, 3, "particle.upgrade.explosive.pre_pull",
-                    Hash32("CircleAreaPayload"), 0, PresentationGeometryKind::Circle, false},
+                    hs::vfx_payload::CircleArea, 0, PresentationGeometryKind::Circle, false},
         Activation{charged, 3, 3, "particle.upgrade.arrow.pierce",
-                    Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                    hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{explosive, 6, 3, "particle.upgrade.explosive.mark_detonation",
-                   Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                   hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{piercing, 5, 3, "particle.upgrade.piercing.push_alignment",
-                   Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                   hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{multi, 5, 1, "particle.upgrade.tracking_spawn",
-                   Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                   hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{multi, 7, 1, "particle.upgrade.tracking_spawn",
-                   Hash32("PointEventPayload"), 0, PresentationGeometryKind::None, false},
+                   hs::vfx_payload::PointEvent, 0, PresentationGeometryKind::None, false},
         Activation{multi, 0, 1, "particle.upgrade.multishot.secondary_fan",
-                   Hash32("ConePayload"), 0, PresentationGeometryKind::Cone, false},
+                   hs::vfx_payload::Cone, 0, PresentationGeometryKind::Cone, false},
         Activation{multi, 3, 1, "particle.upgrade.multishot.rear_fan",
-                   Hash32("ConePayload"), 0, PresentationGeometryKind::Cone, false},
+                   hs::vfx_payload::Cone, 0, PresentationGeometryKind::Cone, false},
         Activation{multi, 6, 1, "particle.skill.multishot",
-                   Hash32("ConePayload"), 0, PresentationGeometryKind::Cone, false},
+                   hs::vfx_payload::Cone, 0, PresentationGeometryKind::Cone, false},
         Activation{retreat, 0, 1, "particle.upgrade.retreat.triple_release",
-                   Hash32("ConePayload"), 0, PresentationGeometryKind::Cone, false},
+                   hs::vfx_payload::Cone, 0, PresentationGeometryKind::Cone, false},
         Activation{retreat, 7, 1, "particle.upgrade.retreat.second_dash",
-                   Hash32("LineAreaPayload"), 0, PresentationGeometryKind::Line, false, true},
+                   hs::vfx_payload::LineArea, 0, PresentationGeometryKind::Line, false, true},
     };
     struct BindingCacheEntry { bool resolved{}; const VfxUpgradeBindingRecord *value{}; };
     std::array<std::array<BindingCacheEntry, kUpgradeCount>, kCombatSkillCount> binding_cache{};
@@ -233,7 +228,7 @@ Result DispatchVfxUpgradeEvents(const VfxProgramView &program,
             }
             const auto &effect = program.effects[lookup->handle - 1];
             if (effect.handle != lookup->handle || effect.input_mode != 0 ||
-                effect.payload_kind != Hash32("PointEventPayload") ||
+                effect.payload_kind != hs::vfx_payload::PointEvent ||
                 effect.timing_kind != 0 || !std::isfinite(effect.seconds) ||
                 effect.seconds <= 0 || event.upgrade_stage != 3 ||
                 event.upgrade_owner_id == 0 || event.status_episode_generation == 0 ||
@@ -326,7 +321,7 @@ Result DispatchVfxUpgradeEvents(const VfxProgramView &program,
                 return Invalid("Second retreat afterimage is not in its cooked binding.");
             const auto &afterimage = program.effects[afterimage_lookup->handle - 1];
             if (afterimage.handle != afterimage_lookup->handle || afterimage.input_mode != 1 ||
-                afterimage.payload_kind != Hash32("PresentationContextPayload") ||
+                afterimage.payload_kind != hs::vfx_payload::PresentationContext ||
                 afterimage.timing_kind != 0 || !std::isfinite(afterimage.seconds) ||
                 afterimage.seconds <= 0)
                 return Invalid("Second retreat afterimage has incompatible owner timing.");

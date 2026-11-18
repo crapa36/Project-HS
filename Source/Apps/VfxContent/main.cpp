@@ -1,10 +1,12 @@
 #include "../AssetPipeline/action.hpp"
-#include "../Content/content_cooker.hpp"
+#include "../Content/particle_effect_cooker.hpp"
 #include "../Content/vfx_gradient_cooker.hpp"
 #include "../Content/vfx_mesh_cooker.hpp"
 #include "../Content/vfx_program_cooker.hpp"
 #include "../Content/vfx_spec_validation.hpp"
 #include "../Content/vfx_texture_validation.hpp"
+
+#include <hs/core/cooked_particle_effects.hpp>
 
 #include <windows.h>
 #include <objbase.h>
@@ -14,6 +16,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <ranges>
 #include <set>
 #include <span>
@@ -21,14 +24,6 @@
 #include <string>
 #include <string_view>
 #include <vector>
-
-namespace hs::content
-{
-bool WriteVfxMaskArray(const std::filesystem::path &path,
-                       std::span<const ParticleSpriteSource> sprites,
-                       const std::filesystem::path &source_textures,
-                       std::string &error_message);
-}
 
 namespace
 {
@@ -80,71 +75,6 @@ bool SafeFilename(std::string_view filename, std::string_view extension)
 Json ReadJson(const fs::path &path)
 {
     return Json::parse(ap::ReadBytes(path));
-}
-
-std::vector<hs::content::ParticleSpriteSource> SpriteLayout(const Json &document,
-                                                              std::string &projection)
-{
-    const auto &array = document.at("sprites");
-    Require(array.is_array() && !array.empty() &&
-                array.size() <= std::numeric_limits<hs::ParticleSprite>::max(),
-            "invalid sprite layout");
-    Json projected = Json::array();
-    std::vector<hs::content::ParticleSpriteSource> sprites;
-    std::set<std::string> ids;
-    for (const auto &sprite : array)
-    {
-        Require(sprite.is_object() && sprite.size() == 3 &&
-                    sprite.contains("id") && sprite.contains("file") && sprite.contains("frames"),
-                "sprite layout requires exactly id, file, and frames");
-        const auto id = sprite.at("id").get<std::string>();
-        const auto file = sprite.at("file").get<std::string>();
-        const auto &frames = sprite.at("frames");
-        Require(!id.empty() && ids.insert(id).second && SafeFilename(file, ".png"),
-                "invalid sprite ID or PNG filename");
-        Require(frames.is_array() && frames.size() == 2,
-                "sprite frames must have two dimensions");
-        auto dimension = [](const Json &value) -> std::uint8_t {
-            Require(value.is_number_integer() && value.get<std::int64_t>() > 0 &&
-                        value.get<std::int64_t>() <= 255,
-                    "sprite frame dimensions must be 1..255");
-            return value.get<std::uint8_t>();
-        };
-        const auto columns = dimension(frames[0]);
-        const auto rows = dimension(frames[1]);
-        projected.push_back({{"id", id}, {"file", file},
-                             {"frames", Json::array({columns, rows})}});
-        sprites.push_back({id, file, columns, rows});
-    }
-    projection = projected.dump();
-    return sprites;
-}
-
-struct CatalogTexture
-{
-    std::string filename;
-    fs::path source;
-};
-
-std::vector<CatalogTexture> Catalog(const Json &spec, const fs::path &source_root)
-{
-    constexpr std::string_view prefix = "Content/Textures/VFX/";
-    std::set<std::string> names;
-    std::vector<CatalogTexture> textures;
-    for (const auto &[id, texture] : spec.at("libraries").at("texture_catalog").items())
-    {
-        static_cast<void>(id);
-        const auto asset = texture.at("runtime_asset").get<std::string>();
-        Require(asset.starts_with(prefix), "invalid VFX catalog runtime asset path");
-        const auto filename = asset.substr(prefix.size());
-        Require(SafeFilename(filename, ".dds") && names.insert(filename).second,
-                "invalid or duplicate VFX catalog DDS filename");
-        textures.push_back({filename,
-            source_root / "ContentSource" / "Textures" / "VFX" / filename});
-    }
-    Require(names.contains("vfx_gradient_lut.dds"), "gradient LUT is missing from VFX catalog");
-    std::ranges::sort(textures, {}, &CatalogTexture::filename);
-    return textures;
 }
 
 std::string ProductId(std::string_view filename)
@@ -213,15 +143,16 @@ void Produce(std::string_view mode, const fs::path &source_root,
     ap::ActionSpec action;
     action.action_id = "vfx." + std::string(mode);
     action.recipe_id = "project-hs.vfx-" + std::string(mode);
-    action.recipe_version = mode == "particle-definitions" ? 2 : 1;
+    action.recipe_version = mode == "particle-definitions" || mode == "vfx-runtime" ? 2 : 1;
     action.namespace_path = "vfx/" + std::string(mode);
     const auto particles = source_root / "ContentSource/GameData/particles.json";
     const auto texture_root = source_root / "ContentSource/Textures/VFX";
     const auto spec_path = source_root / "ContentSource/VFX/production_spec.v4.json";
     const auto mesh_path = source_root / "ContentSource/VFX/Meshes/vfx_mesh_atlas.json";
     std::vector<std::string> expected;
-    std::vector<hs::content::ParticleSpriteSource> sprites;
-    std::vector<CatalogTexture> textures;
+    std::vector<std::string> mask_filenames;
+    std::map<std::string, std::string> mask_inputs;
+    std::map<std::string, const Json *> textures;
     Json document;
     std::string mesh_bytes;
     if (mode == "particle-definitions")
@@ -234,20 +165,24 @@ void Produce(std::string_view mode, const fs::path &source_root,
     else if (mode == "masks")
     {
         document = ReadJson(particles);
-        std::string projection;
-        sprites = SpriteLayout(document, projection);
-        // The path remains a depfile prerequisite, but only the ordered layout
-        // projection contributes to the expensive mask ActionKey.
-        action.inputs.push_back({"ContentSource/GameData/particles.json#sprite_layout", particles,
-                                 ap::Sha256Bytes(Bytes(projection))});
-        std::set<std::string> files;
+        const auto &sprites = document.at("sprites");
+        Require(sprites.is_array() && !sprites.empty() &&
+                    sprites.size() <= std::numeric_limits<hs::ParticleSprite>::max(),
+                "invalid mask slice count");
         for (const auto &sprite : sprites)
         {
-            const auto filename = sprite.file.string();
-            if (files.insert(filename).second)
-                action.inputs.push_back(ap::HashInput(
-                    "ContentSource/Textures/VFX/" + filename, texture_root / filename));
+            const auto filename = sprite.at("file").get<std::string>();
+            Require(SafeFilename(filename, ".png"), "invalid mask filename");
+            mask_filenames.push_back(filename);
+            auto [input, inserted] = mask_inputs.try_emplace(filename);
+            if (!inserted) continue;
+            const auto path = texture_root / filename;
+            input->second = ap::ReadBytes(path);
+            action.inputs.push_back({"ContentSource/Textures/VFX/" + filename, path,
+                                     ap::Sha256Bytes(Bytes(input->second))});
         }
+        action.inputs.push_back({"ContentSource/GameData/particles.json#mask_slices", particles,
+                                 ap::Sha256Bytes(Bytes(Json(mask_filenames).dump()))});
         expected.push_back(ProductId("vfx_masks.dds"));
     }
     else if (mode == "vfx-runtime")
@@ -255,13 +190,19 @@ void Produce(std::string_view mode, const fs::path &source_root,
         const auto bytes = ap::ReadBytes(spec_path);
         action.inputs.push_back({"ContentSource/VFX/production_spec.v4.json", spec_path, ap::Sha256Bytes(Bytes(bytes))});
         document = Json::parse(bytes);
-        textures = Catalog(document, source_root);
-        for (const auto &texture : textures)
+        constexpr std::string_view prefix = "Content/Textures/VFX/";
+        for (const auto &texture : document.at("libraries").at("texture_catalog"))
         {
-            action.inputs.push_back(ap::HashInput(
-                "ContentSource/Textures/VFX/" + texture.filename, texture.source));
-            expected.push_back(TextureProductId(texture.filename));
+            const auto &asset = texture.at("runtime_asset").get_ref<const std::string &>();
+            Require(asset.starts_with(prefix), "invalid VFX catalog runtime asset path");
+            const auto filename = asset.substr(prefix.size());
+            Require(SafeFilename(filename, ".dds") && textures.emplace(filename, &texture).second,
+                    "invalid or duplicate VFX catalog DDS filename");
+            action.inputs.push_back(ap::HashInput("ContentSource/Textures/VFX/" + filename,
+                                                  texture_root / filename));
+            expected.push_back(TextureProductId(filename));
         }
+        Require(textures.contains("vfx_gradient_lut.dds"), "gradient LUT is missing from VFX catalog");
         expected.push_back(ProductId("vfx_program.hsbin"));
     }
     else if (mode == "mesh-atlas")
@@ -275,7 +216,6 @@ void Produce(std::string_view mode, const fs::path &source_root,
     std::ranges::sort(action.inputs, {}, &ap::Input::logical_id);
     if (Current(build_root, action, expected))
     {
-        ap::TouchActionResult(build_root / "Actions" / action.namespace_path / "result.json");
         return;
     }
 
@@ -286,72 +226,47 @@ void Produce(std::string_view mode, const fs::path &source_root,
         std::string error;
         if (mode == "particle-definitions")
         {
-            const bool written = hs::content::WriteCookedParticleEffects(
-                stage / "particle_effects.hsbin", document, sprites, error);
-            Require(written, "particle definitions: " + error);
+            hs::content::WriteCookedParticleEffects(stage / "particle_effects.hsbin", document);
             AddProduct(products, stage, ProductId("particle_effects.hsbin"),
                        "particle_effects.hsbin");
         }
         else if (mode == "masks")
         {
-            const auto snapshot = stage / "source/ContentSource/Textures/VFX";
-            fs::create_directories(snapshot);
-            std::set<std::string> copied_files;
-            for (const auto &sprite : sprites)
-            {
-                const auto filename = sprite.file.string();
-                if (!copied_files.insert(filename).second) continue;
-                const auto copied = ap::CopyAndHashInput("ContentSource/Textures/VFX/" + filename,
-                    texture_root / filename, snapshot / filename);
-                const auto original = std::ranges::find(action.inputs, copied.logical_id, &ap::Input::logical_id);
-                Require(original != action.inputs.end() && copied.digest == original->digest,
-                    "VFX mask source changed during cooking");
-            }
             ComScope com;
             const bool written = hs::content::WriteVfxMaskArray(
-                stage / "vfx_masks.dds", sprites, snapshot, error);
+                stage / "vfx_masks.dds", mask_filenames, mask_inputs, error);
             Require(written, "VFX masks: " + error);
             AddProduct(products, stage, ProductId("vfx_masks.dds"), "vfx_masks.dds");
         }
         else if (mode == "vfx-runtime")
         {
             hs::content::ValidateVfxSpecification(document);
-            const auto snapshot_root = stage / "source";
-            const auto snapshot = snapshot_root / "ContentSource/Textures/VFX";
-            fs::create_directories(snapshot);
-            for (const auto &texture : textures)
+            constexpr std::string_view gradient = "vfx_gradient_lut.dds";
+            for (const auto &[filename, description] : textures)
             {
+                const auto staged = stage / filename;
                 const auto copied = ap::CopyAndHashInput(
-                    "ContentSource/Textures/VFX/" + texture.filename, texture.source,
-                    snapshot / texture.filename);
+                    "ContentSource/Textures/VFX/" + filename, texture_root / filename, staged);
                 const auto original = std::ranges::find(action.inputs, copied.logical_id,
                                                         &ap::Input::logical_id);
                 Require(original != action.inputs.end() && copied.digest == original->digest,
                         "VFX source DDS changed during cooking");
+                hs::content::ValidateVfxTexture(*description, staged);
+                if (filename != gradient)
+                    products.push_back({TextureProductId(filename), filename,
+                                        copied.digest, fs::file_size(staged), {}});
             }
-            hs::content::ValidateVfxTextures(document, snapshot_root);
-            for (const auto &texture : textures)
-                if (texture.filename != "vfx_gradient_lut.dds")
-                    fs::copy_file(snapshot / texture.filename, stage / texture.filename);
-            const auto gradient = std::ranges::find(textures, std::string("vfx_gradient_lut.dds"),
-                                                    &CatalogTexture::filename);
-            const auto rows = hs::content::CookVfxGradientDefaults(
-                document, snapshot / gradient->filename, stage / "vfx_gradient_lut.dds");
+            const auto rows = hs::content::CookVfxGradientDefaults(document, stage / gradient);
             hs::content::CookVfxProgram(document, rows, stage / "vfx_program.hsbin");
-            for (const auto &texture : textures)
-                AddProduct(products, stage, TextureProductId(texture.filename), texture.filename);
+            AddProduct(products, stage, TextureProductId(gradient), std::string(gradient));
             AddProduct(products, stage, ProductId("vfx_program.hsbin"), "vfx_program.hsbin");
         }
         else
         {
-            const auto snapshot = stage / "vfx_mesh_atlas.source.json";
-            ap::WriteBytes(snapshot, Bytes(mesh_bytes));
-            hs::content::CookVfxMeshAtlas(snapshot, stage / "vfx_mesh_atlas.hsbin");
+            hs::content::CookVfxMeshAtlas(mesh_bytes, stage / "vfx_mesh_atlas.hsbin");
             AddProduct(products, stage, ProductId("vfx_mesh_atlas.hsbin"),
                        "vfx_mesh_atlas.hsbin");
         }
-        fs::remove_all(stage / "source");
-        fs::remove(stage / "vfx_mesh_atlas.source.json");
         ap::Publish(build_root, action, stage, std::move(products));
     }
     catch (...)

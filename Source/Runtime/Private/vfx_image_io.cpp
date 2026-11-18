@@ -1,11 +1,10 @@
 #include <hs/runtime/vfx_image_io.hpp>
+#include <hs/render_data/vfx_payload_ids.hpp>
 #include <hs/core/cooked_format.hpp>
 #include <hs/render_data/render_snapshot_values.hpp>
 #include <algorithm>
 #include <cstring>
-#include <fstream>
 #include <limits>
-#include <iostream>
 #include <string_view>
 #include <utility>
 #include <cmath>
@@ -37,20 +36,10 @@ bool ValidRange(VfxRange range,std::size_t size) noexcept
 {
     return range.first<=size && range.count<=size-range.first;
 }
-const VfxTextureResourceRecord *GroundTextureResource(VfxProgramView p,const VfxTextureBindingRecord &binding) noexcept
+std::string_view TexturePath(const VfxProgramView &p, const VfxTextureBindingRecord &binding) noexcept
 {
-    const auto found=std::find_if(p.texture_resources.begin(),p.texture_resources.end(),
-        [&](const auto &resource){return resource.slot==binding.catalog_slot;});
-    if(found==p.texture_resources.end() || !found->asset_path_bytes.count ||
-       !ValidRange(found->asset_path_bytes,p.strings.size())) return nullptr;
-    return &*found;
-}
-std::string_view GroundTexturePath(VfxProgramView p,const VfxTextureBindingRecord &binding) noexcept
-{
-    const auto *resource=GroundTextureResource(p,binding);
-    if(!resource) return {};
-    return std::string_view(reinterpret_cast<const char *>(p.strings.data())+resource->asset_path_bytes.first,
-        resource->asset_path_bytes.count);
+    const auto bytes = p.texture_resources[binding.catalog_slot].asset_path_bytes;
+    return {reinterpret_cast<const char *>(p.strings.data() + bytes.first), bytes.count};
 }
 bool PrepareStateRingTextureContract(VfxProgramView p,const VfxOutputRecord &output,bool charged) noexcept
 {
@@ -59,7 +48,7 @@ bool PrepareStateRingTextureContract(VfxProgramView p,const VfxOutputRecord &out
     for(std::size_t i=output.textures.first;i<static_cast<std::size_t>(output.textures.first)+output.textures.count;++i)
     {
         const auto &binding=p.texture_bindings[i];
-        const auto path=GroundTexturePath(p,binding);
+        const auto path=TexturePath(p, binding);
         if(binding.role==ShapeId("profile.global") && path=="Content/Textures/VFX/vfx_gradient_lut.dds" && !gradient)
             gradient=true;
         else if(binding.role==ShapeId("profile.global") && path=="Content/Textures/VFX/vfx_curve_lut.dds" && !curve)
@@ -95,11 +84,9 @@ void PrepareHexMaskVariants(VfxProgramView p,const VfxOutputRecord &output,VfxGr
             if(binding.min_quality>2 || !std::isfinite(binding.strength) || binding.strength<0 || binding.strength>1)
             { variant.valid=false; break; }
             if(binding.min_quality>quality) continue;
-            const auto *resource=GroundTextureResource(p,binding);
-            if(!resource || variant.present || binding.selection!=ShapeId("stable_seed_mod_group_size") ||
+            if(variant.present || binding.selection!=ShapeId("stable_seed_mod_group_size") ||
                !binding.slices.count || !ValidRange(binding.slices,p.slice_indices.size()) ||
-               std::string_view(reinterpret_cast<const char *>(p.strings.data())+resource->asset_path_bytes.first,
-                   resource->asset_path_bytes.count)!="Content/Textures/VFX/vfx_authored_mask_array.dds")
+               TexturePath(p, binding)!="Content/Textures/VFX/vfx_authored_mask_array.dds")
             { variant.valid=false; break; }
             bool slices_valid=true;
             for(std::size_t j=binding.slices.first;j<static_cast<std::size_t>(binding.slices.first)+binding.slices.count;++j)
@@ -120,7 +107,7 @@ void PrepareRelicMaskVariants(VfxProgramView p,const VfxOutputRecord &output,Vfx
         for(std::size_t i=output.textures.first;i<static_cast<std::size_t>(output.textures.first)+output.textures.count;++i)
         {
             const auto &binding=p.texture_bindings[i];
-            const auto path=GroundTexturePath(p,binding);
+            const auto path=TexturePath(p, binding);
             const bool gradient_match=binding.role==ShapeId("profile.global") && path=="Content/Textures/VFX/vfx_gradient_lut.dds" && !gradient;
             const bool curve_match=binding.role==ShapeId("profile.global") && path=="Content/Textures/VFX/vfx_curve_lut.dds" && !curve;
             const bool optional_match=binding.role==ShapeId("profile.optional_detail") && path=="Content/Textures/VFX/vfx_authored_mask_array.dds" && binding.slices.count==0 && !optional;
@@ -138,7 +125,6 @@ void PrepareRelicMaskVariants(VfxProgramView p,const VfxOutputRecord &output,Vfx
         }
         if(!gradient||!curve||!optional||!authored) variant.valid=false;
     }
-}
 }
 
 void PrepareVfxOutputProfiles(VfxProgramView program, std::vector<std::uint32_t> &profiles)
@@ -162,9 +148,15 @@ void PrepareVfxOutputProfiles(VfxProgramView program, std::vector<std::uint32_t>
     }
 }
 
-void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &sources,
-                          std::vector<VfxMoteOutputRecipe> &outputs)
+} // namespace
+
+void PrepareVfxMoteRecipes(VfxImageData &image)
 {
+    const auto p = image.program.View();
+    auto &sources = image.mote_source_recipes;
+    auto &outputs = image.mote_output_recipes;
+    auto &sparks = image.spark_schedules;
+    sparks.clear();
     const auto valid = [](VfxRange range, std::size_t size) {
         return range.first <= size && range.count <= size - range.first;
     };
@@ -286,12 +278,7 @@ void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &s
                     if (binding.min_quality > 2 || !std::isfinite(binding.strength) ||
                         binding.strength < 0.0f || binding.strength > 1.0f) { okay = false; break; }
                     if (binding.min_quality > quality) continue;
-                    const auto resource = std::find_if(p.texture_resources.begin(), p.texture_resources.end(),
-                        [&](const auto &entry) { return entry.slot == binding.catalog_slot; });
-                    if (resource == p.texture_resources.end() || !valid(resource->asset_path_bytes, p.strings.size()))
-                    { okay = false; break; }
-                    const std::string_view path(reinterpret_cast<const char *>(p.strings.data() + resource->asset_path_bytes.first),
-                        resource->asset_path_bytes.count);
+                    const auto path = TexturePath(p, binding);
                     if (path != mask_path || selected ||
                         binding.selection != hash("stable_seed_mod_group_size") ||
                         !valid(binding.slices, p.slice_indices.size()) || binding.slices.count == 0)
@@ -335,12 +322,7 @@ void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &s
             bool gradient = false, curve = false, optional_mask = false, okay = true;
             for (const auto &binding : p.texture_bindings.subspan(output.textures.first, output.textures.count))
             {
-                const auto resource = std::find_if(p.texture_resources.begin(), p.texture_resources.end(),
-                    [&](const auto &entry) { return entry.slot == binding.catalog_slot; });
-                if (resource == p.texture_resources.end() || resource->asset_path_bytes.count == 0 ||
-                    !valid(resource->asset_path_bytes, p.strings.size())) { okay = false; break; }
-                const std::string_view path(reinterpret_cast<const char *>(p.strings.data() + resource->asset_path_bytes.first),
-                    resource->asset_path_bytes.count);
+                const auto path = TexturePath(p, binding);
                 if (binding.role == hash("profile.global") && path == gradient_path && !gradient) gradient = true;
                 else if (binding.role == hash("profile.global") && path == curve_path && !curve) curve = true;
                 else if (binding.role == hash("profile.optional_detail") && path == mask_path &&
@@ -351,15 +333,6 @@ void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &s
         }
     }
 
-    std::vector<std::uint32_t> lookup_counts(p.effects.size());
-    std::vector<std::uint64_t> lookup_ids(p.effects.size());
-    for (const auto &lookup : p.effect_lookup)
-        if (lookup.handle && lookup.handle <= p.effects.size())
-        {
-            auto &count = lookup_counts[lookup.handle - 1];
-            if (!count) lookup_ids[lookup.handle - 1] = lookup.effect_id;
-            ++count;
-        }
     constexpr std::array spark_effects{
         HashEffectName("particle.basic_attack"), HashEffectName("particle.skill.charged_shot"),
         HashEffectName("particle.skill.explosive_arrow"), HashEffectName("particle.skill.piercing_shot"),
@@ -369,7 +342,6 @@ void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &s
     {
         const auto &source = p.sources[i];
         auto &recipe = sources[i];
-        recipe.effect_handle = source.effect;
         recipe.stable_id = source.stable_id;
         recipe.output_range = source.outputs;
         recipe.knots = {source.knots[0], source.knots[1]};
@@ -379,35 +351,31 @@ void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &s
         bool event_effect = false, common_payload = false, residual_effect = false, spark_effect = false;
         if (effect_valid)
         {
-            recipe.effect_id = lookup_ids[source.effect - 1];
+            recipe.effect_id = p.effect_lookup[source.effect - 1].effect_id;
             const auto &effect = p.effects[source.effect - 1];
             event_effect = effect.input_mode == 0 && effect.timing_kind == 0 &&
                 std::isfinite(effect.seconds) && effect.seconds > 0;
-            common_payload = effect.payload_kind == hash("PointEventPayload") ||
-                effect.payload_kind == hash("PresentationContextPayload");
-            residual_effect = event_effect && effect.payload_kind == hash("EntityAttachmentPayload") &&
+            common_payload = effect.payload_kind == hs::vfx_payload::PointEvent ||
+                effect.payload_kind == hs::vfx_payload::PresentationContext;
+            residual_effect = event_effect && effect.payload_kind == hs::vfx_payload::EntityAttachment &&
                 recipe.effect_id == HashEffectName("particle.skill.charged_shot.cancel");
             spark_effect = effect.input_mode == 1 && effect.timing_kind == 0 &&
-                effect.payload_kind == hash("ProjectilePayload") && std::isfinite(effect.seconds) &&
+                effect.payload_kind == hs::vfx_payload::Projectile && std::isfinite(effect.seconds) &&
                 effect.seconds > 0 && effect.seconds <= 60 &&
                 std::find(spark_effects.begin(), spark_effects.end(), recipe.effect_id) != spark_effects.end();
-            const auto lookup_count = lookup_counts[source.effect - 1];
-            const bool identified = lookup_count != 0 && recipe.effect_id != 0 &&
-                valid(effect.sources, p.sources.size()) && effect.sources.count != 0 &&
-                p.sources[effect.sources.first].effect == effect.handle;
-            const bool unique = identified && lookup_count == 1;
-            if (identified && event_effect && effect.payload_kind == hash("PointEventPayload"))
+            const bool identified = effect.sources.count != 0;
+            if (identified && event_effect && effect.payload_kind == hs::vfx_payload::PointEvent)
                 recipe.effect_routes |= kVfxMoteBurstPoint;
-            if (identified && event_effect && effect.payload_kind == hash("PresentationContextPayload"))
+            if (identified && event_effect && effect.payload_kind == hs::vfx_payload::PresentationContext)
                 recipe.effect_routes |= kVfxMoteBurstContext;
             if (identified && residual_effect) recipe.effect_routes |= kVfxMoteResidualEntity;
             if (identified && spark_effect) recipe.effect_routes |= kVfxMoteProjectileSpark;
             if (identified && effect.input_mode == 0 && effect.timing_kind == 1 &&
-                effect.payload_kind == hash("SafeGapSectorPayload"))
+                effect.payload_kind == hs::vfx_payload::SafeGapSector)
                 recipe.effect_routes |= kVfxMoteSafeSector;
-            if (unique && effect.input_mode == 0 && effect.timing_kind == 0)
+            if (identified && effect.input_mode == 0 && effect.timing_kind == 0)
             {
-                if (effect.payload_kind == hash("PointEventPayload"))
+                if (effect.payload_kind == hs::vfx_payload::PointEvent)
                 {
                     if (effect.seconds == .65f && recipe.effect_id == HashEffectName("particle.skill.trap"))
                         recipe.effect_routes |= kVfxMoteTrapPoint;
@@ -416,19 +384,19 @@ void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &s
                     if (event_effect && recipe.effect_id == HashEffectName("particle.status.burn_tick"))
                         recipe.effect_routes |= kVfxMoteBurnTick;
                 }
-                if (effect.payload_kind == hash("CircleAreaPayload") &&
+                if (effect.payload_kind == hs::vfx_payload::CircleArea &&
                     recipe.effect_id == HashEffectName("particle.enemy.suicide.charge"))
                     recipe.effect_routes |= kVfxMoteSuicideCircle;
             }
-            if (unique && effect.input_mode == 1 && effect.timing_kind == 1)
+            if (identified && effect.input_mode == 1 && effect.timing_kind == 1)
             {
-                if (effect.payload_kind == hash("CircleAreaPayload"))
+                if (effect.payload_kind == hs::vfx_payload::CircleArea)
                 {
                     if (recipe.effect_id == HashEffectName("persistent.trap.pending")) recipe.effect_routes |= kVfxMoteTrapPending;
                     if (recipe.effect_id == HashEffectName("persistent.trap.armed")) recipe.effect_routes |= kVfxMoteTrapArmed;
                     if (recipe.effect_id == HashEffectName("particle.upgrade.retreat.start_trap")) recipe.effect_routes |= kVfxMoteTrapRetreat;
                 }
-                if (effect.payload_kind == hash("EntityAttachmentPayload"))
+                if (effect.payload_kind == hs::vfx_payload::EntityAttachment)
                 {
                     if (recipe.effect_id == HashEffectName("persistent.status.bleed")) recipe.effect_routes |= kVfxMoteBleedOwner;
                     if (recipe.effect_id == HashEffectName("persistent.status.burn")) recipe.effect_routes |= kVfxMoteBurnOwner;
@@ -447,7 +415,8 @@ void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &s
             std::isfinite(source.knots[1]) && source.knots[0] >= 0.0f &&
             source.knots[1] > source.knots[0] && source.knots[1] <= 1.0f;
         const bool curl_source = effect_valid && source.type == VfxSourceType::CurlMotes &&
-            valid(source.parameters, p.parameters.size()) && recipe.output_range_valid;
+            valid(source.parameters, p.parameters.size()) && recipe.output_range_valid &&
+            source.outputs.count != 0;
         recipe.common_route_valid = curl_source && knots_valid && recipe.common_params_valid && event_effect && common_payload;
         recipe.residual_route_valid = curl_source && source.stable_id == hash("residual_motes") &&
             knots_valid && source.knots[0] == 0.0f && source.knots[1] == 1.0f && source.parameters.count == 2 &&
@@ -459,7 +428,7 @@ void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &s
         recipe.tick_route_valid = curl_source && source.stable_id == hash("tick_motes") &&
             knots_valid && source.knots[0] == 0.0f && source.knots[1] == 1.0f && source.parameters.count == 1 &&
             recipe.common_params_valid && recipe.count == 3;
-        recipe.spark_route_valid = curl_source && source.stable_id == hash("micro_sparks") &&
+        recipe.spark_valid = curl_source && source.stable_id == hash("micro_sparks") &&
             knots_valid && source.parameters.count == 3 && recipe.spark_valid && spark_effect;
     }
     const auto common_pattern = [&](const VfxOutputRecord &output) -> std::uint32_t {
@@ -476,9 +445,8 @@ void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &s
         recipe.empty_parameters_valid = valid(output.parameters, p.parameters.size()) &&
             output.parameters.count == 0;
         if (output.source >= sources.size()) continue;
-        const auto &source = sources[output.source];
-        const bool linked = source.effect_handle && source.effect_handle ==
-            p.sources[output.source].effect && source.output_range_valid &&
+        auto &source = sources[output.source];
+        const bool linked = source.output_range_valid &&
             i >= source.output_range.first && i - source.output_range.first < source.output_range.count;
         if (!linked) continue;
         recipe.common_recipe_index = source.common_route_valid && recipe.empty_parameters_valid
@@ -509,7 +477,8 @@ void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &s
             output.shape_scale_rule == hash("component_size") && output.shape_component_kind == hash("particle") &&
             output.coverage_type == hash("analytic") && output.coverage_ref == hash("diamond_spark") &&
             recipe.min_quality <= 2;
-        recipe.spark_route_valid = source.spark_route_valid && recipe.empty_parameters_valid &&
+        const bool spark = source.spark_schedule == 0xffffffffu && source.spark_valid &&
+            recipe.spark_textures_valid && recipe.output_color_valid && recipe.empty_parameters_valid &&
             output.profile == VfxOutputProfile::SpriteAdd && output.shape == hash("velocity_billboard") &&
             output.shape_domain == hash("sprite") && output.shape_scale_rule == hash("component_size") &&
             output.shape_component_kind == hash("particle") && output.coverage_type == hash("analytic") &&
@@ -518,26 +487,38 @@ void PrepareVfxMoteRecipes(VfxProgramView p, std::vector<VfxMoteSourceRecipe> &s
             std::isfinite(output.motion_rate_hz) && output.motion_rate_hz >= 0.0f &&
             std::isfinite(output.motion_amplitude) && output.motion_amplitude >= 0.0f && output.motion_amplitude <= 1.0f &&
             std::isfinite(output.motion_inset_fraction) && output.motion_inset_fraction >= 0.0f && output.motion_inset_fraction <= 1.0f;
+        if (spark)
+        {
+            const auto seconds = p.effects[p.sources[output.source].effect - 1].seconds;
+            const double start = static_cast<double>(source.knots[0]) * seconds;
+            const double window = static_cast<double>(source.knots[1] - source.knots[0]) * seconds;
+            const double spacing = window / std::max(1u, source.count - 1);
+            source.spark_schedule = static_cast<std::uint32_t>(sparks.size());
+            auto &schedule = sparks.emplace_back();
+            schedule.output_index = static_cast<std::uint32_t>(i);
+            schedule.lifetime = static_cast<float>(spacing);
+            schedule.birth_ticks.reserve(source.count);
+            // Spark effects last at most 60 seconds, so relative ticks fit in 16 bits.
+            for (std::uint32_t ordinal = 0; ordinal < source.count; ++ordinal)
+                schedule.birth_ticks.push_back(static_cast<std::uint16_t>(
+                    std::ceil((start + spacing * ordinal) * 60.0 - 0.000001)));
+        }
     }
 }
 
+namespace {
 Result PrepareVfxScreenRecipes(VfxProgramView p, std::vector<VfxScreenEffectRecipe> &effects,
                              std::vector<VfxScreenRecipe> &outputs)
 {
     constexpr auto hit=HashEffectName("particle.player.hit_direction");
     constexpr auto health=HashEffectName("post.player.low_health_vignette");
-    constexpr auto presentation=ShapeId("PresentationContextPayload");
+    constexpr auto presentation=hs::vfx_payload::PresentationContext;
     const auto texture_ok=[&](const VfxOutputRecord &output) {
         if(!ValidRange(output.textures,p.texture_bindings.size())||output.textures.count!=1)return false;
         const auto &binding=p.texture_bindings[output.textures.first];
-        const auto resource=std::find_if(p.texture_resources.begin(),p.texture_resources.end(),
-            [&](const auto &row){return row.slot==binding.catalog_slot;});
-        if(resource==p.texture_resources.end()||!ValidRange(resource->asset_path_bytes,p.strings.size())||
-           binding.role!=ShapeId("profile.global")||binding.selection||binding.slices.count||binding.first_frame||
+        if(binding.role!=ShapeId("profile.global")||binding.selection||binding.slices.count||binding.first_frame||
            binding.frame_count||binding.fps!=0||binding.strength!=1)return false;
-        const std::string_view path(reinterpret_cast<const char *>(p.strings.data())+resource->asset_path_bytes.first,
-            resource->asset_path_bytes.count);
-        return path=="Content/Textures/VFX/vfx_gradient_lut.dds";
+        return TexturePath(p, binding)=="Content/Textures/VFX/vfx_gradient_lut.dds";
     };
     effects.assign(p.effects.size(),{});outputs.clear();
     for(std::size_t ei=0;ei<p.effects.size();++ei)
@@ -545,9 +526,7 @@ Result PrepareVfxScreenRecipes(VfxProgramView p, std::vector<VfxScreenEffectReci
         const auto handle=static_cast<std::uint32_t>(ei+1);
         const auto &effect=p.effects[ei];
         auto &recipe=effects[ei];
-        const auto lookup=std::find_if(p.effect_lookup.begin(),p.effect_lookup.end(),
-            [&](const auto &row){return row.handle==handle;});
-        recipe.effect_id=lookup==p.effect_lookup.end()?0:lookup->effect_id;
+        recipe.effect_id=p.effect_lookup[ei].effect_id;
         const bool is_hit=recipe.effect_id==hit,is_health=recipe.effect_id==health;
         if(!is_hit&&!is_health)continue;
         recipe.seconds=effect.seconds;recipe.outputs.first=static_cast<std::uint32_t>(outputs.size());
@@ -615,23 +594,14 @@ Result PrepareVfxVolumeRecipes(VfxProgramView p, std::vector<VfxVolumeEffectReci
 {
     constexpr auto phase=HashEffectName("particle.boss.phase_change"),spawn=HashEffectName("particle.boss.spawn"),
         death=HashEffectName("particle.boss.death"),aura=HashEffectName("persistent.boss.phase2_aura");
-    constexpr auto point=ShapeId("PointEventPayload"),context=ShapeId("PresentationContextPayload"),
-        entity=ShapeId("EntityAttachmentPayload");
-    const auto texture_path=[&](const VfxTextureBindingRecord &binding)->std::optional<std::string_view>{
-        const auto resource=std::find_if(p.texture_resources.begin(),p.texture_resources.end(),
-            [&](const auto &row){return row.slot==binding.catalog_slot;});
-        if(resource==p.texture_resources.end()||!ValidRange(resource->asset_path_bytes,p.strings.size()))return {};
-        return std::string_view(reinterpret_cast<const char *>(p.strings.data())+resource->asset_path_bytes.first,
-            resource->asset_path_bytes.count);
-    };
+    constexpr auto point=hs::vfx_payload::PointEvent,context=hs::vfx_payload::PresentationContext,
+        entity=hs::vfx_payload::EntityAttachment;
     effects.assign(p.effects.size(),{});outputs.clear();
     for(std::size_t ei=0;ei<p.effects.size();++ei)
     {
         const auto handle=static_cast<std::uint32_t>(ei+1);
         const auto &effect=p.effects[ei];auto &recipe=effects[ei];
-        const auto lookup=std::find_if(p.effect_lookup.begin(),p.effect_lookup.end(),
-            [&](const auto &row){return row.handle==handle;});
-        recipe.effect_id=lookup==p.effect_lookup.end()?0:lookup->effect_id;
+        recipe.effect_id=p.effect_lookup[ei].effect_id;
         const auto id=recipe.effect_id;const bool crown=id==aura;
         if(id!=phase&&id!=spawn&&id!=death&&!crown)continue;
         recipe.seconds=effect.seconds;recipe.outputs.first=static_cast<std::uint32_t>(outputs.size());
@@ -686,13 +656,13 @@ Result PrepareVfxVolumeRecipes(VfxProgramView p, std::vector<VfxVolumeEffectReci
             bool gradient=false,stbn=false,noise_texture=false;
             for(const auto &binding:p.texture_bindings.subspan(output.textures.first,output.textures.count))
             {
-                const auto path=texture_path(binding);
-                if(!path||binding.selection||binding.min_quality!=0||binding.strength!=1||binding.slices.count||
+                const auto path=TexturePath(p, binding);
+                if(binding.selection||binding.min_quality!=0||binding.strength!=1||binding.slices.count||
                    !ValidRange(binding.slices,p.slice_indices.size())||binding.first_frame||binding.frame_count||binding.fps!=0)
                 {valid=false;break;}
-                if(*path=="Content/Textures/VFX/vfx_gradient_lut.dds"&&!gradient&&binding.role==ShapeId("profile.global"))gradient=true;
-                else if(*path=="Content/Textures/VFX/vfx_stbn_scalar.dds"&&!stbn&&binding.role==ShapeId("profile.global"))stbn=true;
-                else if(*path=="Content/Textures/VFX/vfx_noise_volume_64.dds"&&!noise_texture&&binding.role==ShapeId("profile.authored"))noise_texture=true;
+                if(path=="Content/Textures/VFX/vfx_gradient_lut.dds"&&!gradient&&binding.role==ShapeId("profile.global"))gradient=true;
+                else if(path=="Content/Textures/VFX/vfx_stbn_scalar.dds"&&!stbn&&binding.role==ShapeId("profile.global"))stbn=true;
+                else if(path=="Content/Textures/VFX/vfx_noise_volume_64.dds"&&!noise_texture&&binding.role==ShapeId("profile.authored"))noise_texture=true;
                 else {valid=false;break;}
             }
             if(!valid||!(gradient&&stbn&&noise_texture)){valid=false;break;}
@@ -714,19 +684,15 @@ void PrepareVfxEntitySurfaceRecipes(VfxProgramView p,
 {
     constexpr auto phase=HashEffectName("particle.boss.phase_change"),death=HashEffectName("particle.boss.death"),
         persistent=HashEffectName("persistent.boss.phase_transition_invulnerable");
-    constexpr auto payload=ShapeId("PresentationContextPayload"),entity_payload=ShapeId("EntityAttachmentPayload");
+    constexpr auto payload=hs::vfx_payload::PresentationContext,entity_payload=hs::vfx_payload::EntityAttachment;
     const auto texture_contract=[&](const VfxOutputRecord &output) {
         if(!ValidRange(output.textures,p.texture_bindings.size())||output.textures.count!=3)return false;
         std::uint32_t seen=0;
         for(const auto &binding:p.texture_bindings.subspan(output.textures.first,output.textures.count))
         {
-            const auto resource=std::find_if(p.texture_resources.begin(),p.texture_resources.end(),
-                [&](const auto &row){return row.slot==binding.catalog_slot;});
-            if(resource==p.texture_resources.end()||!ValidRange(resource->asset_path_bytes,p.strings.size())||
-               resource->asset_path_bytes.count==0||binding.min_quality>2||binding.selection!=0||
+            if(binding.min_quality>2||binding.selection!=0||
                binding.slices.count!=0||binding.strength!=1.0f)return false;
-            const std::string_view path(reinterpret_cast<const char *>(p.strings.data())+
-                resource->asset_path_bytes.first,resource->asset_path_bytes.count);
+            const auto path = TexturePath(p, binding);
             const auto role=binding.role;
             const std::uint32_t bit=role==ShapeId("profile.global")&&path=="Content/Textures/VFX/vfx_gradient_lut.dds"?1u:
                 role==ShapeId("profile.global")&&path=="Content/Textures/VFX/vfx_stbn_scalar.dds"?2u:
@@ -748,11 +714,7 @@ void PrepareVfxEntitySurfaceRecipes(VfxProgramView p,
     {
         const auto handle=static_cast<std::uint32_t>(ei+1);
         const auto &effect=p.effects[ei];auto &recipe=effects[ei];
-        std::uint64_t effect_id{};
-        std::size_t matches=0;
-        for(const auto &lookup:p.effect_lookup)if(lookup.handle==handle)
-        {if(matches++==0)effect_id=lookup.effect_id;}
-        if(matches!=1||effect_id==0)continue;
+        const auto effect_id=p.effect_lookup[ei].effect_id;
         const bool is_persistent=effect_id==persistent;
         const bool is_death=effect_id==death;
         if(effect_id!=phase&&!is_death&&!is_persistent)continue;
@@ -814,40 +776,72 @@ void PrepareVfxEntitySurfaceRecipes(VfxProgramView p,
     }
 }
 
-void PrepareVfxRibbonRecipes(VfxProgramView p,std::vector<VfxRibbonEffectRecipe> &effects,
-    std::vector<VfxRibbonSourceRecipe> &sources,std::vector<VfxRibbonOutputRecipe> &outputs,
-    std::vector<VfxRibbonTextureRecipe> &textures,std::vector<std::uint32_t> &slice_indices)
+constexpr std::string_view kRibbonDetailPath = "Content/Textures/VFX/vfx_ribbon_detail_array.dds";
+
+bool IsRibbonDetail(const VfxProgramView &program, const VfxTextureBindingRecord &binding) noexcept
+{
+    const auto path = TexturePath(program, binding);
+    if (path == kRibbonDetailPath) return binding.role != ShapeId("profile.optional_detail");
+    return path.find("ribbon_detail_array") != std::string_view::npos;
+}
+
+bool IsRibbonProfileTexture(const VfxProgramView &program, const VfxTextureBindingRecord &binding) noexcept
+{
+    const auto path = TexturePath(program, binding);
+    switch (binding.role)
+    {
+    case ShapeId("profile.global"):
+        return path == "Content/Textures/VFX/vfx_gradient_lut.dds" || path == "Content/Textures/VFX/vfx_curve_lut.dds";
+    case ShapeId("profile.authored"): return path == "Content/Textures/VFX/vfx_flow_curl_2d.dds";
+    case ShapeId("profile.optional_detail"): return path == kRibbonDetailPath;
+    default: return false;
+    }
+}
+
+struct VfxRibbonSourceRecipe
+{
+    std::uint32_t stable_id{}, parameter_count{};
+    VfxSourceType type{};
+    std::uint32_t knot_count{};
+    std::array<float,4> knots{};
+    VfxRange outputs{};
+    std::uint32_t authoritative{};
+    float history_seconds{};
+    std::uint32_t ground_lock_bits{};
+    bool history_present{}, history_valid{}, ground_lock_present{}, ground_lock_valid{}, knots_valid{};
+};
+struct VfxRibbonOutputRecipe
+{
+    std::uint32_t shape{}, shape_domain{}, shape_scale_rule{}, shape_component_kind{};
+    VfxOutputProfile profile{};
+    VfxMotionKind motion{};
+    std::uint32_t coverage_type{}, coverage_ref{}, min_quality{}, surface_target{}, gradient_row{}, parameter_count{};
+    VfxRange textures{};
+    Float4 rgba{};
+    float hdr{}, motion_rate_hz{}, motion_amplitude{}, motion_inset_fraction{};
+    std::uint32_t first_parameter_key{}, second_parameter_key{};
+    float arc_degrees{}, width_head{}, width_tail{}, noise_warp{}, phase_offset{}, width{}, taper{}, width_multiplier{}, reverse_flow{};
+    std::uint32_t segments{};
+    bool arc_present{}, arc_valid{}, width_head_present{}, width_head_valid{}, width_tail_present{}, width_tail_valid{};
+    bool noise_warp_present{}, noise_warp_valid{}, phase_offset_present{}, phase_offset_valid{};
+    bool width_present{}, width_valid{}, taper_present{}, taper_valid{}, width_multiplier_present{}, width_multiplier_valid{};
+    bool reverse_flow_present{}, reverse_flow_valid{}, segments_present{}, segments_valid{};
+    bool travel_pulse_present{}, travel_pulse_valid{};
+    bool color_contract_valid{};
+};
+void PrepareVfxRibbonRecipes(const VfxProgramView &p,
+    std::vector<VfxRibbonSourceRecipe> &sources,std::vector<VfxRibbonOutputRecipe> &outputs)
 {
     constexpr auto history=ShapeId("history_seconds"),ground=ShapeId("ground_lock"),
         arc=ShapeId("arc_deg"),head=ShapeId("width_head"),tail=ShapeId("width_tail"),
         noise=ShapeId("noise_warp"),phase=ShapeId("phase_offset"),width=ShapeId("width"),
         taper=ShapeId("taper"),multiplier=ShapeId("width_multiplier"),reverse=ShapeId("reverse_flow"),
         segments=ShapeId("segments"),pulse=ShapeId("travel_pulse");
-    const auto set_float=[](VfxParameterType type,
-        std::uint32_t bits,bool &present,bool &valid,float &value) {
-        present=true;valid=type==VfxParameterType::Float;
-        if(valid){value=std::bit_cast<float>(bits);valid=std::isfinite(value);}
-    };
-    effects.assign(p.effects.size(),{});sources.assign(p.sources.size(),{});
-    outputs.assign(p.outputs.size(),{});textures.assign(p.texture_bindings.size(),{});
-    slice_indices.assign(p.slice_indices.begin(),p.slice_indices.end());
-    for(std::size_t i=0;i<p.effects.size();++i)
-    {
-        const auto &effect=p.effects[i];auto &row=effects[i];
-        row.handle=effect.handle;row.importance=effect.importance;row.payload_kind=effect.payload_kind;
-        row.input_mode=effect.input_mode;row.timing_kind=effect.timing_kind;row.seconds=effect.seconds;row.sources=effect.sources;
-        row.valid_handle=effect.handle==i+1;
-        for(const auto &lookup:p.effect_lookup)
-        {
-            if(lookup.handle==effect.handle){++row.lookup_count;row.effect_id=lookup.effect_id;}
-        }
-        if(row.lookup_count!=1)row.effect_id=0;
-        if(row.effect_id)for(const auto &lookup:p.effect_lookup)if(lookup.effect_id==row.effect_id)++row.identity_count;
-    }
+    sources.assign(p.sources.size(),{});
+    outputs.assign(p.outputs.size(),{});
     for(std::size_t i=0;i<p.sources.size();++i)
     {
         const auto &source=p.sources[i];auto &row=sources[i];
-        row.effect=source.effect;row.source_index=static_cast<std::uint32_t>(i);
         row.stable_id=source.stable_id;row.type=source.type;row.knot_count=source.knot_count;row.knots=source.knots;
         row.outputs=source.outputs;row.authoritative=source.authoritative;row.parameter_count=source.parameters.count;
           row.knots_valid=source.knot_count<=row.knots.size();
@@ -868,7 +862,8 @@ void PrepareVfxRibbonRecipes(VfxProgramView p,std::vector<VfxRibbonEffectRecipe>
     for(std::size_t i=0;i<p.outputs.size();++i)
     {
         const auto &output=p.outputs[i];auto &row=outputs[i];
-        row.source=output.source;row.profile=output.profile;
+        row.profile=output.profile;
+        if (output.profile != VfxOutputProfile::RibbonAdd && output.profile != VfxOutputProfile::RibbonOit) continue;
         row.shape=output.shape;row.shape_domain=output.shape_domain;row.shape_scale_rule=output.shape_scale_rule;
         row.shape_component_kind=output.shape_component_kind;row.motion=output.motion;
         row.coverage_type=output.coverage_type;row.coverage_ref=output.coverage_ref;row.min_quality=output.min_quality;
@@ -883,73 +878,62 @@ void PrepareVfxRibbonRecipes(VfxProgramView p,std::vector<VfxRibbonEffectRecipe>
         if(!ValidRange(output.parameters,p.parameters.size()))continue;
         if(output.parameters.count>0)row.first_parameter_key=p.parameters[output.parameters.first].key;
         if(output.parameters.count>1)row.second_parameter_key=p.parameters[output.parameters.first+1].key;
-        const auto parse_float=[&](std::uint32_t key,bool &present,bool &valid,float &value) {
-            for(const auto &parameter:p.parameters.subspan(output.parameters.first,output.parameters.count))
-                if(parameter.key==key){set_float(parameter.type,parameter.bits,present,valid,value);return;}
-        };
-        parse_float(arc,row.arc_present,row.arc_valid,row.arc_degrees);
-        parse_float(head,row.width_head_present,row.width_head_valid,row.width_head);
-        parse_float(tail,row.width_tail_present,row.width_tail_valid,row.width_tail);
-        parse_float(noise,row.noise_warp_present,row.noise_warp_valid,row.noise_warp);
-        parse_float(phase,row.phase_offset_present,row.phase_offset_valid,row.phase_offset);
-        parse_float(width,row.width_present,row.width_valid,row.width);
-        parse_float(taper,row.taper_present,row.taper_valid,row.taper);
-        parse_float(multiplier,row.width_multiplier_present,row.width_multiplier_valid,row.width_multiplier);
-        parse_float(reverse,row.reverse_flow_present,row.reverse_flow_valid,row.reverse_flow);
-        for(const auto &parameter:p.parameters.subspan(output.parameters.first,output.parameters.count))
+        for (const auto &parameter : p.parameters.subspan(output.parameters.first, output.parameters.count))
         {
-            if(parameter.key==segments&&!row.segments_present)
-            {row.segments_present=true;row.segments_valid=parameter.type==VfxParameterType::Int;row.segments=parameter.bits;}
-            if(parameter.key==pulse&&!row.travel_pulse_present)
-            {row.travel_pulse_present=true;row.travel_pulse_valid=parameter.type==VfxParameterType::Bool&&parameter.bits==1;}
+            const auto read_float = [&](bool &present, bool &valid, float &value) {
+                if (present) return;
+                present = true;
+                valid = parameter.type == VfxParameterType::Float;
+                if (valid) value = std::bit_cast<float>(parameter.bits);
+            };
+            switch (parameter.key)
+            {
+            case arc: read_float(row.arc_present, row.arc_valid, row.arc_degrees); break;
+            case head: read_float(row.width_head_present, row.width_head_valid, row.width_head); break;
+            case tail: read_float(row.width_tail_present, row.width_tail_valid, row.width_tail); break;
+            case noise: read_float(row.noise_warp_present, row.noise_warp_valid, row.noise_warp); break;
+            case phase: read_float(row.phase_offset_present, row.phase_offset_valid, row.phase_offset); break;
+            case width: read_float(row.width_present, row.width_valid, row.width); break;
+            case taper: read_float(row.taper_present, row.taper_valid, row.taper); break;
+            case multiplier: read_float(row.width_multiplier_present, row.width_multiplier_valid, row.width_multiplier); break;
+            case reverse: read_float(row.reverse_flow_present, row.reverse_flow_valid, row.reverse_flow); break;
+            case segments:
+                if (!row.segments_present)
+                {
+                    row.segments_present = true;
+                    row.segments_valid = parameter.type == VfxParameterType::Int;
+                    row.segments = parameter.bits;
+                }
+                break;
+            case pulse:
+                if (!row.travel_pulse_present)
+                {
+                    row.travel_pulse_present = true;
+                    row.travel_pulse_valid = parameter.type == VfxParameterType::Bool && parameter.bits == 1;
+                }
+                break;
+            }
         }
-    }
-    for(std::size_t i=0;i<p.texture_bindings.size();++i)
-    {
-        const auto &binding=p.texture_bindings[i];auto &row=textures[i];
-        row.role=binding.role;row.selection=binding.selection;row.min_quality=binding.min_quality;
-        row.strength=binding.strength;row.slices=binding.slices;row.first_frame=binding.first_frame;
-        row.frame_count=binding.frame_count;row.fps=binding.fps;
-        const auto resource=std::find_if(p.texture_resources.begin(),p.texture_resources.end(),
-            [&](const auto &entry){return entry.slot==binding.catalog_slot;});
-        if(resource==p.texture_resources.end()||!ValidRange(resource->asset_path_bytes,p.strings.size()))continue;
-        const std::string_view path(reinterpret_cast<const char *>(p.strings.data())+resource->asset_path_bytes.first,
-            resource->asset_path_bytes.count);
-        row.valid_path=true;
-        if(path=="Content/Textures/VFX/vfx_gradient_lut.dds")row.asset=VfxRibbonTextureAsset::Gradient;
-        else if(path=="Content/Textures/VFX/vfx_curve_lut.dds")row.asset=VfxRibbonTextureAsset::Curve;
-        else if(path=="Content/Textures/VFX/vfx_flow_curl_2d.dds")row.asset=VfxRibbonTextureAsset::FlowCurl;
-        else if(path=="Content/Textures/VFX/vfx_ribbon_detail_array.dds")row.asset=
-            binding.role==ShapeId("profile.optional_detail")?VfxRibbonTextureAsset::OptionalDetail:VfxRibbonTextureAsset::DetailArray;
-        else if(path=="Content/Textures/VFX/vfx_stbn_scalar.dds")row.asset=VfxRibbonTextureAsset::Stbn;
-        else if(path=="Content/Textures/VFX/vfx_noise_volume_64.dds")row.asset=VfxRibbonTextureAsset::NoiseVolume;
-        else if(path.find("ribbon_detail_array")!=std::string_view::npos)row.asset=VfxRibbonTextureAsset::DetailArray;
-        else row.asset=VfxRibbonTextureAsset::Other;
     }
 }
 
-void PrepareVfxRibbonWakeRecipes(std::span<const VfxRibbonEffectRecipe> effects,
+void PrepareVfxRibbonWakeRecipes(const VfxProgramView &program,
     std::span<const VfxRibbonSourceRecipe> sources,
     std::span<const VfxRibbonOutputRecipe> outputs,
-    std::span<const VfxRibbonTextureRecipe> textures,
-    std::span<const std::uint32_t> slice_indices,
     std::vector<VfxRange> &ranges, std::vector<VfxRibbonWakeRecipe> &recipes)
 {
     constexpr auto effect_id = HashEffectName("persistent.boss.dash_wake");
     constexpr auto detail_role = ShapeId("ribbon_detail_array");
     constexpr auto seed_selection = ShapeId("stable_seed_mod_group_size");
-    constexpr auto line_payload = ShapeId("LineAreaPayload");
-    const auto valid_range = [](VfxRange range, std::size_t size) {
-        return range.first <= size && range.count <= size - range.first;
-    };
-    ranges.assign(effects.size(), {});
+    constexpr auto line_payload = hs::vfx_payload::LineArea;
+    ranges.assign(program.effects.size(), {});
     recipes.clear();
-    for (std::size_t effect_index = 0; effect_index < effects.size(); ++effect_index)
+    for (std::size_t effect_index = 0; effect_index < program.effects.size(); ++effect_index)
     {
-        const auto &effect = effects[effect_index];
-        if (!effect.valid_handle || effect.handle != effect_index + 1 || effect.effect_id != effect_id ||
-            effect.lookup_count != 1 || effect.input_mode != 1 || effect.timing_kind != 1 ||
-            effect.payload_kind != line_payload || !valid_range(effect.sources, sources.size()))
+        const auto &effect = program.effects[effect_index];
+        if (program.effect_lookup[effect_index].effect_id != effect_id ||
+            effect.input_mode != 1 || effect.timing_kind != 1 ||
+            effect.payload_kind != line_payload)
             continue;
         auto &range = ranges[effect_index];
         range.first = static_cast<std::uint32_t>(recipes.size());
@@ -957,16 +941,14 @@ void PrepareVfxRibbonWakeRecipes(std::span<const VfxRibbonEffectRecipe> effects,
              source_index < effect.sources.first + effect.sources.count; ++source_index)
         {
             const auto &source = sources[source_index];
-            if (source.effect != effect.handle || source.source_index != source_index ||
-                source.stable_id != ShapeId("wake_rails") || source.type != VfxSourceType::HistoryRibbon ||
+            if (source.stable_id != ShapeId("wake_rails") || source.type != VfxSourceType::HistoryRibbon ||
                 source.knot_count != 2 || source.knots[0] != 0.0f || source.knots[1] != 1.0f ||
-                source.parameter_count != 2 || !valid_range(source.outputs, outputs.size()) ||
-                source.outputs.count != 1 || !source.history_present || !source.history_valid ||
+                source.parameter_count != 2 || source.outputs.count != 1 || !source.history_present || !source.history_valid ||
                 source.history_seconds != .24f || !source.ground_lock_present ||
                 !source.ground_lock_valid || source.ground_lock_bits != 1u)
                 continue;
             const auto &output = outputs[source.outputs.first];
-            if (output.source != source_index || output.profile != VfxOutputProfile::RibbonAdd ||
+            if (output.profile != VfxOutputProfile::RibbonAdd ||
                 output.shape != ShapeId("paired_ground_ribbons") ||
                 output.shape_domain != ShapeId("ribbon") ||
                 output.shape_scale_rule != ShapeId("component_width_and_history") ||
@@ -974,25 +956,24 @@ void PrepareVfxRibbonWakeRecipes(std::span<const VfxRibbonEffectRecipe> effects,
                 output.motion != VfxMotionKind::HistoryRibbonTearsBackward ||
                 output.coverage_type != ShapeId("analytic") ||
                 output.coverage_ref != ShapeId("ribbon_energy_core") ||
-                output.parameter_count != 2 || !valid_range(output.textures, textures.size()) ||
-                !output.color_contract_valid || output.gradient_row >= 68u ||
+                output.parameter_count != 2 || !output.color_contract_valid || output.gradient_row >= 68u ||
                 !output.width_head_present || !output.width_head_valid || output.width_head <= 0.0f ||
                 !output.width_tail_present || !output.width_tail_valid || output.width_tail < 0.0f ||
                 output.first_parameter_key == output.second_parameter_key)
                 continue;
-            const VfxRibbonTextureRecipe *detail{};
-            for (const auto &binding : textures.subspan(output.textures.first, output.textures.count))
+            const VfxTextureBindingRecord *detail{};
+            for (const auto &binding : program.texture_bindings.subspan(output.textures.first, output.textures.count))
             {
                 if (binding.role != detail_role) continue;
                 if (detail) { detail = nullptr; break; }
                 detail = &binding;
             }
-            if (!detail || !detail->valid_path || detail->asset != VfxRibbonTextureAsset::DetailArray ||
+            if (!detail || !IsRibbonDetail(program, *detail) ||
                 detail->selection != seed_selection || !std::isfinite(detail->strength) ||
                 detail->strength < 0.0f || detail->strength > 1.0f ||
-                !valid_range(detail->slices, slice_indices.size()) || detail->slices.count != 2)
+                detail->slices.count != 2)
                 continue;
-            const auto slices = slice_indices.subspan(detail->slices.first, detail->slices.count);
+            const auto slices = program.slice_indices.subspan(detail->slices.first, detail->slices.count);
             if (std::ranges::any_of(slices, [](std::uint32_t slice) { return slice >= 8u; })) continue;
             recipes.push_back({effect.handle, effect.importance, output.min_quality, detail->min_quality,
                 output.gradient_row, detail->slices, output.rgba, output.width_head,
@@ -1002,67 +983,50 @@ void PrepareVfxRibbonWakeRecipes(std::span<const VfxRibbonEffectRecipe> effects,
     }
 }
 
-void PrepareVfxRibbonFixedRecipes(std::span<const VfxRibbonEffectRecipe> effects,
+void PrepareVfxRibbonFixedRecipes(const VfxProgramView &program,
     std::span<const VfxRibbonSourceRecipe> sources,
     std::span<const VfxRibbonOutputRecipe> outputs,
-    std::span<const VfxRibbonTextureRecipe> textures,
-    std::span<const std::uint32_t> slice_indices,
     std::vector<VfxRange> &ranges, std::vector<VfxRibbonFixedRecipe> &recipes)
 {
     constexpr auto common_id = HashEffectName("particle.common.pull");
     constexpr auto retreat_id = HashEffectName("particle.skill.retreat_shot.move");
     constexpr auto pre_pull_id = HashEffectName("particle.upgrade.explosive.pre_pull");
-    constexpr auto point_payload = ShapeId("PointEventPayload");
-    constexpr auto circle_payload = ShapeId("CircleAreaPayload");
+    constexpr auto point_payload = hs::vfx_payload::PointEvent;
+    constexpr auto circle_payload = hs::vfx_payload::CircleArea;
     constexpr auto core_source = ShapeId("link_core");
     constexpr auto outer_source = ShapeId("link_outer");
-    const auto valid_range = [](VfxRange range, std::size_t size) {
-        return range.first <= size && range.count <= size - range.first;
-    };
     const auto valid_textures = [&](VfxRange range) {
-        if (!valid_range(range, textures.size())) return false;
-        for (const auto &binding : textures.subspan(range.first, range.count))
+        for (const auto &binding : program.texture_bindings.subspan(range.first, range.count))
         {
-            if (!binding.valid_path || binding.min_quality > 2 ||
+            if (binding.min_quality > 2 ||
                 !std::isfinite(binding.strength) || binding.strength != 1.0f ||
-                binding.selection != 0 || !valid_range(binding.slices, slice_indices.size()) ||
-                binding.slices.count != 0 || binding.first_frame != 0 ||
+                binding.selection != 0 || binding.slices.count != 0 || binding.first_frame != 0 ||
                 binding.frame_count != 0 || binding.fps != 0.0f)
                 return false;
-            const bool global = binding.role == ShapeId("profile.global") &&
-                (binding.asset == VfxRibbonTextureAsset::Gradient ||
-                 binding.asset == VfxRibbonTextureAsset::Curve);
-            const bool authored = binding.role == ShapeId("profile.authored") &&
-                binding.asset == VfxRibbonTextureAsset::FlowCurl;
-            const bool optional = binding.role == ShapeId("profile.optional_detail") &&
-                binding.asset == VfxRibbonTextureAsset::OptionalDetail;
-            if (!global && !authored && !optional) return false;
+            if (!IsRibbonProfileTexture(program, binding)) return false;
         }
         return true;
     };
-    ranges.assign(effects.size(), {});
+    ranges.assign(program.effects.size(), {});
     recipes.clear();
-    for (std::size_t effect_index = 0; effect_index < effects.size(); ++effect_index)
+    for (std::size_t effect_index = 0; effect_index < program.effects.size(); ++effect_index)
     {
-        const auto &effect = effects[effect_index];
+        const auto &effect = program.effects[effect_index];
+        const auto id = program.effect_lookup[effect_index].effect_id;
         VfxRibbonFixedKind kind{};
-        const auto payload_kind = effect.effect_id == common_id ? point_payload :
-            (effect.effect_id == retreat_id ? point_payload : circle_payload);
-        if (effect.effect_id == common_id) kind = VfxRibbonFixedKind::CommonPull;
-        else if (effect.effect_id == retreat_id) kind = VfxRibbonFixedKind::RetreatMove;
-        else if (effect.effect_id == pre_pull_id) kind = VfxRibbonFixedKind::ExplosivePrePull;
+        const auto payload_kind = id == common_id ? point_payload :
+            (id == retreat_id ? point_payload : circle_payload);
+        if (id == common_id) kind = VfxRibbonFixedKind::CommonPull;
+        else if (id == retreat_id) kind = VfxRibbonFixedKind::RetreatMove;
+        else if (id == pre_pull_id) kind = VfxRibbonFixedKind::ExplosivePrePull;
         else continue;
-        if (!effect.valid_handle || effect.handle != effect_index + 1 ||
-            effect.lookup_count != 1 || effect.identity_count != 1 ||
-            effect.input_mode != 0 || effect.timing_kind != 0 ||
+        if (effect.input_mode != 0 || effect.timing_kind != 0 ||
             effect.payload_kind != payload_kind || effect.sources.count != 2 ||
-            !std::isfinite(effect.seconds) || effect.seconds != .45f ||
-            !valid_range(effect.sources, sources.size()))
+            !std::isfinite(effect.seconds) || effect.seconds != .45f)
             continue;
         const auto range = effect.sources;
         const VfxRibbonSourceRecipe *core{};
         const VfxRibbonSourceRecipe *outer{};
-        std::uint32_t core_index{}, outer_index{};
         bool valid_sources = true;
         for (std::uint32_t source_index = range.first;
              source_index < range.first + range.count; ++source_index)
@@ -1070,29 +1034,26 @@ void PrepareVfxRibbonFixedRecipes(std::span<const VfxRibbonEffectRecipe> effects
             const auto &source = sources[source_index];
             const bool is_core = source.stable_id == core_source;
             const bool is_outer = source.stable_id == outer_source;
-            if (source.effect != effect.handle || source.source_index != source_index ||
-                (!is_core && !is_outer) || (is_core && core) || (is_outer && outer) ||
+            if ((!is_core && !is_outer) || (is_core && core) || (is_outer && outer) ||
                 source.type != VfxSourceType::HistoryRibbon || source.knot_count != 2 ||
                 source.knots[0] != 0.0f || source.knots[1] != 1.0f ||
                 source.parameter_count != 0 || source.outputs.count != 1 ||
-                !valid_range(source.outputs, outputs.size()) ||
                 source.authoritative != (kind == VfxRibbonFixedKind::ExplosivePrePull && is_core ? 1u : 0u))
             {
                 valid_sources = false;
                 break;
             }
-            if (is_core) { core = &source; core_index = source_index; }
-            else { outer = &source; outer_index = source_index; }
+            if (is_core) core = &source;
+            else outer = &source;
         }
         if (!valid_sources || !core || !outer) continue;
         const auto &core_record = outputs[core->outputs.first];
         const auto &outer_record = outputs[outer->outputs.first];
-        const auto valid_output = [&](const VfxRibbonOutputRecipe &output, std::uint32_t source_index,
-                                      bool is_core) {
+        const auto valid_output = [&](const VfxRibbonOutputRecipe &output, bool is_core) {
             const auto profile = is_core ? VfxOutputProfile::RibbonAdd : VfxOutputProfile::RibbonOit;
             const auto motion = is_core ? VfxMotionKind::CurvedLinkTravelingHead :
                                           VfxMotionKind::SoftWiderSheath;
-            if (output.source != source_index || output.profile != profile ||
+            if (output.profile != profile ||
                 output.shape != ShapeId("bezier_ribbon") || output.motion != motion ||
                 output.coverage_type != ShapeId("analytic") ||
                 output.coverage_ref != ShapeId("ribbon_energy_core") ||
@@ -1108,8 +1069,8 @@ void PrepareVfxRibbonFixedRecipes(std::span<const VfxRibbonEffectRecipe> effects
                 output.width_multiplier > 0.0f && output.noise_warp_present &&
                 output.noise_warp_valid && output.noise_warp >= 0.0f;
         };
-        if (!valid_output(core_record, core_index, true) ||
-            !valid_output(outer_record, outer_index, false))
+        if (!valid_output(core_record, true) ||
+            !valid_output(outer_record, false))
             continue;
         VfxRibbonFixedRecipe recipe{};
         recipe.effect_handle = effect.handle;
@@ -1132,49 +1093,36 @@ void PrepareVfxRibbonFixedRecipes(std::span<const VfxRibbonEffectRecipe> effects
     }
 }
 
-void PrepareVfxRibbonProjectileRecipes(std::span<const VfxRibbonEffectRecipe> effects,
+void PrepareVfxRibbonProjectileRecipes(const VfxProgramView &program,
     std::span<const VfxRibbonSourceRecipe> sources,
     std::span<const VfxRibbonOutputRecipe> outputs,
-    std::span<const VfxRibbonTextureRecipe> textures,
-    std::span<const std::uint32_t> slice_indices,
     std::vector<VfxRange> &effect_ranges,
     std::vector<VfxRibbonProjectileSourceRecipe> &source_recipes,
     std::vector<VfxRibbonProjectileOutputRecipe> &output_recipes)
 {
-    const auto valid_range = [](VfxRange range, std::size_t size) {
-        return range.first <= size && range.count <= size - range.first;
-    };
     const auto accepted_motion = [](VfxMotionKind motion) {
         return motion == VfxMotionKind::HistoryRibbonTaperedFlow ||
             motion == VfxMotionKind::ShortTurbulentWake ||
             motion == VfxMotionKind::TwoPhaseNarrowWakes;
     };
-    const auto detail_binding = [](const VfxRibbonTextureRecipe &binding) {
-        return binding.valid_path && binding.asset == VfxRibbonTextureAsset::DetailArray;
-    };
-    effect_ranges.assign(effects.size(), {});
+    effect_ranges.assign(program.effects.size(), {});
     source_recipes.clear();
     output_recipes.clear();
-    for (std::size_t effect_index = 0; effect_index < effects.size(); ++effect_index)
+    for (std::size_t effect_index = 0; effect_index < program.effects.size(); ++effect_index)
     {
-        const auto &effect = effects[effect_index];
+        const auto &effect = program.effects[effect_index];
         auto &effect_range = effect_ranges[effect_index];
         effect_range.first = static_cast<std::uint32_t>(source_recipes.size());
-        if (!effect.valid_handle || effect.handle != effect_index + 1 ||
-            !valid_range(effect.sources, sources.size()))
-            continue;
         for (std::uint32_t source_index = effect.sources.first;
              source_index < effect.sources.first + effect.sources.count; ++source_index)
         {
             const auto &source = sources[source_index];
-            if (source.effect != effect.handle || source.source_index != source_index ||
-                source.type != VfxSourceType::HistoryRibbon || !source.history_present ||
+            if (source.type != VfxSourceType::HistoryRibbon || !source.history_present ||
                 !source.history_valid || source.history_seconds <= 0.0f ||
-                source.history_seconds > 62.0f / 60.0f ||
-                !valid_range(source.outputs, outputs.size()))
+                source.history_seconds > 62.0f / 60.0f)
                 continue;
             VfxRibbonProjectileSourceRecipe prepared_source{};
-            prepared_source.effect_handle = effect.handle;
+            prepared_source.fade_seconds = effect.seconds > 0.0f ? effect.seconds : source.history_seconds;
             prepared_source.source_id = source.stable_id;
             prepared_source.knot_count = source.knot_count;
             prepared_source.history_seconds = source.history_seconds;
@@ -1184,8 +1132,7 @@ void PrepareVfxRibbonProjectileRecipes(std::span<const VfxRibbonEffectRecipe> ef
                  output_index < source.outputs.first + source.outputs.count; ++output_index)
             {
                 const auto &output = outputs[output_index];
-                if (output.source != source_index ||
-                    (output.profile != VfxOutputProfile::RibbonAdd &&
+                if ((output.profile != VfxOutputProfile::RibbonAdd &&
                      output.profile != VfxOutputProfile::RibbonOit) ||
                     !accepted_motion(output.motion) ||
                     (output.shape != ShapeId("camera_facing_ribbon") &&
@@ -1193,8 +1140,7 @@ void PrepareVfxRibbonProjectileRecipes(std::span<const VfxRibbonEffectRecipe> ef
                     !output.width_head_present || !output.width_head_valid ||
                     !output.width_tail_present || !output.width_tail_valid ||
                     (output.noise_warp_present && !output.noise_warp_valid) ||
-                    (output.phase_offset_present && !output.phase_offset_valid) ||
-                    !valid_range(output.textures, textures.size()))
+                    (output.phase_offset_present && !output.phase_offset_valid))
                     continue;
                 VfxRibbonProjectileOutputRecipe prepared_output{};
                 prepared_output.min_quality = output.min_quality;
@@ -1208,13 +1154,12 @@ void PrepareVfxRibbonProjectileRecipes(std::span<const VfxRibbonEffectRecipe> ef
                 prepared_output.output.noise_warp = output.noise_warp_present ? output.noise_warp : 0.0f;
                 prepared_output.output.phase_offset = output.phase_offset_present ? output.phase_offset : 0.0f;
                 prepared_output.output.dashed = output.coverage_ref == ShapeId("ribbon_dash_repeat");
-                const auto texture_rows = textures.subspan(output.textures.first, output.textures.count);
+                const auto texture_rows = program.texture_bindings.subspan(output.textures.first, output.textures.count);
                 const auto detail = std::find_if(texture_rows.begin(), texture_rows.end(),
-                    [&](const auto &binding) { return detail_binding(binding) && binding.slices.count != 0; });
+                    [&](const auto &binding) { return binding.slices.count != 0 && IsRibbonDetail(program, binding); });
                 if (detail != texture_rows.end())
                 {
-                    if (!valid_range(detail->slices, slice_indices.size())) continue;
-                    const auto slices = slice_indices.subspan(detail->slices.first, detail->slices.count);
+                    const auto slices = program.slice_indices.subspan(detail->slices.first, detail->slices.count);
                     if (std::ranges::any_of(slices, [](std::uint32_t slice) { return slice >= 8; })) continue;
                     prepared_output.detail_present = true;
                     prepared_output.detail_slices = detail->slices;
@@ -1235,52 +1180,43 @@ void PrepareVfxRibbonProjectileRecipes(std::span<const VfxRibbonEffectRecipe> ef
     }
 }
 
-void PrepareVfxRibbonCancelRecipes(std::span<const VfxRibbonEffectRecipe> effects,
+void PrepareVfxRibbonCancelRecipes(const VfxProgramView &program,
     std::span<const VfxRibbonSourceRecipe> sources,
     std::span<const VfxRibbonOutputRecipe> outputs,
-    std::span<const VfxRibbonTextureRecipe> textures,
     std::vector<VfxRange> &ranges, std::vector<VfxRibbonCancelRecipe> &recipes)
 {
     constexpr auto effect_id = HashEffectName("particle.skill.charged_shot.cancel");
-    constexpr auto payload_kind = ShapeId("EntityAttachmentPayload");
+    constexpr auto payload_kind = hs::vfx_payload::EntityAttachment;
     constexpr auto source_id = ShapeId("retract_ribbon");
     constexpr auto shape_id = ShapeId("dual_retract_ribbon");
-    const auto valid_range = [](VfxRange range, std::size_t size) {
-        return range.first <= size && range.count <= size - range.first;
-    };
-    ranges.assign(effects.size(), {});
+    ranges.assign(program.effects.size(), {});
     recipes.clear();
-    for (std::size_t effect_index = 0; effect_index < effects.size(); ++effect_index)
+    for (std::size_t effect_index = 0; effect_index < program.effects.size(); ++effect_index)
     {
-        const auto &effect = effects[effect_index];
+        const auto &effect = program.effects[effect_index];
         auto &range = ranges[effect_index];
         range.first = static_cast<std::uint32_t>(recipes.size());
-        if (effect.effect_id != effect_id || !effect.valid_handle || effect.handle != effect_index + 1 ||
-            effect.input_mode != 0 || effect.timing_kind != 0 || effect.payload_kind != payload_kind ||
-            !std::isfinite(effect.seconds) || effect.seconds <= 0.0f ||
-            !valid_range(effect.sources, sources.size()))
+        if (program.effect_lookup[effect_index].effect_id != effect_id || effect.input_mode != 0 || effect.timing_kind != 0 || effect.payload_kind != payload_kind ||
+            !std::isfinite(effect.seconds) || effect.seconds <= 0.0f)
             continue;
         for (std::uint32_t source_index = effect.sources.first;
              source_index < effect.sources.first + effect.sources.count; ++source_index)
         {
             const auto &source = sources[source_index];
-            if (source.effect != effect.handle || source.source_index != source_index ||
-                source.type != VfxSourceType::HistoryRibbon || source.stable_id != source_id ||
+            if (source.type != VfxSourceType::HistoryRibbon || source.stable_id != source_id ||
                 source.knot_count != 2 || source.knots[0] != 0.0f || source.knots[1] != 1.0f ||
                 source.outputs.count != 1 || !source.history_present || !source.history_valid ||
-                source.history_seconds <= 0.0f || source.history_seconds > 62.0f / 60.0f ||
-                !valid_range(source.outputs, outputs.size()))
+                source.history_seconds <= 0.0f || source.history_seconds > 62.0f / 60.0f)
                 continue;
             const auto &output = outputs[source.outputs.first];
-            if (output.source != source_index || output.profile != VfxOutputProfile::RibbonAdd ||
+            if (output.profile != VfxOutputProfile::RibbonAdd ||
                 output.motion != VfxMotionKind::ReverseFlowBow || output.shape != shape_id ||
                 output.parameter_count != 3 || !output.color_contract_valid ||
                 output.rgba.x < 0.0f || output.rgba.y < 0.0f || output.rgba.z < 0.0f ||
                 !output.reverse_flow_present || !output.reverse_flow_valid || output.reverse_flow != 1.0f ||
                 !output.width_head_present || !output.width_head_valid || output.width_head <= 0.0f ||
                 !output.width_tail_present || !output.width_tail_valid || output.width_tail < 0.0f ||
-                output.width_tail > output.width_head ||
-                !valid_range(output.textures, textures.size()))
+                output.width_tail > output.width_head)
                 continue;
             recipes.push_back({effect.handle, effect.importance, source.stable_id,
                 output.min_quality, effect.seconds, source.history_seconds,
@@ -1291,70 +1227,49 @@ void PrepareVfxRibbonCancelRecipes(std::span<const VfxRibbonEffectRecipe> effect
     }
 }
 
-void PrepareVfxRibbonLinkRecipes(std::span<const VfxRibbonEffectRecipe> effects,
+void PrepareVfxRibbonLinkRecipes(const VfxProgramView &program,
     std::span<const VfxRibbonSourceRecipe> sources,
     std::span<const VfxRibbonOutputRecipe> outputs,
-    std::span<const VfxRibbonTextureRecipe> textures,
-    std::span<const std::uint32_t> slice_indices,
     std::vector<VfxRibbonLinkEffectRecipe> &effect_recipes,
     std::vector<VfxRibbonLinkOutputRecipe> &output_recipes)
 {
-    constexpr auto source_target = ShapeId("SourceTargetPayload");
-    constexpr auto point_path = ShapeId("ProjectilePathPayload");
-    constexpr auto line_payload = ShapeId("LineAreaPayload");
-    constexpr auto context_payload = ShapeId("PresentationContextPayload");
+    constexpr auto source_target = hs::vfx_payload::SourceTarget;
+    constexpr auto point_path = hs::vfx_payload::ProjectilePath;
+    constexpr auto line_payload = hs::vfx_payload::LineArea;
+    constexpr auto context_payload = hs::vfx_payload::PresentationContext;
     constexpr auto core_id = ShapeId("link_core");
     constexpr auto outer_id = ShapeId("link_outer");
     constexpr auto bezier = ShapeId("bezier_ribbon");
     constexpr auto energy = ShapeId("ribbon_energy_core");
     constexpr auto analytic = ShapeId("analytic");
     constexpr auto detail_role = ShapeId("ribbon_detail_array");
-    constexpr auto global_role = ShapeId("profile.global");
-    constexpr auto authored_role = ShapeId("profile.authored");
-    constexpr auto optional_role = ShapeId("profile.optional_detail");
     constexpr auto detail_selection = ShapeId("stable_seed_mod_group_size");
-    const auto valid_range = [](VfxRange range, std::size_t size) {
-        return range.first <= size && range.count <= size - range.first;
-    };
     const auto detail_facts = [&](VfxRange texture_range, bool strict_roles) {
         std::array<VfxRibbonLinkDetailRecipe,3> details{};
-        if (!valid_range(texture_range, textures.size())) {
-            for (auto &detail : details) detail.valid = false;
-            return details;
-        }
-        const auto bindings = textures.subspan(texture_range.first, texture_range.count);
+        const auto bindings = program.texture_bindings.subspan(texture_range.first, texture_range.count);
         for (std::uint32_t quality = 0; quality < details.size(); ++quality)
         {
             auto &detail = details[quality];
             for (const auto &binding : bindings)
             {
                 if (!strict_roles && binding.role != detail_role) continue;
-                if (!binding.valid_path || binding.min_quality > 2 ||
+                if (binding.min_quality > 2 ||
                     !std::isfinite(binding.strength) || binding.strength < 0.0f ||
                     binding.strength > 1.0f) { detail.valid = false; break; }
-                const bool global = binding.role == global_role &&
-                    (binding.asset == VfxRibbonTextureAsset::Gradient ||
-                     binding.asset == VfxRibbonTextureAsset::Curve);
-                const bool authored = binding.role == authored_role &&
-                    binding.asset == VfxRibbonTextureAsset::FlowCurl;
-                const bool optional = binding.role == optional_role &&
-                    binding.asset == VfxRibbonTextureAsset::OptionalDetail;
-                if (binding.role == global_role || binding.role == authored_role ||
-                    binding.role == optional_role)
+                if (binding.role != detail_role)
                 {
-                    if ((!global && !authored && !optional) || binding.min_quality != 0 ||
+                    if (!IsRibbonProfileTexture(program, binding) || binding.min_quality != 0 ||
                         binding.selection != 0 || binding.slices.count != 0 || binding.strength != 1.0f)
                         detail.valid = false;
                     if (!detail.valid) break;
                     continue;
                 }
-                if (binding.role != detail_role) { detail.valid = false; break; }
                 if (binding.min_quality > quality) continue;
-                if (binding.asset != VfxRibbonTextureAsset::DetailArray ||
-                    !valid_range(binding.slices, slice_indices.size()) || binding.slices.count == 0 ||
+                if (!IsRibbonDetail(program, binding) ||
+                    binding.slices.count == 0 ||
                     binding.selection != detail_selection || detail.present)
                 { detail.valid = false; break; }
-                const auto slices = slice_indices.subspan(binding.slices.first, binding.slices.count);
+                const auto slices = program.slice_indices.subspan(binding.slices.first, binding.slices.count);
                 if (std::ranges::any_of(slices, [](std::uint32_t slice) { return slice >= 8; }))
                 { detail.valid = false; break; }
                 detail.present = true;
@@ -1364,39 +1279,38 @@ void PrepareVfxRibbonLinkRecipes(std::span<const VfxRibbonEffectRecipe> effects,
         }
         return details;
     };
-    effect_recipes.assign(effects.size(), {});
+    effect_recipes.assign(program.effects.size(), {});
     output_recipes.clear();
-    for (std::size_t effect_index = 0; effect_index < effects.size(); ++effect_index)
+    for (std::size_t effect_index = 0; effect_index < program.effects.size(); ++effect_index)
     {
-        const auto &effect = effects[effect_index];
+        const auto &effect = program.effects[effect_index];
+        const auto id = program.effect_lookup[effect_index].effect_id;
         VfxRibbonLinkKind kind{};
         std::uint32_t payload{};
         std::uint32_t input_mode{}, timing_kind{};
-        if (effect.effect_id == HashEffectName("particle.upgrade.arrow.return"))
+        if (id == HashEffectName("particle.upgrade.arrow.return"))
         { kind = VfxRibbonLinkKind::CapturedPath; payload = point_path; input_mode = 1; }
-        else if (effect.effect_id == HashEffectName("particle.upgrade.retreat.second_dash"))
+        else if (id == HashEffectName("particle.upgrade.retreat.second_dash"))
         { kind = VfxRibbonLinkKind::CapturedLine; payload = line_payload; input_mode = 1; }
-        else if (effect.effect_id == HashEffectName("particle.upgrade.retreat.afterimage"))
+        else if (id == HashEffectName("particle.upgrade.retreat.afterimage"))
         { kind = VfxRibbonLinkKind::CapturedContext; payload = context_payload; input_mode = 1; }
-        else if (effect.effect_id == HashEffectName("particle.pickup.xp.magnet_trail"))
+        else if (id == HashEffectName("particle.pickup.xp.magnet_trail"))
         { kind = VfxRibbonLinkKind::PickupMotion; payload = source_target; input_mode = 0; timing_kind = 1; }
-        else if (effect.effect_id == HashEffectName("particle.line.ricochet") ||
-                 effect.effect_id == HashEffectName("particle.line.burn_transfer") ||
-                 effect.effect_id == HashEffectName("particle.line.relic_chain") ||
-                 effect.effect_id == HashEffectName("particle.upgrade.ricochet.return"))
+        else if (id == HashEffectName("particle.line.ricochet") ||
+                 id == HashEffectName("particle.line.burn_transfer") ||
+                 id == HashEffectName("particle.line.relic_chain") ||
+                 id == HashEffectName("particle.upgrade.ricochet.return"))
         { kind = VfxRibbonLinkKind::SourceTarget; payload = source_target; input_mode = 1; timing_kind = 1; }
-        else if (effect.effect_id == HashEffectName("particle.upgrade.arrow_rain.pull"))
+        else if (id == HashEffectName("particle.upgrade.arrow_rain.pull"))
         { kind = VfxRibbonLinkKind::ArrowRain; payload = source_target; input_mode = 0; }
-        else if (effect.effect_id == HashEffectName("particle.pickup.xp_collect") ||
-                 effect.effect_id == HashEffectName("particle.pickup.heal_collect") ||
-                 effect.effect_id == HashEffectName("particle.pickup.magnet_collect") ||
-                 effect.effect_id == HashEffectName("particle.pickup.relic_collect"))
+        else if (id == HashEffectName("particle.pickup.xp_collect") ||
+                 id == HashEffectName("particle.pickup.heal_collect") ||
+                 id == HashEffectName("particle.pickup.magnet_collect") ||
+                 id == HashEffectName("particle.pickup.relic_collect"))
         { kind = VfxRibbonLinkKind::PickupCollect; payload = source_target; input_mode = 0; }
         else continue;
-        if (!effect.valid_handle || effect.handle != effect_index + 1 ||
-            effect.input_mode != input_mode || effect.timing_kind != timing_kind ||
-            effect.payload_kind != payload || !valid_range(effect.sources, sources.size()) ||
-            (kind == VfxRibbonLinkKind::PickupCollect && effect.identity_count != 1))
+        if (effect.input_mode != input_mode || effect.timing_kind != timing_kind ||
+            effect.payload_kind != payload)
             continue;
         if ((kind == VfxRibbonLinkKind::CapturedPath || kind == VfxRibbonLinkKind::CapturedLine ||
              kind == VfxRibbonLinkKind::CapturedContext || kind == VfxRibbonLinkKind::PickupCollect) &&
@@ -1416,11 +1330,10 @@ void PrepareVfxRibbonLinkRecipes(std::span<const VfxRibbonEffectRecipe> effects,
             for (std::uint32_t si = effect.sources.first; si < effect.sources.first + effect.sources.count; ++si)
             {
                 const auto &source = sources[si];
-                if (source.effect != effect.handle || source.type != VfxSourceType::HistoryRibbon ||
-                    source.stable_id != core_id || source.parameter_count != 0 ||
-                    !valid_range(source.outputs, outputs.size())) continue;
+                if (source.type != VfxSourceType::HistoryRibbon ||
+                    source.stable_id != core_id || source.parameter_count != 0) continue;
                 for (const auto &output : outputs.subspan(source.outputs.first, source.outputs.count))
-                    if (output.source == si && output.profile == VfxOutputProfile::RibbonAdd &&
+                    if (output.profile == VfxOutputProfile::RibbonAdd &&
                         output.shape == bezier && output.motion == VfxMotionKind::CurvedLinkTravelingHead &&
                         output.parameter_count == 3 && output.taper_present && output.taper_valid &&
                         output.taper >= 0.0f && output.taper <= 1.0f && output.segments_present &&
@@ -1442,15 +1355,14 @@ void PrepareVfxRibbonLinkRecipes(std::span<const VfxRibbonEffectRecipe> effects,
                 const bool core = source.stable_id == core_id;
                 const bool outer = source.stable_id == outer_id;
                 const bool pickup = kind == VfxRibbonLinkKind::PickupCollect;
-                if (source.effect != effect.handle || source.type != VfxSourceType::HistoryRibbon ||
+                if (source.type != VfxSourceType::HistoryRibbon ||
                     source.parameter_count != 0 || (!pickup && !core && !outer) ||
                     (pickup && (source.stable_id != ShapeId("absorb_ribbon") || source.knot_count != 2 ||
                         source.knots[0] != .1f || source.knots[1] != 1.0f)) ||
                     (!pickup && (source.knot_count != 2 || source.knots[0] != 0.0f || source.knots[1] != 1.0f)) ||
-                    (pickup && source.outputs.count != 1) || !valid_range(source.outputs, outputs.size())) continue;
+                    (pickup && source.outputs.count != 1)) continue;
                 for (const auto &output : outputs.subspan(source.outputs.first, source.outputs.count))
                 {
-                    if (output.source != si || !valid_range(output.textures, textures.size())) continue;
                     VfxRibbonLinkOutputRecipe prepared{};
                     prepared.source_id = source.stable_id;
                     prepared.core = core;
@@ -1507,37 +1419,29 @@ void PrepareVfxRibbonLinkRecipes(std::span<const VfxRibbonEffectRecipe> effects,
     }
 }
 
-void PrepareVfxRibbonEventRecipes(std::span<const VfxRibbonEffectRecipe> effects,
+void PrepareVfxRibbonEventRecipes(const VfxProgramView &program,
     std::span<const VfxRibbonSourceRecipe> sources,
     std::span<const VfxRibbonOutputRecipe> outputs,
-    std::span<const VfxRibbonTextureRecipe> textures,
-    std::span<const std::uint32_t> slice_indices,
     std::vector<VfxRibbonEventEffectRecipe> &effect_recipes,
     std::vector<VfxRibbonEventSourceRecipe> &source_recipes,
     std::vector<VfxRibbonEventOutputRecipe> &output_recipes)
 {
     constexpr auto axial_shape = ShapeId("impact_axis_ribbon");
     constexpr auto recoil_shape = ShapeId("short_arc_ribbon");
-    constexpr auto detail_asset = VfxRibbonTextureAsset::DetailArray;
-    const auto valid_range = [](VfxRange range, std::size_t size) {
-        return range.first <= size && range.count <= size - range.first;
-    };
-    effect_recipes.assign(effects.size(), {});
+    effect_recipes.assign(program.effects.size(), {});
     source_recipes.clear();
     output_recipes.clear();
-    for (std::size_t effect_index = 0; effect_index < effects.size(); ++effect_index)
+    for (std::size_t effect_index = 0; effect_index < program.effects.size(); ++effect_index)
     {
-        const auto &effect = effects[effect_index];
+        const auto &effect = program.effects[effect_index];
         auto &effect_recipe = effect_recipes[effect_index];
         effect_recipe.sources.first = static_cast<std::uint32_t>(source_recipes.size());
-        if (!effect.valid_handle || effect.handle != effect_index + 1 || effect.input_mode != 0 ||
-            effect.timing_kind != 0 || !std::isfinite(effect.seconds) || effect.seconds <= 0.0f ||
-            !valid_range(effect.sources, sources.size()))
+        if (effect.input_mode != 0 ||
+            effect.timing_kind != 0 || !std::isfinite(effect.seconds) || effect.seconds <= 0.0f)
             continue;
-        const bool projectile = effect.payload_kind == ShapeId("ProjectilePayload");
-        if (projectile && effect.effect_id != HashEffectName("particle.skill.charged_shot.impact"))
+        const bool projectile = effect.payload_kind == hs::vfx_payload::Projectile;
+        if (projectile && program.effect_lookup[effect_index].effect_id != HashEffectName("particle.skill.charged_shot.impact"))
             continue;
-        effect_recipe.effect_id = effect.effect_id;
         effect_recipe.effect_handle = effect.handle;
         effect_recipe.importance = effect.importance;
         effect_recipe.payload_kind = effect.payload_kind;
@@ -1546,12 +1450,10 @@ void PrepareVfxRibbonEventRecipes(std::span<const VfxRibbonEffectRecipe> effects
              source_index < effect.sources.first + effect.sources.count; ++source_index)
         {
             const auto &source = sources[source_index];
-            if (source.effect != effect.handle || source.source_index != source_index ||
-                source.type != VfxSourceType::HistoryRibbon ||
+            if (source.type != VfxSourceType::HistoryRibbon ||
                 !source.history_present || !source.history_valid || source.history_seconds <= 0.0f ||
                 source.history_seconds > 62.0f / 60.0f ||
-                !source.knots_valid || (source.knot_count != 2 && source.knot_count != 4) ||
-                !valid_range(source.outputs, outputs.size()))
+                !source.knots_valid || (source.knot_count != 2 && source.knot_count != 4))
                 continue;
             VfxRibbonEventSourceRecipe prepared_source{};
             prepared_source.source_id = source.stable_id;
@@ -1565,33 +1467,6 @@ void PrepareVfxRibbonEventRecipes(std::span<const VfxRibbonEffectRecipe> effects
                 !std::isfinite(prepared_source.end_seconds) ||
                 prepared_source.end_seconds <= prepared_source.start_seconds)
                 continue;
-            for (std::uint32_t quality = 0; quality < 3; ++quality)
-                for (const auto &output : outputs.subspan(source.outputs.first, source.outputs.count))
-                {
-                    const bool axial = output.motion == VfxMotionKind::ShortLineIncomingVelocity &&
-                        output.shape == axial_shape;
-                    const bool recoil = output.motion == VfxMotionKind::CurvedRecoilArc &&
-                        output.shape == recoil_shape;
-                    if (output.source != source_index ||
-                        (output.profile != VfxOutputProfile::RibbonAdd &&
-                         output.profile != VfxOutputProfile::RibbonOit) ||
-                        (!axial && !recoil) || (axial && output.profile != VfxOutputProfile::RibbonAdd) ||
-                        output.min_quality > quality ||
-                        (output.arc_present && (!output.arc_valid || output.arc_degrees <= 0.0f ||
-                                                 output.arc_degrees > 360.0f)))
-                        continue;
-                    if (axial && (!output.width_head_present || !output.width_head_valid ||
-                        output.width_head <= 0.0f || !output.width_tail_present ||
-                        !output.width_tail_valid || output.width_tail < 0.0f ||
-                        !std::isfinite(output.rgba.x) || !std::isfinite(output.rgba.y) ||
-                        !std::isfinite(output.rgba.z) || !std::isfinite(output.rgba.w) ||
-                        output.rgba.w < 0.0f || output.rgba.w > 1.0f ||
-                        !std::isfinite(output.hdr) || output.hdr <= 0.0f || output.gradient_row >= 68u))
-                        continue;
-                    if (!output.arc_present) continue;
-                    (axial ? prepared_source.axial_arc_by_quality[quality] :
-                             prepared_source.recoil_arc_by_quality[quality]) = output.arc_degrees;
-                }
             prepared_source.outputs.first = static_cast<std::uint32_t>(output_recipes.size());
             for (std::uint32_t output_index = source.outputs.first;
                  output_index < source.outputs.first + source.outputs.count; ++output_index)
@@ -1600,13 +1475,11 @@ void PrepareVfxRibbonEventRecipes(std::span<const VfxRibbonEffectRecipe> effects
                 const bool axial = output.motion == VfxMotionKind::ShortLineIncomingVelocity &&
                     output.shape == axial_shape;
                 if (axial != projectile) continue;
-                if (output.source != source_index ||
-                    (output.profile != VfxOutputProfile::RibbonAdd &&
+                if ((output.profile != VfxOutputProfile::RibbonAdd &&
                      output.profile != VfxOutputProfile::RibbonOit) ||
                     (!axial && (output.motion != VfxMotionKind::CurvedRecoilArc ||
                                 output.shape != recoil_shape)) ||
                     (axial && output.profile != VfxOutputProfile::RibbonAdd) ||
-                    !valid_range(output.textures, textures.size()) ||
                     (output.arc_present && (!output.arc_valid || output.arc_degrees <= 0.0f ||
                                              output.arc_degrees > 360.0f)))
                     continue;
@@ -1618,9 +1491,11 @@ void PrepareVfxRibbonEventRecipes(std::span<const VfxRibbonEffectRecipe> effects
                     output.rgba.w < 0.0f || output.rgba.w > 1.0f ||
                     !std::isfinite(output.hdr) || output.hdr <= 0.0f || output.gradient_row >= 68u))
                     continue;
+                if (!axial && output.arc_present)
+                    for (auto q = output.min_quality; q < prepared_source.recoil_arc_by_quality.size(); ++q)
+                        prepared_source.recoil_arc_by_quality[q] = output.arc_degrees;
                 VfxRibbonEventOutputRecipe prepared_output{};
                 prepared_output.min_quality = output.min_quality;
-                prepared_output.axial = axial;
                 prepared_output.arc_present = output.arc_present;
                 prepared_output.arc_degrees = output.arc_degrees;
                 prepared_output.output.profile = output.profile;
@@ -1631,16 +1506,15 @@ void PrepareVfxRibbonEventRecipes(std::span<const VfxRibbonEffectRecipe> effects
                 prepared_output.output.width_head = axial ? output.width_head : 0.0f;
                 prepared_output.output.width_tail = axial ? output.width_tail : 0.0f;
                 prepared_output.output.dashed = output.coverage_ref == ShapeId("ribbon_dash_repeat");
-                const auto bindings = textures.subspan(output.textures.first, output.textures.count);
+                const auto bindings = program.texture_bindings.subspan(output.textures.first, output.textures.count);
                 const auto detail = std::find_if(bindings.begin(), bindings.end(), [&](const auto &binding) {
-                    return binding.valid_path && binding.asset == detail_asset && binding.slices.count != 0;
+                    return binding.slices.count != 0 && IsRibbonDetail(program, binding);
                 });
                 if (detail != bindings.end())
                 {
-                    if (!valid_range(detail->slices, slice_indices.size()) ||
-                        !std::isfinite(detail->strength) || detail->strength < 0.0f || detail->strength > 1.0f)
+                    if (!std::isfinite(detail->strength) || detail->strength < 0.0f || detail->strength > 1.0f)
                         continue;
-                    const auto slices = slice_indices.subspan(detail->slices.first, detail->slices.count);
+                    const auto slices = program.slice_indices.subspan(detail->slices.first, detail->slices.count);
                     if (std::ranges::any_of(slices, [](std::uint32_t slice) { return slice >= 8; })) continue;
                     prepared_output.detail_present = true;
                     prepared_output.detail_slices = detail->slices;
@@ -1655,14 +1529,6 @@ void PrepareVfxRibbonEventRecipes(std::span<const VfxRibbonEffectRecipe> effects
         effect_recipe.sources.count = static_cast<std::uint32_t>(source_recipes.size()) -
             effect_recipe.sources.first;
     }
-}
-
-void PrepareVfxEffectLookupById(VfxProgramView program,
-    std::vector<VfxEffectLookupRecord> &lookup_by_id)
-{
-    lookup_by_id.assign(program.effect_lookup.begin(), program.effect_lookup.end());
-    std::stable_sort(lookup_by_id.begin(), lookup_by_id.end(),
-        [](const auto &left, const auto &right) { return left.effect_id < right.effect_id; });
 }
 
 void PrepareVfxDistortionRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
@@ -1680,18 +1546,12 @@ void PrepareVfxDistortionRecipes(VfxProgramView p, std::vector<VfxRange> &ranges
     constexpr std::string_view global_path="Content/Textures/VFX/vfx_stbn_scalar.dds";
     constexpr std::string_view flow_path="Content/Textures/VFX/vfx_flow_curl_2d.dds";
     constexpr std::string_view noise_path="Content/Textures/VFX/vfx_noise_basis_2d.dds";
-    const auto texture_path=[&](std::uint32_t slot)->std::optional<std::string_view>{
-        const auto resource=std::find_if(p.texture_resources.begin(),p.texture_resources.end(),[&](const auto&r){return r.slot==slot;});
-        if(resource==p.texture_resources.end()||!valid(resource->asset_path_bytes,p.strings.size()))return {};
-        return std::string_view(reinterpret_cast<const char*>(p.strings.data())+resource->asset_path_bytes.first,resource->asset_path_bytes.count);
-    };
     for(std::size_t ei=0;ei<p.effects.size();++ei)
     {
         auto &range=ranges[ei];range.first=static_cast<std::uint32_t>(recipes.size());
         const auto&e=p.effects[ei];
         if(e.handle!=ei+1||!valid(e.sources,p.sources.size()))continue;
-        const auto lookup=std::find_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto&v){return v.handle==e.handle;});
-        if(lookup==p.effect_lookup.end()||!lookup->effect_id)continue;
+        const auto effect_id=p.effect_lookup[ei].effect_id;
         for(std::uint32_t si=e.sources.first;si<e.sources.first+e.sources.count;++si)
         {
             const auto&s=p.sources[si];
@@ -1708,13 +1568,13 @@ void PrepareVfxDistortionRecipes(VfxProgramView p, std::vector<VfxRange> &ranges
                    !valid(o.textures,p.texture_bindings.size())||o.min_quality>2||o.coverage_type!=ShapeId("analytic_mask")||
                    o.coverage_ref!=shape->id||!std::isfinite(o.rgba[3])||o.rgba[3]<0||o.rgba[3]>1)continue;
                 if((e.input_mode==0&&(e.timing_kind!=0||!std::isfinite(e.seconds)||e.seconds<=0))||
-                   (e.input_mode==1&&(e.timing_kind!=1||e.payload_kind!=ShapeId("ProjectilePayload")||!std::isfinite(e.seconds)||e.seconds<0))||e.input_mode>1)continue;
+                   (e.input_mode==1&&(e.timing_kind!=1||e.payload_kind!=hs::vfx_payload::Projectile||!std::isfinite(e.seconds)||e.seconds<0))||e.input_mode>1)continue;
                 bool textures_ok=true;
                 for(const auto&binding:p.texture_bindings.subspan(o.textures.first,o.textures.count))
                 {
-                    const auto path=texture_path(binding.catalog_slot);
-                    if(!path|| (binding.role==ShapeId("profile.global")?*path!=global_path:
-                        binding.role==ShapeId("profile.authored")?(*path!=flow_path&&*path!=noise_path):true))
+                    const auto path=TexturePath(p, binding);
+                    if((binding.role==ShapeId("profile.global")?path!=global_path:
+                        binding.role==ShapeId("profile.authored")?(path!=flow_path&&path!=noise_path):true))
                     {textures_ok=false;break;}
                 }
                 if(!textures_ok)continue;
@@ -1731,7 +1591,7 @@ void PrepareVfxDistortionRecipes(VfxProgramView p, std::vector<VfxRange> &ranges
                 }
                 if(!params_ok||!has_strength||!std::isfinite(strength)||strength<=0||!std::isfinite(radius)||radius<=0||
                    (explicit_radius&&!has_radius)||(radial&&!has_falloff))continue;
-                recipes.push_back({lookup->effect_id,e.handle,s.stable_id,e.payload_kind,e.importance,e.input_mode,e.timing_kind,
+                recipes.push_back({effect_id,e.handle,s.stable_id,e.payload_kind,e.importance,e.input_mode,e.timing_kind,
                     o.min_quality,s.knot_count,shape->kind,o.motion,s.knots,e.seconds,radius,strength,o.rgba[3]});
             }
         }
@@ -1747,18 +1607,12 @@ void PrepareVfxDecalRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
     constexpr std::string_view gradient="Content/Textures/VFX/vfx_gradient_lut.dds";
     constexpr std::string_view fracture="Content/Textures/VFX/vfx_fracture_decal_array.dds";
     constexpr std::string_view organic="Content/Textures/VFX/vfx_organic_decal_array.dds";
-    const auto texture_path=[&](std::uint32_t slot)->std::optional<std::string_view>{
-        const auto resource=std::find_if(p.texture_resources.begin(),p.texture_resources.end(),[&](const auto&r){return r.slot==slot;});
-        if(resource==p.texture_resources.end()||!valid(resource->asset_path_bytes,p.strings.size()))return {};
-        return std::string_view(reinterpret_cast<const char*>(p.strings.data())+resource->asset_path_bytes.first,resource->asset_path_bytes.count);
-    };
     for(std::size_t ei=0;ei<p.effects.size();++ei)
     {
         auto &range=ranges[ei];range.first=static_cast<std::uint32_t>(recipes.size());
         const auto&e=p.effects[ei];
         if(e.handle!=ei+1||!valid(e.sources,p.sources.size()))continue;
-        const auto lookup=std::find_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto&v){return v.handle==e.handle;});
-        if(lookup==p.effect_lookup.end()||!lookup->effect_id)continue;
+        const auto effect_id=p.effect_lookup[ei].effect_id;
         for(std::uint32_t si=e.sources.first;si<e.sources.first+e.sources.count;++si)
         {
             const auto&s=p.sources[si];
@@ -1797,15 +1651,15 @@ void PrepareVfxDecalRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                 const auto required=kind==VfxDecalKind::Fracture?fracture:organic;
                 for(const auto&b:p.texture_bindings.subspan(o.textures.first,o.textures.count))
                 {
-                    const auto path=texture_path(b.catalog_slot);
-                    if(!path||!std::isfinite(b.strength)||b.strength!=1||b.min_quality>2||!valid(b.slices,p.slice_indices.size())){texture_ok=false;break;}
+                    const auto path=TexturePath(p, b);
+                    if(!std::isfinite(b.strength)||b.strength!=1||b.min_quality>2||!valid(b.slices,p.slice_indices.size())){texture_ok=false;break;}
                     texture_min_quality=std::max(texture_min_quality,b.min_quality);
-                    if(b.role==ShapeId("profile.global")){if(*path!=gradient||b.slices.count!=0){texture_ok=false;break;}global=true;}
-                    else if(b.role==ShapeId("profile.authored")){if((*path!=fracture&&*path!=organic)||b.slices.count!=0){texture_ok=false;break;}}
-                    else if(b.role==ShapeId("coverage")){if(kind!=VfxDecalKind::Organic||coverage||*path!=organic||b.slices.count!=0){texture_ok=false;break;}coverage=true;}
+                    if(b.role==ShapeId("profile.global")){if(path!=gradient||b.slices.count!=0){texture_ok=false;break;}global=true;}
+                    else if(b.role==ShapeId("profile.authored")){if((path!=fracture&&path!=organic)||b.slices.count!=0){texture_ok=false;break;}}
+                    else if(b.role==ShapeId("coverage")){if(kind!=VfxDecalKind::Organic||coverage||path!=organic||b.slices.count!=0){texture_ok=false;break;}coverage=true;}
                     else if(b.role==ShapeId("texture_array"))
                     {
-                        if(detail||*path!=required||b.selection!=ShapeId("stable_seed_mod_4")||b.slices.count!=4){texture_ok=false;break;}
+                        if(detail||path!=required||b.selection!=ShapeId("stable_seed_mod_4")||b.slices.count!=4){texture_ok=false;break;}
                         const auto slices=p.slice_indices.subspan(b.slices.first,4);slice_base=slices[0];
                         if(slice_base!=0&&(kind!=VfxDecalKind::Organic||slice_base!=4)){texture_ok=false;break;}
                         for(std::uint32_t k=0;k<4;++k)if(slices[k]!=slice_base+k)texture_ok=false;
@@ -1814,7 +1668,7 @@ void PrepareVfxDecalRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                     else {texture_ok=false;break;}
                 }
                 if(!texture_ok||!global||!detail||(kind==VfxDecalKind::Organic&&!coverage))continue;
-                recipes.push_back({lookup->effect_id,e.handle,s.stable_id,e.payload_kind,e.importance,e.input_mode,e.timing_kind,
+                recipes.push_back({effect_id,e.handle,s.stable_id,e.payload_kind,e.importance,e.input_mode,e.timing_kind,
                     o.min_quality,s.knot_count,kind,s.knots,e.seconds,o.hdr,o.rgba[3],edge_glow,
                     {o.rgba[0],o.rgba[1],o.rgba[2]},o.gradient_row,base_cells,slice_base,texture_min_quality});
             }
@@ -1834,8 +1688,7 @@ void PrepareVfxLightRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
         auto &range=ranges[ei]; range.first=static_cast<std::uint32_t>(recipes.size());
         const auto &e=p.effects[ei];
         if(e.handle!=ei+1 || e.input_mode!=0 || e.timing_kind!=0 || !std::isfinite(e.seconds) || e.seconds<=0 || !valid_range(e.sources,p.sources.size()))continue;
-        const auto id=std::find_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &v){return v.handle==e.handle;});
-        if(id==p.effect_lookup.end() || !id->effect_id)continue;
+        const auto effect_id=p.effect_lookup[ei].effect_id;
         for(std::uint32_t si=e.sources.first;si<e.sources.first+e.sources.count;++si)
         {
             const auto &source=p.sources[si];
@@ -1875,7 +1728,7 @@ void PrepareVfxLightRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                 if(!std::isfinite(o.rgba[0])||!std::isfinite(o.rgba[1])||!std::isfinite(o.rgba[2])||o.rgba[0]<0||o.rgba[1]<0||o.rgba[2]<0||
                     !std::isfinite(o.hdr)||o.hdr<=0||!std::isfinite(o.rgba[3])||o.rgba[3]<0||o.rgba[3]>1)continue;
                 const auto output_id=(static_cast<std::uint64_t>(o.motion)<<32)|o.gradient_row;
-                recipes.push_back({mix(id->effect_id)^mix(source.stable_id)^mix(output_id),e.payload_kind,e.importance,o.min_quality,source.knot_count,
+                recipes.push_back({mix(effect_id)^mix(source.stable_id)^mix(output_id),e.payload_kind,e.importance,o.min_quality,source.knot_count,
                     e.seconds,metres,source.knots,{o.rgba[0],o.rgba[1],o.rgba[2]},o.hdr*o.rgba[3],keys,interpolation,hero});
             }
         }
@@ -1892,25 +1745,19 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
     {
         const auto &effect=p.effects[ei]; auto &range=ranges[ei];
         range.first=static_cast<std::uint32_t>(recipes.size());
-        if(effect.handle!=ei+1 || !valid(effect.sources,p.sources.size())) continue;
-        const auto identity=std::find_if(p.effect_lookup.begin(),p.effect_lookup.end(),
-            [&](const auto &entry){return entry.handle==effect.handle;});
-        const auto identity_count=std::count_if(p.effect_lookup.begin(),p.effect_lookup.end(),
-            [&](const auto &entry){return entry.handle==effect.handle;});
+        const auto effect_id=p.effect_lookup[ei].effect_id;
         const auto base_recipe=[&](std::uint32_t si, std::uint32_t oi, const VfxSourceRecord &source,
                                    const VfxOutputRecord &output, VfxGroundRecipeKind kind){
             VfxGroundRecipe recipe{};
-            recipe.effect_id=identity==p.effect_lookup.end()?0:identity->effect_id;
-            recipe.effect_handle=effect.handle; recipe.source_index=si; recipe.source_stable_id=source.stable_id;
+            recipe.source_index=si;
             recipe.output_index=oi; recipe.gradient_row=output.gradient_row; recipe.payload_kind=effect.payload_kind;
             recipe.timing_kind=effect.timing_kind; recipe.min_quality=output.min_quality;
-            recipe.source_type=source.type; recipe.profile=output.profile; recipe.motion=output.motion; recipe.kind=kind;
+            recipe.kind=kind;
             recipe.knot_count=source.knot_count; recipe.knots=source.knots; recipe.seconds=effect.seconds;
-            recipe.rgb={output.rgba[0],output.rgba[1],output.rgba[2]}; recipe.alpha=output.rgba[3]; recipe.hdr=output.hdr;
+            recipe.hdr_rgb={output.rgba[0]*output.hdr,output.rgba[1]*output.hdr,output.rgba[2]*output.hdr};
+            recipe.alpha=output.rgba[3]; recipe.hdr=output.hdr;
             recipe.motion_rate_hz=output.motion_rate_hz; recipe.motion_amplitude=output.motion_amplitude;
             recipe.motion_inset_fraction=output.motion_inset_fraction;
-            recipe.source_output_count=source.outputs.count;
-            recipe.source_parameters_empty=source.parameters.count==0 && valid(source.parameters,p.parameters.size());
             return recipe;
         };
         const auto parameter_bits=[&](const VfxOutputRecord &output, std::uint32_t key,
@@ -1925,6 +1772,7 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                 }
             return found?std::optional<std::uint32_t>{found->bits}:std::nullopt;
         };
+        std::uint32_t profiles{};
         for(std::uint32_t si=effect.sources.first;si<effect.sources.first+effect.sources.count;++si)
         {
             const auto &source=p.sources[si];
@@ -1935,6 +1783,7 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                 source.knots[source.knot_count - 1] <= source.knots[0] ||
                 !std::is_sorted(source.knots.begin(), source.knots.begin() + source.knot_count) ||
                 !valid(source.outputs,p.outputs.size())) continue;
+            const auto first_row=recipes.size();
             for(std::uint32_t oi=source.outputs.first;oi<source.outputs.first+source.outputs.count;++oi)
             {
                 const auto &output=p.outputs[oi];
@@ -1971,8 +1820,7 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                     recipes.push_back(recipe);
                     continue;
                 }
-                if(identity_count==1 && identity!=p.effect_lookup.end() &&
-                    identity->effect_id==HashEffectName("particle.boss.shockwave.safe_gap_marker") &&
+                if(effect_id==HashEffectName("particle.boss.shockwave.safe_gap_marker") &&
                     source.stable_id==ShapeId("main_rune") && output.profile==VfxOutputProfile::GroundSdfSoft &&
                     output.shape==ShapeId("polar_rune_sdf") && output.motion==VfxMotionKind::SlowCounterRotationStableFootprint &&
                     output.source==si && output.min_quality<=2 && valid(output.parameters,p.parameters.size()) &&
@@ -1990,7 +1838,7 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                     recipes.push_back(recipe);
                     continue;
                 }
-                if(identity_count==1 && identity->effect_id==HashEffectName("particle.skill.charged_shot.pulse") &&
+                if(effect_id==HashEffectName("particle.skill.charged_shot.pulse") &&
                     effect.input_mode==0 && effect.sources.count==2 && effect.anchor==ShapeId("presentation_context") &&
                     effect.orientation==ShapeId("effect_defined") && effect.scale==ShapeId("authored") &&
                     effect.binding_timing==ShapeId("charge_ratio") && effect.geometry==ShapeId("cosmetic_only") &&
@@ -2018,11 +1866,12 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                     const float value=std::bit_cast<float>(*primary);
                     if(!std::isfinite(value)||value<=0||(ring&&value>=.65f)) continue;
                     auto recipe=base_recipe(si,oi,source,output,ring?VfxGroundRecipeKind::ChargedBoundary:VfxGroundRecipeKind::ChargedInterior);
+                    recipe.shape = ring ? VfxGroundShape::StateRing : VfxGroundShape::Circle;
                     recipe.primary=value;
                     recipes.push_back(recipe);
                     continue;
                 }
-                if(identity_count==1 && source.knot_count==2 && source.knots[1]>source.knots[0] &&
+                if(source.knot_count==2 && source.knots[1]>source.knots[0] &&
                     source.parameters.count==0 && valid(source.parameters,p.parameters.size()) &&
                     output.source==si && output.min_quality<=2 && valid(output.parameters,p.parameters.size()) &&
                     std::isfinite(output.hdr) && output.hdr>0 &&
@@ -2031,9 +1880,8 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                     std::isfinite(output.motion_inset_fraction) && output.motion_inset_fraction>=0 && output.motion_inset_fraction<=1 &&
                     std::all_of(output.rgba.begin(),output.rgba.end(),[](float v){return std::isfinite(v);}))
                 {
-                    const auto effect_id=identity->effect_id;
                     const bool persistent_entity_contract=effect.input_mode==1 && effect.timing_kind==1 &&
-                        effect.payload_kind==ShapeId("EntityAttachmentPayload");
+                        effect.payload_kind==hs::vfx_payload::EntityAttachment;
                     VfxGroundRecipeKind kind{};
                     if(persistent_entity_contract && effect_id==HashEffectName("particle.player.invulnerable_loop") && source.stable_id==ShapeId("ground_state") &&
                         output.profile==VfxOutputProfile::GroundSdfSoft && output.shape==ShapeId("state_ring") &&
@@ -2101,15 +1949,18 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                             if(!std::isfinite(recipe.primary) || recipe.primary<=0) continue;
                             if(kind==VfxGroundRecipeKind::BrokenCrown)
                             {
+                                recipe.shape = VfxGroundShape::BrokenCrown;
                                 const auto inner=parameter_bits(output,ShapeId("inner_radius"),VfxParameterType::Float);
                                 if(!inner) continue;
-                                recipe.secondary=std::bit_cast<float>(*inner);
-                                if(!std::isfinite(recipe.secondary) || recipe.secondary<=0) continue;
+                                recipe.secondary = .05f;
+                                recipe.tertiary = std::bit_cast<float>(*inner);
+                                if(!std::isfinite(recipe.tertiary) || recipe.tertiary<=0) continue;
                             }
                             else
                             {
                                 const auto width=parameter_bits(output,ShapeId("edge_width"),VfxParameterType::Float);
                                 if(!width) continue;
+                                recipe.shape = VfxGroundShape::ClosedCrownRing;
                                 recipe.secondary=std::bit_cast<float>(*width);
                                 if(!std::isfinite(recipe.secondary) || recipe.secondary<=0) continue;
                             }
@@ -2153,17 +2004,21 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                     }
                     else if(authored_kind==VfxGroundRecipeKind::BossSignature)
                     {
+                        recipe.shape = effect.payload_kind == hs::vfx_payload::Cone ? VfxGroundShape::ConeBorder :
+                            effect.payload_kind == hs::vfx_payload::RingWithGaps ? VfxGroundShape::RingGapsBorder : VfxGroundShape::Circle;
                         const auto scale=parameter_bits(output,ShapeId("signature_scale"),VfxParameterType::Float);
                         if(!scale || std::bit_cast<float>(*scale)!=1.0f) continue;
                         recipe.primary=std::bit_cast<float>(*scale);
                     }
                     else if(authored_kind==VfxGroundRecipeKind::CrossRing)
                     {
+                        recipe.shape = VfxGroundShape::CrossRing;
                         const auto sdf=parameter_bits(output,ShapeId("sdf"),VfxParameterType::Enum);
                         if(!sdf || *sdf!=ShapeId("cross_plus_ring")) continue;
                     }
                     else if(authored_kind==VfxGroundRecipeKind::BrokenHex)
                     {
+                        recipe.shape = VfxGroundShape::BrokenHex;
                         const auto width=parameter_bits(output,ShapeId("edge_width"),VfxParameterType::Float);
                         const auto sector=parameter_bits(output,ShapeId("break_sector_deg"),VfxParameterType::Float);
                         if(!width || !sector) continue;
@@ -2173,6 +2028,7 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                     }
                     else if(authored_kind==VfxGroundRecipeKind::AxialFracture)
                     {
+                        recipe.shape = VfxGroundShape::AxialFracture;
                         const auto length=parameter_bits(output,ShapeId("length"),VfxParameterType::Float);
                         const auto width=parameter_bits(output,ShapeId("width"),VfxParameterType::Float);
                         if(!length || !width) continue;
@@ -2260,21 +2116,68 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                     !std::isfinite(output.motion_rate_hz)||!std::isfinite(output.motion_amplitude)||
                     !std::isfinite(output.motion_inset_fraction)) continue;
                 auto recipe=base_recipe(si,oi,source,output,kind);
+                const bool ring_gaps = effect.payload_kind == hs::vfx_payload::RingWithGaps;
+                const bool circle = effect.payload_kind == hs::vfx_payload::CircleArea;
+                const bool context = effect.payload_kind == hs::vfx_payload::PresentationContext;
+                const bool event = effect.input_mode == 0;
+                const auto set_direct_shape = [&](VfxGroundShape shape) {
+                    recipe.direct_output = true;
+                    recipe.shape = shape;
+                };
+                if (kind == VfxGroundRecipeKind::Border || kind == VfxGroundRecipeKind::Hatch)
+                {
+                    const bool border = kind == VfxGroundRecipeKind::Border;
+                    if (effect.payload_kind == hs::vfx_payload::LineArea)
+                        set_direct_shape(border ? VfxGroundShape::LineBorder : VfxGroundShape::LineHatch);
+                    else if (effect.payload_kind == hs::vfx_payload::Cone)
+                        set_direct_shape(border ? VfxGroundShape::ConeBorder : VfxGroundShape::ConeHatch);
+                }
+                else if (kind == VfxGroundRecipeKind::Preview || kind == VfxGroundRecipeKind::Ticks)
+                {
+                    const bool border = kind == VfxGroundRecipeKind::Preview;
+                    if (event && ring_gaps)
+                        set_direct_shape(border ? VfxGroundShape::RingGapsPreviewBorder : VfxGroundShape::RingGapsTicks);
+                    else if (event && (circle || (context && effect_id == HashEffectName("particle.session.wave_warning"))) &&
+                             source.parameters.count == 0 && valid(source.parameters,p.parameters.size()))
+                        set_direct_shape(border ? VfxGroundShape::CirclePreviewBorder : VfxGroundShape::CirclePreviewTicks);
+                }
+                else if (ring_gaps && !event)
+                    set_direct_shape(kind == VfxGroundRecipeKind::Ring ? VfxGroundShape::RingGapsBorder : VfxGroundShape::RingGapsFill);
+                else if ((circle && !(event && effect.timing_kind == 1)) || context)
+                    set_direct_shape(VfxGroundShape::Circle);
                 recipe.pulse_curve_keys=pulse_keys; recipe.pulse_curve_interpolation=pulse_interpolation;
                 recipe.tick_count=tick_count.value_or(0); recipe.primary=a; recipe.secondary=b;
                 recipes.push_back(recipe);
+            }
+            const auto source_rows = std::span(recipes).subspan(first_row);
+            if (source_rows.empty()) continue;
+            auto &group = source_rows.front();
+            group.source_row_count = static_cast<std::uint32_t>(source_rows.size());
+            for(const auto &recipe : source_rows)
+            {
+                const auto profile=p.outputs[recipe.output_index].profile;
+                if(profile==VfxOutputProfile::GroundSdfAdd)profiles|=kVfxGroundEventDirectAdd;
+                if(profile==VfxOutputProfile::GroundSdfSoft)profiles|=kVfxGroundEventDirectSoft;
+                if (effect.input_mode != 0) continue;
+                switch (recipe.kind)
+                {
+                case VfxGroundRecipeKind::ExpandingRing: group.source_event_outputs |= GroundExpandingRing; break;
+                case VfxGroundRecipeKind::HexConstellation: group.source_event_outputs |= GroundHexConstellation; break;
+                case VfxGroundRecipeKind::BossSignature: group.source_event_outputs |= GroundBossSignature; break;
+                case VfxGroundRecipeKind::CrossRing:
+                case VfxGroundRecipeKind::BrokenHex:
+                case VfxGroundRecipeKind::AxialFracture: group.source_event_outputs |= GroundContactShape; break;
+                default:
+                    // Wave context emits its arena circle through the dedicated wave path.
+                    if (recipe.direct_output && effect.payload_kind != hs::vfx_payload::PresentationContext)
+                        group.source_event_outputs |= GroundDirectShape;
+                    break;
+                }
             }
         }
         range.count=static_cast<std::uint32_t>(recipes.size())-range.first;
         if(range.count)
         {
-            std::uint32_t profiles{};
-            for(const auto &recipe:std::span(recipes).subspan(range.first,range.count))
-            {
-                if(recipe.source_type!=VfxSourceType::Direct)continue;
-                if(recipe.profile==VfxOutputProfile::GroundSdfAdd)profiles|=kVfxGroundEventDirectAdd;
-                if(recipe.profile==VfxOutputProfile::GroundSdfSoft)profiles|=kVfxGroundEventDirectSoft;
-            }
             if(effect.input_mode==0)
             {
                 if(effect.timing_kind==0 && std::isfinite(effect.seconds) && effect.seconds>0.0f)
@@ -2282,23 +2185,20 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                 else if(effect.timing_kind==1)
                     profiles|=kVfxGroundEventOwnerDuration;
             }
-            if(identity_count==1)
+            if(effect_id==HashEffectName("particle.skill.charged_shot.pulse"))
+                profiles|=kVfxGroundEventChargedPulse;
+            if((profiles&kVfxGroundEventFixedDuration) && effect.sources.count==2 &&
+                effect.payload_kind==hs::vfx_payload::PresentationContext)
             {
-                if(identity->effect_id==HashEffectName("particle.skill.charged_shot.pulse"))
-                    profiles|=kVfxGroundEventChargedPulse;
-                if((profiles&kVfxGroundEventFixedDuration) && effect.sources.count==2 &&
-                    effect.payload_kind==ShapeId("PresentationContextPayload"))
-                {
-                    if(identity->effect_id==HashEffectName("particle.session.wave_start"))
-                        profiles|=kVfxGroundEventWaveStart;
-                    else if(identity->effect_id==HashEffectName("particle.session.wave_warning"))
-                        profiles|=kVfxGroundEventWaveWarning;
-                }
+                if(effect_id==HashEffectName("particle.session.wave_start"))
+                    profiles|=kVfxGroundEventWaveStart;
+                else if(effect_id==HashEffectName("particle.session.wave_warning"))
+                    profiles|=kVfxGroundEventWaveWarning;
             }
             if(effect.input_mode==1 && effect.timing_kind==1 &&
-                effect.payload_kind==ShapeId("EntityAttachmentPayload"))
+                effect.payload_kind==hs::vfx_payload::EntityAttachment)
             {
-                const auto id=recipes[range.first].effect_id;
+                const auto id=effect_id;
                 const bool relic=id==HashEffectName("particle.pickup.relic_chest.idle");
                 const bool pickup=relic || id==HashEffectName("particle.pickup.xp.idle") ||
                     id==HashEffectName("particle.pickup.heal.idle") ||
@@ -2315,6 +2215,22 @@ void PrepareVfxGroundRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                 if(charged) profiles|=kVfxGroundEntityCharged;
             }
             recipes[range.first].admission_profiles=profiles;
+            const auto wave_profiles = profiles & (kVfxGroundEventWaveStart | kVfxGroundEventWaveWarning);
+            if (wave_profiles != 0)
+            {
+                const bool warning = (wave_profiles & kVfxGroundEventWaveWarning) != 0;
+                for (auto &row : std::span(recipes).subspan(range.first, range.count))
+                {
+                    const auto &source = p.sources[row.source_index];
+                    const auto offset = row.source_index - effect.sources.first;
+                    const auto expected_source_id = warning
+                        ? (offset == 0 ? ShapeId("danger_boundary") : ShapeId("radial_ticks"))
+                        : (offset == 0 ? ShapeId("gameplay_boundary") : ShapeId("interior_secondary"));
+                    row.wave_source_supported = source.outputs.count == 1 &&
+                        source.parameters.count == 0 && valid(source.parameters,p.parameters.size()) &&
+                        source.stable_id == expected_source_id;
+                }
+            }
         }
     }
 }
@@ -2338,10 +2254,10 @@ void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxFlashEffectRecipe> 
         {ShapeId("three_prong_bite_sdf"),VfxMotionKind::CompressSnapOutward,VfxImpactShape::ThreeProngBite,1},
         {ShapeId("boss_crest_contact_sdf"),VfxMotionKind::SingleFrameSnapShrink,VfxImpactShape::BossCrestContact,1},
         {ShapeId("needle_star_sdf"),VfxMotionKind::InstantCompressionAxialSplit,VfxImpactShape::NeedleStar,1}};
-    constexpr auto point_payload=ShapeId("PointEventPayload"), context_payload=ShapeId("PresentationContextPayload"),
-        projectile_payload=ShapeId("ProjectilePayload"), circle_payload=ShapeId("CircleAreaPayload"),
-        cone_payload=ShapeId("ConePayload"), ring_payload=ShapeId("RingWithGapsPayload"),
-        source_target_payload=ShapeId("SourceTargetPayload");
+    constexpr auto point_payload=hs::vfx_payload::PointEvent, context_payload=hs::vfx_payload::PresentationContext,
+        projectile_payload=hs::vfx_payload::Projectile, circle_payload=hs::vfx_payload::CircleArea,
+        cone_payload=hs::vfx_payload::Cone, ring_payload=hs::vfx_payload::RingWithGaps,
+        source_target_payload=hs::vfx_payload::SourceTarget;
     constexpr auto multishot_secondary=HashEffectName("particle.upgrade.multishot.secondary_fan"),
         multishot_skill=HashEffectName("particle.skill.multishot"),
         multishot_rear=HashEffectName("particle.upgrade.multishot.rear_fan"),
@@ -2361,12 +2277,7 @@ void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxFlashEffectRecipe> 
         route.importance=effect.importance;
         if(effect.handle!=ei+1 || effect.input_mode!=0 || effect.timing_kind!=0 ||
             !std::isfinite(effect.seconds)||effect.seconds<=0 || !valid(effect.sources,p.sources.size())) continue;
-        const auto id=std::find_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &v){return v.handle==effect.handle;});
-        if(id!=p.effect_lookup.end()&&!id->effect_id) continue;
-        const auto unique_identity=id!=p.effect_lookup.end() &&
-            std::count_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &v){return v.handle==effect.handle;})==1 &&
-            std::count_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &v){return v.effect_id==id->effect_id;})==1;
-        const auto effect_id=id==p.effect_lookup.end()?0:id->effect_id;
+        const auto effect_id=p.effect_lookup[ei].effect_id;
         auto kind=VfxFlashEventKind::Unsupported;
         if(effect.payload_kind==point_payload) kind=VfxFlashEventKind::Point;
         else if(effect.payload_kind==context_payload) kind=VfxFlashEventKind::Context;
@@ -2379,7 +2290,7 @@ void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxFlashEffectRecipe> 
             else if(effect_id==boss_volley) kind=VfxFlashEventKind::ConeBossEnergy;
         }
         else if(effect.payload_kind==ring_payload&&effect_id==boss_shockwave) kind=VfxFlashEventKind::RingBossEnergy;
-        else if(effect.payload_kind==source_target_payload&&unique_identity&&
+        else if(effect.payload_kind==source_target_payload&&
             (effect_id==pickup_xp||effect_id==pickup_heal||effect_id==pickup_magnet||effect_id==pickup_relic))
             kind=VfxFlashEventKind::PickupCollect;
         route.kind=kind;
@@ -2452,9 +2363,7 @@ void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxFlashEffectRecipe> 
                         if(supported) for(const auto &binding:p.texture_bindings.subspan(output.textures.first,output.textures.count))
                         {
                             if(binding.role!=ShapeId("coverage")&&binding.role!=ShapeId("flipbook_motion_vectors"))continue;
-                            const auto resource=std::find_if(p.texture_resources.begin(),p.texture_resources.end(),[&](const auto &r){return r.slot==binding.catalog_slot;});
-                            if(resource==p.texture_resources.end()||!valid(resource->asset_path_bytes,p.strings.size())){supported=false;break;}
-                            const std::string_view path(reinterpret_cast<const char*>(p.strings.data())+resource->asset_path_bytes.first,resource->asset_path_bytes.count);
+                            const auto path = TexturePath(p, binding);
                             const VfxTextureBindingRecord **target=nullptr;
                             if(binding.role==ShapeId("coverage")){if(path=="Content/Textures/VFX/vfx_smoke6way_pos.dds")target=&positive;else if(path=="Content/Textures/VFX/vfx_smoke6way_neg.dds")target=&negative;else{supported=false;break;}}
                             else{if(path!="Content/Textures/VFX/vfx_smoke_motion_vectors.dds"||binding.min_quality!=2){supported=false;break;}target=&motion;}
@@ -2500,9 +2409,7 @@ void PrepareVfxFlashRecipes(VfxProgramView p, std::vector<VfxFlashEffectRecipe> 
                     if(binding.role!=ShapeId("authored_mask_array"))continue;
                     if(binding.min_quality>2||!std::isfinite(binding.strength)||binding.strength<0||binding.strength>1||
                         binding.selection!=ShapeId("stable_seed_mod_group_size")||!valid(binding.slices,p.slice_indices.size())||!binding.slices.count) {supported=false;break;}
-                    const auto resource=std::find_if(p.texture_resources.begin(),p.texture_resources.end(),[&](const auto&r){return r.slot==binding.catalog_slot;});
-                    if(resource==p.texture_resources.end()||!valid(resource->asset_path_bytes,p.strings.size())){supported=false;break;}
-                    const std::string_view path(reinterpret_cast<const char*>(p.strings.data())+resource->asset_path_bytes.first,resource->asset_path_bytes.count);
+                    const auto path = TexturePath(p, binding);
                     if(path!="Content/Textures/VFX/vfx_authored_mask_array.dds"){supported=false;break;}
                     for(const auto slice:p.slice_indices.subspan(binding.slices.first,binding.slices.count))if(slice>=12)supported=false;
                     if(!supported)break;
@@ -2561,21 +2468,8 @@ void PrepareVfxPersistentFlashRecipes(VfxProgramView p,
     const auto valid = [](VfxRange range, std::size_t size) {
         return range.first <= size && range.count <= size - range.first;
     };
-    const auto unique_id = [&](std::uint32_t handle, std::uint64_t id) {
-        return id && std::count_if(p.effect_lookup.begin(), p.effect_lookup.end(),
-                   [=](const auto &row) { return row.handle == handle && row.effect_id == id; }) == 1 &&
-            std::count_if(p.effect_lookup.begin(), p.effect_lookup.end(),
-                   [=](const auto &row) { return row.handle == handle; }) == 1 &&
-            std::count_if(p.effect_lookup.begin(), p.effect_lookup.end(),
-                   [=](const auto &row) { return row.effect_id == id; }) == 1;
-    };
-    const auto texture_path = [&](const VfxTextureBindingRecord &binding) -> std::string_view {
-        const auto resource = std::find_if(p.texture_resources.begin(), p.texture_resources.end(),
-            [&](const auto &row) { return row.slot == binding.catalog_slot; });
-        if (resource == p.texture_resources.end() || !valid(resource->asset_path_bytes, p.strings.size()))
-            return {};
-        return {reinterpret_cast<const char *>(p.strings.data() + resource->asset_path_bytes.first),
-                resource->asset_path_bytes.count};
+    const auto matches_effect = [&](std::uint32_t handle, std::uint64_t id) {
+        return p.effect_lookup[handle - 1].effect_id == id;
     };
     const auto stamp_curve = [&](const VfxOutputRecord &output, std::uint32_t row_id) {
         if (!valid(output.parameters, p.parameters.size()) || output.parameters.count != 1) return false;
@@ -2601,7 +2495,7 @@ void PrepareVfxPersistentFlashRecipes(VfxProgramView p,
         bool gradient = false, curve = false, optional_mask = false, authored_mask = false;
         for (const auto &binding : p.texture_bindings.subspan(output.textures.first, output.textures.count))
         {
-            const auto path = texture_path(binding);
+            const auto path = TexturePath(p, binding);
             if (binding.role == ShapeId("profile.optional_detail"))
             {
                 if (optional_mask || binding.min_quality != 0 || binding.selection != 0 ||
@@ -2635,11 +2529,11 @@ void PrepareVfxPersistentFlashRecipes(VfxProgramView p,
     stamps.clear();
     struct StampRoute { std::uint64_t id; PersistentVfxKind kind; std::uint32_t payload; bool fixed, bleed; };
     constexpr StampRoute stamp_routes[]{
-        {HashEffectName("particle.player.bow_draw"), PersistentVfxKind::PlayerBowDraw, ShapeId("EntityAttachmentPayload"), false, false},
-        {HashEffectName("particle.upgrade.charged.full_ready"), PersistentVfxKind::ChargedFullReady, ShapeId("EntityAttachmentPayload"), true, false},
-        {HashEffectName("particle.upgrade.empowered_ready"), PersistentVfxKind::EmpoweredReady, ShapeId("EntityAttachmentPayload"), false, false},
-        {HashEffectName("particle.upgrade.retarget"), PersistentVfxKind::MultishotRetarget, ShapeId("ProjectilePathPayload"), true, false},
-        {HashEffectName("particle.upgrade.ricochet.bleed_extend"), PersistentVfxKind::RicochetBleedExtend, ShapeId("EntityAttachmentPayload"), true, true},
+        {HashEffectName("particle.player.bow_draw"), PersistentVfxKind::PlayerBowDraw, hs::vfx_payload::EntityAttachment, false, false},
+        {HashEffectName("particle.upgrade.charged.full_ready"), PersistentVfxKind::ChargedFullReady, hs::vfx_payload::EntityAttachment, true, false},
+        {HashEffectName("particle.upgrade.empowered_ready"), PersistentVfxKind::EmpoweredReady, hs::vfx_payload::EntityAttachment, false, false},
+        {HashEffectName("particle.upgrade.retarget"), PersistentVfxKind::MultishotRetarget, hs::vfx_payload::ProjectilePath, true, false},
+        {HashEffectName("particle.upgrade.ricochet.bleed_extend"), PersistentVfxKind::RicochetBleedExtend, hs::vfx_payload::EntityAttachment, true, true},
     };
     for (std::size_t ei = 0; ei < p.effects.size(); ++ei)
     {
@@ -2649,7 +2543,7 @@ void PrepareVfxPersistentFlashRecipes(VfxProgramView p,
         if (effect.handle != ei + 1 || effect.input_mode != 1 || !valid(effect.sources, p.sources.size())) continue;
         for (const auto &route : stamp_routes)
         {
-            if (!unique_id(effect.handle, route.id) || effect.payload_kind != route.payload ||
+            if (!matches_effect(effect.handle, route.id) || effect.payload_kind != route.payload ||
                 effect.timing_kind != (route.fixed ? 0u : 1u) ||
                 (route.fixed && (!std::isfinite(effect.seconds) || effect.seconds <= 0.0f))) continue;
             for (std::uint32_t si = effect.sources.first; si < effect.sources.first + effect.sources.count; ++si)
@@ -2677,9 +2571,7 @@ void PrepareVfxPersistentFlashRecipes(VfxProgramView p,
                     !std::isfinite(output.rgba[1] * output.hdr) ||
                     !std::isfinite(output.rgba[2] * output.hdr)) continue;
                 VfxPersistentStampRecipe recipe{};
-                const auto identity = std::find_if(p.effect_lookup.begin(), p.effect_lookup.end(),
-                    [&](const auto &entry) { return entry.handle == effect.handle && entry.effect_id == route.id; });
-                recipe.effect_id = identity->effect_id;
+                recipe.effect_id = route.id;
                 recipe.effect_handle = effect.handle;
                 recipe.source_visual_kind = static_cast<std::uint32_t>(route.kind);
                 recipe.payload_kind = route.payload;
@@ -2718,7 +2610,7 @@ void PrepareVfxPersistentFlashRecipes(VfxProgramView p,
         auto &range = fire_ranges[ei];
         range.first = static_cast<std::uint32_t>(fire.size());
         if (effect.handle != ei + 1 || effect.input_mode != 1 || effect.timing_kind != 1 ||
-            effect.payload_kind != ShapeId("CircleAreaPayload") || !unique_id(effect.handle, fire_id) ||
+            effect.payload_kind != hs::vfx_payload::CircleArea || !matches_effect(effect.handle, fire_id) ||
             !valid(effect.sources, p.sources.size())) continue;
         for (std::uint32_t si = effect.sources.first; si < effect.sources.first + effect.sources.count; ++si)
         {
@@ -2778,7 +2670,7 @@ void PrepareVfxPersistentFlashRecipes(VfxProgramView p,
                 for (const auto &binding : p.texture_bindings.subspan(output.textures.first, output.textures.count))
                 {
                     if (binding.role != ShapeId("authored_mask_array")) continue;
-                    const auto path = texture_path(binding);
+                    const auto path = TexturePath(p, binding);
                     if (mask_seen || binding.min_quality > 2 || !std::isfinite(binding.strength) ||
                         binding.strength < 0.0f || binding.strength > 1.0f ||
                         binding.selection != ShapeId("stable_seed_mod_group_size") ||
@@ -2815,17 +2707,17 @@ void PrepareVfxPersistentFlashRecipes(VfxProgramView p,
         auto &range = tick_ranges[ei];
         range.first = static_cast<std::uint32_t>(ticks.size());
         if (tick.handle != ei + 1 || tick.input_mode != 0 || tick.timing_kind != 0 ||
-            tick.payload_kind != ShapeId("PointEventPayload") || !std::isfinite(tick.seconds) ||
+            tick.payload_kind != hs::vfx_payload::PointEvent || !std::isfinite(tick.seconds) ||
             tick.seconds <= 0.0f) continue;
         for (const auto &route : tick_routes)
         {
-            if (!unique_id(tick.handle, route.tick_id)) continue;
+            if (!matches_effect(tick.handle, route.tick_id)) continue;
             for (std::size_t status_index = 0; status_index < p.effects.size(); ++status_index)
             {
                 const auto &status = p.effects[status_index];
                 if (status.handle != status_index + 1 || status.input_mode != 1 || status.timing_kind != 1 ||
-                    status.payload_kind != ShapeId("EntityAttachmentPayload") ||
-                    !unique_id(status.handle, route.status_id) || !valid(status.sources, p.sources.size())) continue;
+                    status.payload_kind != hs::vfx_payload::EntityAttachment ||
+                    !matches_effect(status.handle, route.status_id) || !valid(status.sources, p.sources.size())) continue;
                 for (std::uint32_t si = status.sources.first; si < status.sources.first + status.sources.count; ++si)
                 {
                     const auto &source = p.sources[si];
@@ -2854,7 +2746,7 @@ void PrepareVfxPersistentFlashRecipes(VfxProgramView p,
                     std::array<std::uint32_t,3> mask_slices{}; float mask_strength{};
                     for (const auto &binding : p.texture_bindings.subspan(output.textures.first, output.textures.count))
                     {
-                        const auto path = texture_path(binding);
+                        const auto path = TexturePath(p, binding);
                         if (binding.role == ShapeId("profile.global") && binding.min_quality == 0 &&
                             binding.selection == 0 && binding.slices.count == 0 &&
                             std::isfinite(binding.strength) && binding.strength == 1.0f &&
@@ -2920,29 +2812,26 @@ void PrepareVfxBallisticRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
     {
         const auto &effect=p.effects[ei]; auto &range=ranges[ei]; range.first=static_cast<std::uint32_t>(recipes.size());
         if(effect.handle!=ei+1||!valid(effect.sources,p.sources.size()))continue;
-        const auto lookup=std::find_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &e){return e.handle==effect.handle;});
-        if(lookup==p.effect_lookup.end()||!lookup->effect_id)continue;
+        const auto effect_id=p.effect_lookup[ei].effect_id;
         for(std::uint32_t si=effect.sources.first;si<effect.sources.first+effect.sources.count;++si)
         {
             const auto &source=p.sources[si];
             const bool persistent=effect.input_mode==1&&source.stable_id==hash("status_shards")&&
-                (lookup->effect_id==hash64("particle.player.bow_draw")||lookup->effect_id==hash64("particle.upgrade.charged.full_ready")||
-                 lookup->effect_id==hash64("particle.upgrade.empowered_ready")||lookup->effect_id==hash64("particle.upgrade.retarget")||
-                 lookup->effect_id==hash64("particle.upgrade.ricochet.bleed_extend"));
+                (effect_id==hash64("particle.player.bow_draw")||effect_id==hash64("particle.upgrade.charged.full_ready")||
+                 effect_id==hash64("particle.upgrade.empowered_ready")||effect_id==hash64("particle.upgrade.retarget")||
+                 effect_id==hash64("particle.upgrade.ricochet.bleed_extend"));
             if(source.effect!=effect.handle||source.type!=VfxSourceType::BallisticCollision||source.knot_count!=2||
                !std::isfinite(source.knots[0])||!std::isfinite(source.knots[1])||source.knots[0]<0||source.knots[1]<=source.knots[0]||source.knots[1]>1||
                !valid(source.parameters,p.parameters.size())||!valid(source.outputs,p.outputs.size())||
                (persistent&&(source.knots[0]!=0||source.authoritative!=0||source.stable_id!=hash("status_shards"))))continue;
-            if((persistent&&(source.outputs.count!=1||source.parameters.count!=1||
-                std::count_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &e){return e.handle==effect.handle;})!=1||
-                std::count_if(p.effect_lookup.begin(),p.effect_lookup.end(),[&](const auto &e){return e.effect_id==lookup->effect_id;})!=1))||
+            if((persistent&&(source.outputs.count!=1||source.parameters.count!=1))||
                (!persistent&&(effect.input_mode!=0||effect.timing_kind!=0)))continue;
             const double delay=static_cast<double>(effect.seconds)*source.knots[0]*60.;
             if(!persistent&&(!std::isfinite(effect.seconds)||effect.seconds<=0||!std::isfinite(delay)))continue;
             const double birth_floor=persistent?0.0:std::floor(delay),birth_ceil=persistent?0.0:std::ceil(delay);
             const float birth_fraction=persistent?0.0f:static_cast<float>(delay-birth_floor);
-            const auto seed_salt=mix(static_cast<std::uint32_t>(lookup->effect_id))^
-                mix(static_cast<std::uint32_t>(lookup->effect_id>>32))^mix(source.stable_id);
+            const auto seed_salt=mix(static_cast<std::uint32_t>(effect_id))^
+                mix(static_cast<std::uint32_t>(effect_id>>32))^mix(source.stable_id);
             std::uint32_t count{};float gravity{},bounce{},drag=.8f,speed=-1,cone{};std::uint32_t seen{};bool params_ok=true;
             for(const auto &v:p.parameters.subspan(source.parameters.first,source.parameters.count))
             {
@@ -2966,22 +2855,20 @@ void PrepareVfxBallisticRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                    !std::isfinite(output.hdr)||output.hdr<=0||!std::isfinite(output.rgba[0])||!std::isfinite(output.rgba[1])||
                    !std::isfinite(output.rgba[2])||!std::isfinite(output.rgba[3])||output.rgba[3]<0||output.rgba[3]>1)continue;
                 const bool forward=output.motion==VfxMotionKind::ShortForwardShardFan||output.motion==VfxMotionKind::ThinShardsForwardCone;
-                if(forward&&lookup->effect_id!=(output.motion==VfxMotionKind::ShortForwardShardFan?
+                if(forward&&effect_id!=(output.motion==VfxMotionKind::ShortForwardShardFan?
                     hash64("particle.enemy.ranged.impact"):hash64("particle.skill.charged_shot.impact")))continue;
                 bool textures_ok=true;
                 if(!valid(output.textures,p.texture_bindings.size()))continue;
                 for(const auto &binding:p.texture_bindings.subspan(output.textures.first,output.textures.count))
                 {
                     if(binding.role!=hash("profile.global")){textures_ok=false;break;}
-                    const auto resource=std::find_if(p.texture_resources.begin(),p.texture_resources.end(),[&](const auto &r){return r.slot==binding.catalog_slot;});
-                    if(resource==p.texture_resources.end()||!valid(resource->asset_path_bytes,p.strings.size())){textures_ok=false;break;}
-                    const std::string_view path(reinterpret_cast<const char*>(p.strings.data())+resource->asset_path_bytes.first,resource->asset_path_bytes.count);
+                    const auto path = TexturePath(p, binding);
                     if(path!="Content/Textures/VFX/vfx_gradient_lut.dds"&&path!="Content/Textures/VFX/vfx_curve_lut.dds"){textures_ok=false;break;}
                 }
                 if(!textures_ok)continue;
-                if(persistent&&(effect.payload_kind!=(lookup->effect_id==hash64("particle.upgrade.retarget")?hash("ProjectilePathPayload"):hash("EntityAttachmentPayload"))||
-                    effect.timing_kind!=((lookup->effect_id==hash64("particle.upgrade.charged.full_ready")||
-                    lookup->effect_id==hash64("particle.upgrade.retarget")||lookup->effect_id==hash64("particle.upgrade.ricochet.bleed_extend"))?0u:1u)||
+                if(persistent&&(effect.payload_kind!=(effect_id==hash64("particle.upgrade.retarget")?hs::vfx_payload::ProjectilePath:hs::vfx_payload::EntityAttachment)||
+                    effect.timing_kind!=((effect_id==hash64("particle.upgrade.charged.full_ready")||
+                    effect_id==hash64("particle.upgrade.retarget")||effect_id==hash64("particle.upgrade.ricochet.bleed_extend"))?0u:1u)||
                     (effect.timing_kind==0&&(!std::isfinite(effect.seconds)||effect.seconds<=0))||output.shape!=hash("small_shards")||
                     output.shape_domain!=hash("sprite")||output.shape_scale_rule!=hash("component_size")||output.shape_component_kind!=hash("particle")||
                     output.coverage_type!=hash("analytic")||output.coverage_ref!=hash("small_shards")||output.motion_rate_hz!=0||
@@ -2991,15 +2878,14 @@ void PrepareVfxBallisticRecipes(VfxProgramView p, std::vector<VfxRange> &ranges,
                     bool g=false,c=false,ok=true;
                     for(const auto &binding:p.texture_bindings.subspan(output.textures.first,output.textures.count))
                     {
-                        const auto resource=std::find_if(p.texture_resources.begin(),p.texture_resources.end(),[&](const auto &r){return r.slot==binding.catalog_slot;});
-                        if(binding.role!=hash("profile.global")||binding.min_quality!=0||binding.selection!=0||binding.slices.count||!std::isfinite(binding.strength)||binding.strength!=1||resource==p.texture_resources.end()||!valid(resource->asset_path_bytes,p.strings.size())){ok=false;break;}
-                        const std::string_view path(reinterpret_cast<const char*>(p.strings.data())+resource->asset_path_bytes.first,resource->asset_path_bytes.count);
+                        if(binding.role!=hash("profile.global")||binding.min_quality!=0||binding.selection!=0||binding.slices.count||!std::isfinite(binding.strength)||binding.strength!=1){ok=false;break;}
+                        const auto path = TexturePath(p, binding);
                         if(path=="Content/Textures/VFX/vfx_gradient_lut.dds"&&!g)g=true;else if(path=="Content/Textures/VFX/vfx_curve_lut.dds"&&!c)c=true;else{ok=false;break;}
                     }
                     if(!ok||!g||!c||count!=5)continue;
                 }
                 VfxBallisticRecipe row{};
-                row.effect_id=lookup->effect_id;row.source_seed_salt=seed_salt;row.payload_kind=effect.payload_kind;
+                row.effect_id=effect_id;row.source_seed_salt=seed_salt;row.payload_kind=effect.payload_kind;
                 row.importance=effect.importance;row.min_quality=output.min_quality;row.gradient_row=output.gradient_row;
                 row.mesh_index=shape->mesh;row.count=count;
                 row.direction=forward?VfxBallisticDirection::ProjectileVelocity:
@@ -3024,7 +2910,7 @@ void PrepareVfxFresnelRecipes(VfxProgramView p,
     constexpr auto phase2=HashEffectName("persistent.boss.phase2_aura");
     constexpr auto transition=HashEffectName("persistent.boss.phase_transition_invulnerable");
     constexpr auto player=HashEffectName("particle.player.invulnerable_loop");
-    constexpr auto entity_payload=ShapeId("EntityAttachmentPayload");
+    constexpr auto entity_payload=hs::vfx_payload::EntityAttachment;
     constexpr auto boss_shell=ShapeId("boss_shell"),entity_shell=ShapeId("entity_shell");
     constexpr auto mesh_shell=ShapeId("mesh_shell"),owner_bounds=ShapeId("owner_bounds");
     constexpr auto particle=ShapeId("particle"),analytic=ShapeId("analytic");
@@ -3040,12 +2926,7 @@ void PrepareVfxFresnelRecipes(VfxProgramView p,
         for(std::uint32_t i=output.textures.first;i<output.textures.first+output.textures.count;++i)
         {
             const auto &binding=p.texture_bindings[i];
-            const auto resource=std::find_if(p.texture_resources.begin(),p.texture_resources.end(),
-                [&](const auto &candidate){return candidate.slot==binding.catalog_slot;});
-            if(resource==p.texture_resources.end()||resource->asset_path_bytes.count==0||
-                !valid_range(resource->asset_path_bytes,p.strings.size()))return false;
-            const std::string_view path(reinterpret_cast<const char *>(p.strings.data())+
-                resource->asset_path_bytes.first,resource->asset_path_bytes.count);
+            const auto path = TexturePath(p, binding);
             if(binding.role==global&&path=="Content/Textures/VFX/vfx_gradient_lut.dds"&&!has_gradient)
                 has_gradient=true;
             else if(binding.role==authored&&path=="Content/Textures/VFX/vfx_noise_volume_64.dds"&&!has_noise)
@@ -3099,18 +2980,12 @@ void PrepareVfxFresnelRecipes(VfxProgramView p,
         const auto &effect=p.effects[ei];auto &effect_row=effects[ei];
         effect_row.effect_handle=effect.handle;
         effect_row.outputs.first=static_cast<std::uint32_t>(outputs.size());
-        std::uint64_t identity{};bool duplicate_identity=false;
-        for(const auto &lookup:p.effect_lookup)
-            if(lookup.handle==effect.handle)
-            {
-                if(identity!=0){duplicate_identity=true;break;}
-                identity=lookup.effect_id;
-            }
+        const auto identity=p.effect_lookup[ei].effect_id;
         effect_row.effect_id=identity;
         effect_row.kind=identity==phase2?VfxFresnelShellKind::BossCrown:
             identity==transition?VfxFresnelShellKind::BossTransition:VfxFresnelShellKind::PlayerInvulnerable;
         const bool known=identity==phase2||identity==transition||identity==player;
-        if(effect.handle!=ei+1||duplicate_identity||!known||effect.input_mode!=1||effect.timing_kind!=1||
+        if(!known||effect.input_mode!=1||effect.timing_kind!=1||
             effect.payload_kind!=entity_payload||!valid_range(effect.sources,p.sources.size()))continue;
         effect_row.route_valid=true;
         for(std::uint32_t si=effect.sources.first;si<effect.sources.first+effect.sources.count;++si)
@@ -3159,7 +3034,7 @@ void PrepareVfxFresnelRecipes(VfxProgramView p,
 void PrepareVfxMeshRecipes(VfxProgramView p,
     std::vector<VfxMeshEffectRecipe> &effects, std::vector<VfxMeshRecipe> &outputs)
 {
-    constexpr auto projectile=ShapeId("ProjectilePayload");
+    constexpr auto projectile=hs::vfx_payload::Projectile;
     constexpr auto fresnel_key=ShapeId("fresnel"),ratio_key=ShapeId("head_to_tail_ratio");
     constexpr auto shell_key=ShapeId("shell_thickness");
     constexpr auto arrow=ShapeId("arrowhead_mesh"),thorn=ShapeId("enemy_thorn_mesh");
@@ -3212,6 +3087,8 @@ void PrepareVfxMeshRecipes(VfxProgramView p,
         effect_row.outputs.count=static_cast<std::uint32_t>(outputs.size())-effect_row.outputs.first;
     }
 }
+} // namespace
+
 Result DecodeVfxImage(std::span<const std::byte> legacy, std::span<const std::byte> program_bytes,
                       VfxImageData &output)
 {
@@ -3229,8 +3106,6 @@ Result DecodeVfxImage(std::span<const std::byte> legacy, std::span<const std::by
     if (payload_size > std::numeric_limits<std::uint32_t>::max() || legacy.size() != sizeof(header) + payload_size)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle catalog size is invalid.");
     const auto payload = legacy.subspan(sizeof(header));
-    if (Fnv1a64(payload) != header.payload_hash)
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "Particle catalog payload is corrupt.");
     VfxImageData loaded;
     loaded.definitions.resize(header.effect_count);
     loaded.emitters.resize(header.emitter_count);
@@ -3316,15 +3191,17 @@ Result DecodeVfxImage(std::span<const std::byte> legacy, std::span<const std::by
     const auto &cooked_program = loaded.program;
     loaded.authored_mesh_indices.resize(loaded.emitters.size());
     loaded.legacy_effect_policies.reserve(loaded.definitions.size());
-    loaded.has_typed_wavefront = std::ranges::any_of(cooked_program.effect_lookup, [](const auto &effect) {
-        return effect.effect_id == MakeAssetId("particle.boss.shockwave.wavefront").value;
-    });
+    loaded.effect_lookup_by_id = cooked_program.effect_lookup;
+    std::ranges::sort(loaded.effect_lookup_by_id, {}, &VfxEffectLookupRecord::effect_id);
+    const auto policy_for = [&](std::uint64_t id) -> const VfxEffectRecord * {
+        const auto &rows = loaded.effect_lookup_by_id;
+        const auto row = std::ranges::lower_bound(rows, id, {}, &VfxEffectLookupRecord::effect_id);
+        return row != rows.end() && row->effect_id == id ? &cooked_program.effects[row->handle - 1] : nullptr;
+    };
+    loaded.has_typed_wavefront = policy_for(MakeAssetId("particle.boss.shockwave.wavefront").value) != nullptr;
     for (const auto &definition : loaded.definitions)
     {
-        const auto lookup = std::find_if(cooked_program.effect_lookup.begin(), cooked_program.effect_lookup.end(),
-            [&](const auto &entry) { return entry.effect_id == definition.effect_id; });
-        const auto *policy = lookup != cooked_program.effect_lookup.end()
-            ? &cooked_program.effects[lookup->handle - 1] : nullptr;
+        const auto *policy = policy_for(definition.effect_id);
         loaded.legacy_effect_policies.push_back({policy ? policy->importance : 0u,
             policy && !policy->must_match_logic && std::ranges::none_of(
                 std::span(cooked_program.sources).subspan(policy->sources.first, policy->sources.count), [](const auto &source) {
@@ -3336,17 +3213,17 @@ Result DecodeVfxImage(std::span<const std::byte> legacy, std::span<const std::by
             if (emitter.renderer != VfxRenderer::Mesh) continue;
             std::uint8_t selected{};
             bool ambiguous = false;
-            if (lookup != cooked_program.effect_lookup.end())
+            if (policy)
             {
-                const auto &effect = cooked_program.effects[lookup->handle - 1];
+                const auto &effect = *policy;
                 for (std::uint32_t si = effect.sources.first; si < effect.sources.first + effect.sources.count; ++si)
                 {
                     const auto &source = cooked_program.sources[si];
                     for (std::uint32_t oi = source.outputs.first; oi < source.outputs.first + source.outputs.count; ++oi)
                     {
-                        const auto &output = cooked_program.outputs[oi];
-                        if (output.profile != VfxOutputProfile::MeshEmissiveOit) continue;
-                        const auto mesh = MeshIndex(output.shape);
+                        const auto &mesh_output = cooked_program.outputs[oi];
+                        if (mesh_output.profile != VfxOutputProfile::MeshEmissiveOit) continue;
+                        const auto mesh = MeshIndex(mesh_output.shape);
                         if (!mesh) continue;
                         const bool compatible =
                             (emitter.primitive == VfxPrimitive::Arrow && mesh == 1) ||
@@ -3390,64 +3267,42 @@ Result DecodeVfxImage(std::span<const std::byte> legacy, std::span<const std::by
         loaded.persistent_stamp_effect_ranges, loaded.persistent_stamp_recipes,
         loaded.persistent_fire_effect_ranges, loaded.persistent_fire_recipes,
         loaded.owned_status_tick_effect_ranges, loaded.owned_status_tick_recipes);
-    PrepareVfxMoteRecipes(loaded.program.View(), loaded.mote_source_recipes, loaded.mote_output_recipes);
+    PrepareVfxMoteRecipes(loaded);
     if(auto result=PrepareVfxScreenRecipes(loaded.program.View(), loaded.screen_effect_recipes, loaded.screen_recipes);!result)
         return result;
     if(auto result=PrepareVfxVolumeRecipes(loaded.program.View(), loaded.volume_effect_recipes, loaded.volume_recipes);!result)
         return result;
     PrepareVfxEntitySurfaceRecipes(loaded.program.View(),loaded.entity_surface_effect_recipes,
         loaded.entity_surface_recipes,loaded.entity_surface_routes);
+    const auto program_view = loaded.program.View();
     std::vector<VfxRibbonSourceRecipe> ribbon_sources;
     std::vector<VfxRibbonOutputRecipe> ribbon_outputs;
-    std::vector<VfxRibbonTextureRecipe> ribbon_textures;
-    PrepareVfxRibbonRecipes(loaded.program.View(),loaded.ribbon_effect_recipes,ribbon_sources,
-        ribbon_outputs,ribbon_textures,loaded.ribbon_slice_indices);
-    PrepareVfxRibbonWakeRecipes(loaded.ribbon_effect_recipes,
+    PrepareVfxRibbonRecipes(program_view, ribbon_sources,
+        ribbon_outputs);
+    PrepareVfxRibbonWakeRecipes(program_view,
         ribbon_sources, ribbon_outputs,
-        ribbon_textures, loaded.ribbon_slice_indices,
         loaded.ribbon_wake_effect_ranges, loaded.ribbon_wake_recipes);
-    PrepareVfxRibbonFixedRecipes(loaded.ribbon_effect_recipes, ribbon_sources,
-        ribbon_outputs, ribbon_textures, loaded.ribbon_slice_indices,
+    PrepareVfxRibbonFixedRecipes(program_view, ribbon_sources,
+        ribbon_outputs,
         loaded.ribbon_fixed_effect_ranges, loaded.ribbon_fixed_recipes);
-    PrepareVfxRibbonProjectileRecipes(loaded.ribbon_effect_recipes, ribbon_sources,
-        ribbon_outputs, ribbon_textures, loaded.ribbon_slice_indices,
+    PrepareVfxRibbonProjectileRecipes(program_view, ribbon_sources,
+        ribbon_outputs,
         loaded.ribbon_projectile_effect_ranges, loaded.ribbon_projectile_sources,
         loaded.ribbon_projectile_outputs);
-    PrepareVfxRibbonCancelRecipes(loaded.ribbon_effect_recipes, ribbon_sources,
-        ribbon_outputs, ribbon_textures,
+    PrepareVfxRibbonCancelRecipes(program_view, ribbon_sources,
+        ribbon_outputs,
         loaded.ribbon_cancel_effect_ranges, loaded.ribbon_cancel_recipes);
-    PrepareVfxRibbonLinkRecipes(loaded.ribbon_effect_recipes, ribbon_sources,
-        ribbon_outputs, ribbon_textures, loaded.ribbon_slice_indices,
+    PrepareVfxRibbonLinkRecipes(program_view, ribbon_sources,
+        ribbon_outputs,
         loaded.ribbon_link_effect_recipes, loaded.ribbon_link_output_recipes);
-    PrepareVfxRibbonEventRecipes(loaded.ribbon_effect_recipes, ribbon_sources,
-        ribbon_outputs, ribbon_textures, loaded.ribbon_slice_indices,
+    PrepareVfxRibbonEventRecipes(program_view, ribbon_sources,
+        ribbon_outputs,
         loaded.ribbon_event_effect_recipes, loaded.ribbon_event_sources, loaded.ribbon_event_outputs);
-    PrepareVfxEffectLookupById(loaded.program.View(), loaded.effect_lookup_by_id);
     PrepareVfxFresnelRecipes(loaded.program.View(), loaded.fresnel_effect_recipes,
         loaded.fresnel_recipes);
     PrepareVfxMeshRecipes(loaded.program.View(), loaded.mesh_effect_recipes, loaded.mesh_recipes);
     PrepareVfxOutputProfiles(loaded.program.View(), loaded.effect_output_profiles);
     output = std::move(loaded);
     return Result::Success();
-}
-Result LoadVfxImage(const std::filesystem::path &legacy_path,
-                    const std::filesystem::path &program_path, VfxImageData &output)
-{
-    const auto read = [](const std::filesystem::path &path, std::vector<std::byte> &bytes) -> Result {
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file) return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX image file is missing.");
-        const auto length = file.tellg();
-        if (length < 0 || static_cast<std::uint64_t>(length) > std::numeric_limits<std::uint32_t>::max() + std::uint64_t(sizeof(CookedParticleEffectsHeader)))
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX image file size is invalid.");
-        bytes.resize(static_cast<std::size_t>(length));
-        file.seekg(0);
-        if (!file.read(reinterpret_cast<char *>(bytes.data()), length))
-            return Result::Failure(ErrorCode::InvalidArgument, "hs_vfx", "VFX image file is truncated.");
-        return Result::Success();
-    };
-    std::vector<std::byte> legacy, program;
-    if (auto result = read(legacy_path, legacy); !result) return result;
-    if (auto result = read(program_path, program); !result) return result;
-    return DecodeVfxImage(legacy, program, output);
 }
 }

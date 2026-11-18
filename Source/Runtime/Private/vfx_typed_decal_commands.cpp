@@ -1,15 +1,14 @@
 #include "vfx_typed_decal_commands.hpp"
+#include <hs/render_data/vfx_payload_ids.hpp>
 #include <cmath>
 #include <optional>
-#include <string_view>
 namespace hs::runtime_detail
 {
 namespace
 {
-constexpr std::uint32_t Hash(std::string_view s){std::uint32_t h=2166136261u;for(unsigned char c:s){h^=c;h*=16777619u;}return h;}
-constexpr auto kPointPayload = Hash("PointEventPayload");
-constexpr auto kContextPayload = Hash("PresentationContextPayload");
-constexpr auto kCirclePayload = Hash("CircleAreaPayload");
+constexpr auto kPointPayload = hs::vfx_payload::PointEvent;
+constexpr auto kContextPayload = hs::vfx_payload::PresentationContext;
+constexpr auto kCirclePayload = hs::vfx_payload::CircleArea;
 std::uint64_t Mix(std::uint64_t v){v^=v>>30;v*=0xbf58476d1ce4e5b9ull;v^=v>>27;v*=0x94d049bb133111ebull;return v^(v>>31);}
 bool Finite(Float3 v){return std::isfinite(v.x)&&std::isfinite(v.y)&&std::isfinite(v.z);}
 
@@ -42,12 +41,6 @@ void Append(const VfxDecalRecipe&r,const Anchor&a,float age,std::uint64_t owner,
  v.stable_id=Mix(owner^Mix(r.effect_id)^Mix(r.source_stable_id)^Mix(static_cast<std::uint64_t>(r.kind==VfxDecalKind::Fracture?VfxMotionKind::FractureAtPeak:VfxMotionKind::StaticProjectedResidue)));if(!v.stable_id)v.stable_id=1;
  out.push_back(v);
 }
-}
-std::vector<VfxDecalInput> BuildVfxTypedDecalCommands(const VfxImage&image,VfxEventView events,std::span<const VfxPersistentInput>persistent,double tick)
-{
- std::vector<VfxDecalInput> result;
- AppendVfxTypedDecalCommands(image, events, persistent, tick, result);
- return result;
 }
 void AppendVfxTypedDecalCommands(const VfxImage&image,VfxEventView events,
  std::span<const VfxPersistentInput>persistent,double tick,std::vector<VfxDecalInput>&result)

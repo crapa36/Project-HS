@@ -29,12 +29,6 @@ struct ExperimentTimelineAction
     std::string payload_json;
 };
 
-struct ExperimentCapture
-{
-    Tick tick{};
-    std::string path;
-};
-
 using ExperimentValue = std::variant<bool, std::int64_t, std::uint64_t, double, std::string>;
 
 struct ExperimentAssertion
@@ -58,7 +52,6 @@ struct ExperimentSpec
 {
     static constexpr std::uint32_t kSchemaVersion = 1;
 
-    std::uint32_t schema_version{kSchemaVersion};
     std::string scenario_id;
     std::uint64_t seed{};
     ExperimentMode mode{ExperimentMode::OffscreenRender};
@@ -66,8 +59,7 @@ struct ExperimentSpec
     std::string content_hash;
     std::string config_overrides_json{"{}"};
     std::vector<ExperimentTimelineAction> timeline_actions;
-    std::vector<std::string> probes;
-    std::vector<ExperimentCapture> captures;
+    std::string final_capture_path;
     std::vector<ExperimentAssertion> assertions;
     ExperimentTermination termination;
 };
@@ -76,14 +68,11 @@ struct ExperimentSpec
 // Loaded actions execute by target tick, then sequence within the tick.
 [[nodiscard]] Result LoadExperimentSpec(const std::filesystem::path &path,
                                         ExperimentSpec &spec);
-[[nodiscard]] Result SaveExperimentSpec(const std::filesystem::path &path,
-                                        const ExperimentSpec &spec);
 [[nodiscard]] Result ApplyExperimentOverrides(const ExperimentSpec &spec,
                                               ApplicationConfig &config);
 [[nodiscard]] Result FinalizeExperimentArtifacts(const ExperimentSpec &spec,
                                                  const std::filesystem::path &directory,
                                                  std::string_view start_utc,
-                                                 std::string_view end_utc,
-                                                 int process_exit);
+                                                 std::string_view end_utc);
 
 } // namespace hs

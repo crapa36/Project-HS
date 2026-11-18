@@ -1,6 +1,6 @@
 #pragma once
 
-#include "content_cooker.hpp"
+#include "game_data_cooker.hpp"
 
 #include <algorithm>
 #include <initializer_list>

@@ -204,7 +204,7 @@ hs_reject_target_links(hs_gameplay hs_jobs hs_presentation hs_render_data hs_ren
 hs_reject_target_links(hs_gameplay_development hs_jobs hs_presentation hs_render_data hs_render_data_values hs_renderer_d3d12 hs_runtime)
 hs_reject_target_links(hs_presentation hs_jobs hs_game_rules hs_gameplay hs_render_data hs_material_compiler hs_renderer_d3d12 hs_runtime)
 hs_reject_target_links(hs_environment_layout hs_jobs hs_game_rules hs_gameplay hs_render_data hs_material_compiler hs_renderer_d3d12 hs_runtime)
-foreach(renderer IN ITEMS hs_renderer_d3d12 hs_renderer_d3d12_common hs_baked_lighting_resources hs_probe_baker)
+foreach(renderer IN ITEMS hs_renderer_d3d12 hs_renderer_d3d12_common hs_probe_baker)
     hs_reject_target_links(${renderer} hs_game_domain hs_game_rules hs_gameplay hs_presentation hs_runtime hs_material_compiler)
 endforeach()
 hs_reject_target_links(hs_runtime hs_material_compiler hs_gameplay_development)
@@ -212,6 +212,6 @@ hs_reject_target_links(hs_runtime hs_material_compiler hs_gameplay_development)
 # Shipping executables and runtime must never acquire cookers or offline-only code.
 foreach(shipping IN ITEMS ProjectHS hs_runtime hs_renderer_d3d12)
     hs_reject_target_links(${shipping} hs_asset_pipeline hs_material_compiler
-        hs_geometry_cooker hs_meshoptimizer_cook hs_scene_hlod_cooker hs_vfx_authoring
+        hs_geometry_cooker hs_meshoptimizer_cook hs_scene_hlod_cooker
         hs_probe_baker hs_probe_grid_bake hs_gameplay_development)
 endforeach()

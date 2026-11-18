@@ -1,6 +1,5 @@
 #include "command_line.hpp"
 
-#include <hs/renderer/renderer.hpp>
 #if defined(HS_DEVELOPMENT_TOOLS)
 #include <hs/game_domain/game_types.hpp>
 #endif
@@ -18,7 +17,6 @@ ApplicationConfig ParseProjectHsArguments(
     std::span<const std::string_view> args)
 {
     ApplicationConfig config;
-    config.surface_frontend = SurfaceFrontend::VisibilityBuffer;
 #if defined(HS_DEVELOPMENT_TOOLS)
     const auto parse_number = [](std::string_view text, auto &destination) {
         auto candidate = destination;

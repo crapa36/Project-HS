@@ -1,22 +1,41 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include "../AssetPipeline/action.hpp"
+#include "../CharacterContent/character_sources.hpp"
 
 #include <hs/core/cooked_format.hpp>
 #include <hs/render_data/texture_package.hpp>
 #include <hs/render_data/dds_texture.hpp>
+
+#include <Windows.h>
+#include <objbase.h>
 
 #include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <span>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <vector>
 
 namespace
 {
 namespace ap = hs::asset_pipeline;
 namespace rd = hs::render_data;
 namespace fs = std::filesystem;
+
+struct ScopedComInitialization
+{
+    HRESULT result{CoInitializeEx(nullptr, COINIT_MULTITHREADED)};
+    ~ScopedComInitialization()
+    {
+        if (SUCCEEDED(result)) CoUninitialize();
+    }
+};
 
 struct Texture
 {
@@ -29,6 +48,10 @@ void Require(bool valid, std::string_view reason)
     if (!valid) throw std::runtime_error("hs_render_character_texture_package: " +
                                          std::string(reason));
 }
+
+constexpr std::array<std::string_view, 8> kCharacterModes{
+    "archer", "slime-melee", "slime-ranged", "slime-suicide",
+    "slime-projectile", "boss-5m", "boss-10m", "boss-final"};
 
 std::vector<Texture> Textures(std::string_view mode)
 {
@@ -92,10 +115,12 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec,
         const ap::ActionResultSnapshot result(build_root, spec.namespace_path);
         if (result.ActionId() != spec.action_id ||
             result.ActionKeyValue() != ap::ActionKey(spec) ||
-            result.ProductCount() != textures.size()) return false;
+            result.ProductCount() != textures.size() * 2) return false;
         for (const auto &texture : textures)
         {
             ap::UpstreamProduct ignored;
+            fs::path dds_path;
+            result.ReadProduct(SourceId(texture), ignored, dds_path);
             const auto contents = result.ReadProductBytes(ProductId(texture), ignored);
             const auto bytes = std::as_bytes(std::span(contents.data(), contents.size()));
             const auto package = rd::ReadTexturePackage(bytes, hs::MakeAssetId(ProductId(texture)));
@@ -112,41 +137,82 @@ bool Current(const fs::path &build_root, const ap::ActionSpec &spec,
     catch (const std::exception &) { return false; }
 }
 
-void Produce(std::string_view mode, const fs::path &build_root)
+void Produce(std::string_view mode, const fs::path &source_root,
+             const fs::path &build_root)
 {
+    Require(source_root.is_absolute(), "source root must be absolute");
     Require(build_root.is_absolute(), "build root must be absolute");
+    ap::RequireDirectory(source_root);
     ap::MakeDirectory(build_root);
     const auto textures = Textures(mode);
     ap::ActionSpec spec;
     spec.action_id = "render.texture.character." + std::string(mode);
-    spec.recipe_id = "project-hs.render.texture.character.bc7-semantic-v1";
-    spec.recipe_version = 3;
+    spec.recipe_id = "project-hs.render.texture.character.bc7-semantic-v1." +
+        hs::content::CharacterTextureCookRecipeIdentity();
+    spec.recipe_version = 4;
     spec.namespace_path = "render/texture/character/" + std::string(mode);
-    const ap::ActionResultSnapshot source_result(build_root, "character/" + std::string(mode));
-    std::vector<std::string> source_bytes;
-    source_bytes.reserve(textures.size());
-    for (const auto &texture : textures)
+
+    hs::content::CharacterAssetSource source;
+    if (mode == "monster-materials")
     {
-        ap::UpstreamProduct upstream;
-        source_bytes.push_back(source_result.ReadProductBytes(SourceId(texture), upstream));
-        spec.upstream.push_back(upstream);
+        const auto texture_root = source_root / "ContentSource/Textures/Monsters/PBR";
+        for (const auto *name : {"BasecolorDefault_TEX.png", "Emissive_TEX.png", "RAM_TEX.png"})
+            hs::content::AddCharacterInput(spec, source_root, texture_root / name);
     }
-    std::ranges::sort(spec.upstream, {}, &ap::UpstreamProduct::logical_id);
+    else
+    {
+        const auto found = std::ranges::find(kCharacterModes, mode);
+        Require(found != kCharacterModes.end(), "unknown mode");
+        source = hs::content::CharacterAssetSources(source_root)
+            [static_cast<std::size_t>(found - kCharacterModes.begin())];
+        hs::content::AddCharacterModelInputs(spec, source_root, source);
+    }
+    std::ranges::sort(spec.inputs, {}, &ap::Input::logical_id);
+
     if (Current(build_root, spec, textures))
     {
-        ap::TouchActionResult(build_root / "Actions" / spec.namespace_path / "result.json");
         return;
     }
+
     const auto stage = ap::CreateStage(build_root / "Actions" / spec.namespace_path);
     try
     {
-        std::vector<ap::Product> products;
-        for (std::size_t i = 0; i < textures.size(); ++i)
+        const auto snapshot = hs::content::SnapshotActionInputs(stage, spec.inputs);
+        std::string error;
+        if (mode == "monster-materials")
         {
-            const auto &texture = textures[i];
-            const auto &dds = source_bytes[i];
-            const auto bytes = std::as_bytes(std::span(dds.data(), dds.size()));
-            const auto payload = DdsPayload(bytes, texture.description);
+            const auto source_directory = snapshot.RemapDirectory(
+                source_root, source_root / "ContentSource/Textures/Monsters/PBR");
+            if (!hs::content::CookMonsterMaterialTextures(stage, error, source_directory))
+                throw std::runtime_error(error);
+        }
+        else
+        {
+            auto staged_source = source;
+            staged_source.model = snapshot.Remap(source_root, source.model);
+            hs::content::CharacterIR character;
+            if (!hs::content::ImportCharacterMaterials(character, error, staged_source))
+                throw std::runtime_error(error);
+            if (!hs::content::WriteCharacterTextures(stage, character, staged_source, error))
+                throw std::runtime_error(error);
+            Require(character.materials.size() * 2 == textures.size(),
+                    "character material count does not match texture product contract");
+        }
+
+        std::error_code remove_error;
+        fs::remove_all(snapshot.root, remove_error);
+        Require(!remove_error, "cannot remove private character source snapshot: " +
+                remove_error.message());
+
+        std::vector<ap::Product> products;
+        products.reserve(textures.size() * 2);
+        for (const auto &texture : textures)
+        {
+            const auto dds_filename = texture.name + ".dds";
+            const auto dds_path = stage / dds_filename;
+            const auto dds = ap::ReadBytes(dds_path);
+            const auto dds_bytes = std::as_bytes(std::span(dds.data(), dds.size()));
+            const auto payload = DdsPayload(dds_bytes, texture.description);
             const std::array dependencies{SourceId(texture)};
             const auto package = rd::BuildTexturePackage(
                 hs::MakeAssetId(ProductId(texture)), dependencies,
@@ -155,10 +221,12 @@ void Produce(std::string_view mode, const fs::path &build_root)
             Require(decoded.dependencies == std::vector<std::string>{dependencies[0]} &&
                     decoded.subresources.size() == texture.description.mip_count,
                     "package self-validation failed");
-            const auto filename = texture.name + ".rpkg";
-            const auto output = stage / filename;
-            ap::WriteBytes(output, package);
-            auto product = ap::HashProduct(ProductId(texture), filename, output);
+
+            products.push_back(ap::HashProduct(SourceId(texture), dds_filename, dds_path));
+            const auto package_filename = texture.name + ".rpkg";
+            const auto package_path = stage / package_filename;
+            ap::WriteBytes(package_path, package);
+            auto product = ap::HashProduct(ProductId(texture), package_filename, package_path);
             product.dependencies.assign(dependencies.begin(), dependencies.end());
             products.push_back(std::move(product));
         }
@@ -176,15 +244,19 @@ void Produce(std::string_view mode, const fs::path &build_root)
 
 int wmain(int argc, wchar_t **argv)
 {
-    fs::path build_root;
+    fs::path source_root, build_root;
     std::string mode;
     ap::Json action_id = nullptr;
     try
     {
+        const ScopedComInitialization com;
+        Require(SUCCEEDED(com.result), "COM initialization failed");
         for (int i = 1; i < argc; ++i)
         {
             const std::wstring_view arg = argv[i];
-            if (arg == L"--build-root" && build_root.empty() && ++i < argc)
+            if (arg == L"--source-root" && source_root.empty() && ++i < argc)
+                source_root = fs::path(argv[i]);
+            else if (arg == L"--build-root" && build_root.empty() && ++i < argc)
                 build_root = fs::path(argv[i]);
             else if (arg == L"--mode" && mode.empty() && ++i < argc)
             {
@@ -197,19 +269,18 @@ int wmain(int argc, wchar_t **argv)
             }
             else Require(false, "invalid command line");
         }
-        Require(!build_root.empty() && !mode.empty(),
-                "usage: hs_render_character_texture_package --mode <mode> --build-root <absolute>");
-        if (mode == "monster-materials" || mode == "archer" || mode == "slime-melee" ||
-            mode == "slime-ranged" || mode == "slime-suicide" || mode == "slime-projectile" ||
-            mode == "boss-5m" || mode == "boss-10m" || mode == "boss-final")
+        Require(!source_root.empty() && !build_root.empty() && !mode.empty(),
+                "usage: hs_render_character_texture_package --mode <mode> --source-root <absolute> --build-root <absolute>");
+        if (mode == "monster-materials" || std::ranges::find(kCharacterModes, mode) != kCharacterModes.end())
             action_id = "render.texture.character." + mode;
-        Produce(mode, build_root.lexically_normal());
+        Produce(mode, source_root.lexically_normal(), build_root.lexically_normal());
         return 0;
     }
     catch (const std::exception &error)
     {
         ap::ReportFailure("hs_render_character_texture_package", error.what(),
                           {{"action_id", action_id}, {"mode", mode},
+                           {"source_root", ap::DiagnosticPath(source_root)},
                            {"build_root", ap::DiagnosticPath(build_root)}});
         return 1;
     }

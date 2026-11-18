@@ -1,7 +1,11 @@
 #pragma once
 
-#include "content_cooker.hpp"
 #include "character_ir.hpp"
+
+#include <array>
+#include <filesystem>
+#include <string>
+#include <vector>
 
 namespace hs::content
 {
@@ -25,9 +29,13 @@ struct CharacterAssetSource
 
 bool ImportCharacterAsset(CharacterIR &character, std::string &error_message,
                           const CharacterAssetSource &source);
+bool ImportCharacterMaterials(CharacterIR &character, std::string &error_message,
+                              const CharacterAssetSource &source);
 bool WriteCharacterTextures(const std::filesystem::path &output,
     const CharacterIR &character, const CharacterAssetSource &source,
     std::string &error_message);
+bool CookMonsterMaterialTextures(const std::filesystem::path &output,
+    std::string &error_message, const std::filesystem::path &texture_source);
 // Includes the actual BC7 encoder/backend identity and fixed semantic policy;
 // callers include it in the Action key before checking for current products.
 [[nodiscard]] const std::string &CharacterTextureCookRecipeIdentity();

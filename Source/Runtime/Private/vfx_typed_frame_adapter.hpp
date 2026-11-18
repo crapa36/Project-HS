@@ -7,12 +7,15 @@
 #include <hs/render_data/vfx_frame_input.hpp>
 #include <hs/runtime/vfx_image.hpp>
 
+#include <array>
 #include <cstdint>
 #include <cstddef>
 #include <optional>
 #include <span>
 #include <unordered_map>
 #include <vector>
+
+namespace hs { class VfxCatalog; }
 
 namespace hs::runtime_detail
 {
@@ -47,7 +50,6 @@ class PreparedPairFacts
                  std::span<const PersistentVfxVisual> current,
                  std::span<const RenderInstance> instances,
                  std::span<const CapturedRenderInstance> captures);
-    [[nodiscard]] std::size_t RetainedCapacityBytes() const noexcept;
     [[nodiscard]] const PersistentVfxVisual *Previous(
         std::uint64_t stable_id, PersistentVfxKind kind, std::span<const PersistentVfxVisual> rows) const noexcept;
     [[nodiscard]] const PersistentVfxVisual *Current(
@@ -96,7 +98,7 @@ class PreparedPairFacts
 // function owns no state and does not create a lifetime or geometry value when
 // the source contract does not provide one.
 void BuildVfxTypedFrameInputs(
-    const VfxImage &image,
+    const VfxCatalog &catalog,
     std::span<const PresentationEvent> events,
     std::span<const PersistentVfxVisual> current,
     std::span<const PersistentVfxVisual> previous,
@@ -105,20 +107,11 @@ void BuildVfxTypedFrameInputs(
     const PreparedPairFacts &pair_facts,
     float interpolation = 1.0f, VfxQuality quality = VfxQuality::High);
 
-// Raw fixtures/tools have no retained publication identity; prepare one temporary
-// index at this boundary and use the same indexed consumer as the normal frame.
-void BuildVfxTypedFrameInputsFromRaw(
-    const VfxImage &image, std::span<const PresentationEvent> events,
-    std::span<const PersistentVfxVisual> current,
-    std::span<const PersistentVfxVisual> previous, Tick current_tick,
-    VfxTypedFrameInputs &result, float interpolation = 1.0f,
-    VfxQuality quality = VfxQuality::High);
 
 struct SnapshotParticleScratch
 {
     RenderInstanceLookup previous, current;
     std::vector<std::uint8_t> ground_routes;
-    [[nodiscard]] std::size_t RetainedCapacityBytes() const noexcept;
 };
 
 // Expand snapshot births once for the native batch, after decoded births.
@@ -136,12 +129,11 @@ class VfxUpgradeMovementState
 {
   public:
     void Append(
-        const VfxImage &image,
+        const VfxCatalog &catalog,
         std::span<const PresentationEvent> dispatched_events,
         Tick current_tick, std::vector<VfxPersistentInput> &output,
         float interpolation = 1.0f, VfxQuality quality = VfxQuality::High);
-    void Clear() noexcept { owners_.clear(); staged_owners_.clear(); }
-    [[nodiscard]] std::size_t RetainedCapacityBytes() const noexcept;
+    void Clear() noexcept { owners_.clear(); }
 
   private:
     struct Owner
@@ -151,7 +143,6 @@ class VfxUpgradeMovementState
         float seconds{};
     };
     std::vector<Owner> owners_;
-    std::vector<Owner> staged_owners_;
 };
 
 // Refresh one retained warning event from its authoritative persistent owner.
@@ -161,24 +152,7 @@ class VfxUpgradeMovementState
     Tick current_tick, const PreparedPairFacts &pair_facts,
     std::span<const PersistentVfxVisual> previous = {}, float interpolation = 1.0f);
 
-[[nodiscard]] bool RefreshVfxGroundEventOwnerFromRaw(
-    VfxEventInput &event, std::span<const PersistentVfxVisual> owners,
-    Tick current_tick, std::span<const PersistentVfxVisual> previous = {},
-    float interpolation = 1.0f);
 
-// Refresh retained warning events from their authoritative persistent owners.
-// Events without owner metadata are preserved unchanged.
-void RefreshVfxGroundEventOwners(std::vector<VfxEventInput> &events,
-                                 std::span<const PersistentVfxVisual> owners,
-                                 Tick current_tick,
-                                 const PreparedPairFacts &pair_facts,
-                                 std::span<const PersistentVfxVisual> previous = {},
-                                 float interpolation = 1.0f);
 
-void RefreshVfxGroundEventOwnersFromRaw(
-    std::vector<VfxEventInput> &events,
-    std::span<const PersistentVfxVisual> owners, Tick current_tick,
-    std::span<const PersistentVfxVisual> previous = {},
-    float interpolation = 1.0f);
 
 } // namespace hs::runtime_detail

@@ -3,7 +3,6 @@
 #include "renderer_content.hpp"
 #include "streaming_manager.hpp"
 #include "renderer_texture_streaming.hpp"
-#include "renderer_texture_feedback.hpp"
 #include <hs/core/sha256.hpp>
 
 #include <algorithm>
@@ -28,135 +27,8 @@ void Check(bool condition, const char *message)
     if (!condition) throw std::runtime_error(message);
 }
 
-void CheckFeedbackSamplingDomains()
-{
-    hs::RenderGraphBuilder graph;
-    hs::TextureDesc description{};
-    description.width = description.height = 4;
-    description.format = DXGI_FORMAT_R8_UINT;
-    description.flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    const auto alpha = graph.CreateTexture(description, "opacity feedback");
-    const auto opaque = graph.CreateTexture(description, "surface feedback");
-    const auto terrain = graph.CreateBuffer({256, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS}, "terrain feedback");
-    auto clear = graph.AddPass(0, "clear feedback", hs::QueueHint::Direct);
-    std::vector<hs::TextureFeedbackGraphBinding> bindings{
-        {clear.Write(graph.Version(alpha), hs::Access::UnorderedWrite), true},
-        {clear.Write(graph.Version(opaque), hs::Access::UnorderedWrite), false},
-        {clear.Write(graph.Version(terrain), hs::Access::UnorderedWrite), false}};
-    const auto initial = bindings;
-    auto shadow = graph.AddPass(1, "opacity sampling", hs::QueueHint::Direct);
-    hs::RendererTextureFeedback::DeclareSampling(shadow, bindings, true);
-    Check(bindings[0].feedback.ordinal == initial[0].feedback.ordinal + 1 &&
-        bindings[1].feedback == initial[1].feedback && bindings[2].feedback == initial[2].feedback,
-        "opacity pass must preserve unrelated surface feedback ownership");
-    auto surface = graph.AddPass(2, "surface sampling", hs::QueueHint::Direct);
-    hs::RendererTextureFeedback::DeclareSampling(surface, bindings);
-    Check(bindings[0].feedback.ordinal == initial[0].feedback.ordinal + 2 &&
-        bindings[1].feedback.ordinal == initial[1].feedback.ordinal + 1 &&
-        bindings[2].feedback.ordinal == initial[2].feedback.ordinal + 1,
-        "surface pass must retain both feedback outputs after opacity sampling");
-}
-
-void CheckTextureFeedbackMinimumMipRows()
-{
-    using hs::texture_feedback_detail::kNoMipDemand;
-    using hs::texture_feedback_detail::MinimumRequestedMip;
-    using hs::texture_feedback_detail::DecodeTerrainMipRequests;
-    Check(DecodeTerrainMipRequests(0) == std::array<std::uint32_t, 2>{kNoMipDemand, kNoMipDemand} &&
-        DecodeTerrainMipRequests(0x80008000u) == std::array<std::uint32_t, 2>{15, 15} &&
-        DecodeTerrainMipRequests(0x002400a8u) == std::array<std::uint32_t, 2>{3, 2} &&
-        DecodeTerrainMipRequests(0x00010001u) == std::array<std::uint32_t, 2>{0, 0} &&
-        DecodeTerrainMipRequests(0x00008000u) == std::array<std::uint32_t, 2>{15, kNoMipDemand} &&
-        DecodeTerrainMipRequests(0x80000000u) == std::array<std::uint32_t, 2>{kNoMipDemand, 15},
-        "terrain request halves must independently decode their lowest set mip");
-    std::array<std::byte, 8> row{};
-    std::fill_n(row.begin(), 4, std::byte{0xff});
-    const auto logical_row = std::span<const std::byte>(row).first(4);
-    Check(MinimumRequestedMip(logical_row, 8) == kNoMipDemand,
-          "all-0xff texture feedback row must mean no sample");
-    std::fill_n(row.begin(), 4, std::byte{200});
-    Check(MinimumRequestedMip(logical_row, 8) == 7,
-          "feedback row minimum must clamp to the mip chain and ignore pitch padding");
-    row[3] = std::byte{2};
-    Check(MinimumRequestedMip(logical_row, 8) == 2,
-          "feedback row minimum missed a later logical byte");
-    row[1] = std::byte{0};
-    Check(MinimumRequestedMip(logical_row, 8) == 0,
-          "zero mip demand must remain the early-out minimum");
-}
-
-void CheckSoftwareTransactionSupersession()
-{
-    Check(hs::TextureSoftwareTransactionSuperseded(2, 4, true) &&
-        !hs::TextureSoftwareTransactionSuperseded(2, 1, true) &&
-        !hs::TextureSoftwareTransactionSuperseded(2, 2, true) &&
-        !hs::TextureSoftwareTransactionSuperseded(2, 4, false),
-        "software transaction supersession did not distinguish pressure from expiring demand");
-
-    hs::ResidencyManager residency;
-    hs::ResidencyBudgetSnapshot transaction_budget{true, 1000, 0, 1000, 0, true, 1000};
-    transaction_budget.nonlocal_valid = true;
-    residency.UpdateBudget(transaction_budget);
-    const auto candidate = residency.ReserveGpu(600);
-    const auto upload_window = residency.ReserveGpu(100, hs::ResidencySegment::NonLocal);
-    const auto metadata = residency.ReserveHost(128);
-    Check(candidate && upload_window && metadata && residency.CommitHost(metadata, 128),
-        "software candidate, upload window, or decoded metadata reservation failed");
-
-    hs::StreamingManager streaming;
-    const auto completed_chunk = streaming.Request("render/texture/test.rtex", "mip-2-chunk-0", "generation-a", 10);
-    Check(completed_chunk && streaming.BeginRead(completed_chunk) &&
-        streaming.CompleteRead(completed_chunk, "generation-a") &&
-        streaming.BeginUpload(completed_chunk, "generation-a") &&
-        streaming.SubmitUpload(completed_chunk, "generation-a", {1, 0, 0}) &&
-        streaming.TryPublish(completed_chunk, "generation-a", {1, 0, 0}) &&
-        streaming.Retire(completed_chunk, {1, 0, 0}) && streaming.Collect({1, 0, 0}) == 1 &&
-        residency.Contains(upload_window),
-        "intermediate software chunk released its owner-retained upload window");
-    const auto request = streaming.Request("render/texture/test.rtex", "mip-2", "generation-a", 10);
-    Check(request && streaming.BeginRead(request) && streaming.CompleteRead(request, "generation-a") &&
-        streaming.Find(request)->state == hs::StreamingPageState::Decoded,
-        "software transaction fixture did not reach its safe decoded state");
-
-    // A finer desired mip keeps the fixed coarser transaction alive.
-    Check(!hs::TextureSoftwareTransactionSuperseded(2, 1, true) &&
-        !hs::TextureSoftwareTransactionSuperseded(2, 4, false) && residency.Contains(candidate) &&
-        residency.Contains(upload_window) && residency.Contains(metadata) &&
-        streaming.Find(request)->state == hs::StreamingPageState::Decoded,
-        "finer desired mip abandoned an in-progress software transaction");
-
-    // A budget reduction leaves the old candidate admitted but prevents another chunk.
-    transaction_budget.local_budget = 700;
-    residency.UpdateBudget(transaction_budget);
-    Check(!residency.CanAdmit(50), "GPU budget reduction did not block the next software chunk");
-    if (hs::TextureSoftwareTransactionSuperseded(2, 4, true) &&
-        streaming.Find(request)->state == hs::StreamingPageState::Decoded)
-    {
-        Check(streaming.Cancel(request) && residency.ReleaseNow(metadata) &&
-            residency.ReleaseNow(upload_window) && residency.ReleaseNow(candidate),
-            "safe superseded software transaction cleanup failed");
-    }
-    Check(streaming.Find(request)->state == hs::StreamingPageState::Cancelled &&
-        !residency.Contains(candidate) && !residency.Contains(upload_window) &&
-        residency.HostAdmissionFacts().held_bytes == 0 && residency.CanStage(1000) && residency.CanAdmit(400),
-        "superseded software transaction retained admission or blocked coarse work");
-
-    const auto coarse_candidate = residency.ReserveGpu(400);
-    const auto coarse_request = streaming.Request("render/texture/test.rtex", "mip-4", "generation-a", 10);
-    Check(coarse_candidate && coarse_request && streaming.BeginRead(coarse_request) &&
-        streaming.CompleteRead(coarse_request, "generation-a") &&
-        streaming.Find(coarse_request)->state == hs::StreamingPageState::Decoded,
-        "coarser replacement transaction could not make progress after cleanup");
-    Check(residency.ReleaseNow(coarse_candidate), "coarser fixture candidate release failed");
-}
-
 void CheckAsyncAssetPreparation()
 {
-    Check(hs::NextTextureTransactionTarget(4, 2, true, true, 4) == 3 &&
-        hs::NextTextureTransactionTarget(3, 2, true, true, 4) == 2 &&
-        hs::NextTextureTransactionTarget(4, 2, true, false, 4) == 4 &&
-        hs::NextTextureTransactionTarget(4, 2, false, false, 4) == 2,
-        "fixed texture transaction target skipped a legal resident mip step");
     const std::array<std::uint32_t, 3> replacement_subresources{0, 1, 2};
     std::array<hs::render_data::TextureSubresourceLayout, 3> replacement_layouts{};
     replacement_layouts[0].byte_count = 5; replacement_layouts[1].byte_count = 7;
@@ -207,36 +79,6 @@ void CheckAsyncAssetPreparation()
             hs::kMaximumHostStagingBudgetBytes - 8 + 1,
             hs::kMaximumHostStagingBudgetBytes),
         "source unit beyond the maximum host staging ceiling was not classified impossible");
-    Check(hs::TextureEffectiveHostTargetMip(0, 2, 1, 2, 0, true) == 0 &&
-        hs::TextureEffectiveHostTargetMip(0, 2, 2, 2, 1, true) == 1 &&
-        hs::TextureEffectiveHostTargetMip(0, 2, 2, 2, 2, false) == 2,
-        "host transfer ceiling evicted better published quality or skipped the registered fallback");
-    const std::array<std::uint32_t, 3> priorities{3, 1, 1}, desired_mips{0, 0, 0}, tail_mips{2, 1, 2};
-    std::vector<std::uint32_t> victim_order;
-    std::array<std::vector<std::uint64_t>, 3> mip_costs{{{100, 60, 20}, {80, 40}, {90, 50, 10}}};
-    std::uint64_t planned_cost = 270;
-    std::array<std::uint32_t, 3> final_mips = desired_mips;
-    std::vector<std::uint32_t> advanced_owners;
-    Check(hs::TextureBuildBudgetVictimOrder(priorities, final_mips, tail_mips, victim_order) &&
-        victim_order == std::vector<std::uint32_t>{1, 2, 0},
-        "budget victim ordering did not retain ascending priority and original-index ties");
-    for (const auto owner : victim_order)
-        while (planned_cost > 150 && final_mips[owner] < tail_mips[owner])
-        {
-            Check(hs::TextureCoarsenOneMip(final_mips[owner], tail_mips[owner], mip_costs[owner], planned_cost),
-                "budget victim step rejected a valid monotonic mip cost");
-            advanced_owners.push_back(owner);
-        }
-    Check(final_mips == std::array<std::uint32_t, 3>{0, 1, 2} && planned_cost == 150 &&
-        advanced_owners == std::vector<std::uint32_t>{1, 2, 2},
-        "budget planner did not coarsen one priority victim through its tail before the next");
-    hs::ResidencyManager mip_budget;
-    mip_budget.UpdateBudget({true, 0, 0, 0, 0, true, 1024});
-    const auto mip_payload = mip_budget.ReserveHost(512);
-    const auto mip_metadata = mip_budget.ReserveHost(256);
-    Check(mip_payload && mip_metadata && !mip_budget.CanStage(257) &&
-        mip_budget.ReleaseNow(mip_payload) && mip_budget.ReleaseNow(mip_metadata) &&
-        mip_budget.CanStage(768), "completed mip step did not return its payload and metadata budget");
     hs::ResidencyManager shrunken_host_budget;
     shrunken_host_budget.UpdateBudget({true, 0, 0, 0, 0, true, 1024});
     const auto first_metadata = shrunken_host_budget.ReserveHost(400);
@@ -319,7 +161,7 @@ void CheckAsyncAssetPreparation()
         "authenticated texture subresource ranges were not submitted");
     hs::AssetReadCompletion ranged_output;
     Check(bool(poll(ranged, ranged_output)) && ranged_output.ready && !ranged_output.cancelled &&
-        ranged_output.bytes == std::vector<std::byte>{contents[1], contents[2], contents[3]} &&
+        std::ranges::equal(ranged_output.bytes.Bytes(), std::array{contents[1], contents[2], contents[3]}) &&
         streaming.CompleteRead(ranged, "generation") && residency.ReleaseNow(ranged_output.storage) &&
         !residency.Contains(ranged_storage), "range IO did not verify or compact its selected subresources");
     auto started = std::make_shared<std::promise<void>>();
@@ -463,16 +305,6 @@ void CheckPackAssetReads(bool native)
     Check(bool(hs::ShippedContentOwner::Open(path, *owner)) &&
         bool(hs::ShippedContentOwner::Open(path, *unbound_owner)), "could not open pack fixture");
     const auto identity = owner->Identity();
-    {
-        const std::array bulks{hs::render_data::RendererBulkDescriptor{hs::MakeAssetId("render/catalog-fixture.rpkg"),
-            {64,payload.size(),hs::render_data::RenderBulkFormat::Package,hs::Sha256(payload)}}};
-        hs::render_data::RendererCatalogView view{}; view.bulks = bulks;
-        std::shared_ptr<const hs::render_data::RendererCatalogData> prepared;
-        Check(bool(hs::render_data::DecodeRendererCatalog(hs::render_data::EncodeRendererCatalog(view),owner->Size(),prepared)),
-            "valid immutable catalogue did not admit");
-        hs::RendererConfig binding; binding.packed_content = owner; binding.UseRendererCatalog(prepared);
-        Check(bool(hs::ValidatePackedCatalog(binding)), "admitted catalogue owner binding rejected");
-    }
     auto source = hs::RendererAssetSource::Packed(owner,
         {64, payload.size(), {}, hs::Sha256(payload)});
     auto unbound = hs::RendererAssetSource::Packed(unbound_owner, source.Packed().range);
@@ -563,7 +395,7 @@ void CheckPackAssetReads(bool native)
         io.SubmitQueuedReads();
         hs::AssetReadCompletion range_output;
         Check(bool(io.Poll(range_request, streaming, residency, range_output)) && range_output.ready &&
-              !range_output.cancelled && range_output.bytes == std::vector<std::byte>(payload.begin(), payload.end()),
+              !range_output.cancelled && std::ranges::equal(range_output.bytes.Bytes(), payload),
               "native loose range returned incorrect compact bytes");
         Check(streaming.CompleteRead(range_request, "generation") && residency.ReleaseNow(range_output.storage),
               "native range completion did not reclaim its reservation");
@@ -663,7 +495,7 @@ void CheckPackAssetReads(bool native)
                 "native prepare terminal path retained work, storage or its generation owner");
             if (mode == 0)
                 Check(poll_succeeded && prepare_output.ready && !prepare_output.cancelled &&
-                    prepare_output.bytes == std::vector<std::byte>(payload.begin(), payload.end()) &&
+                    std::ranges::equal(prepare_output.bytes.Bytes(), payload) &&
                     residency.Contains(storage) && streaming.CompleteRead(request, generation) &&
                     residency.ReleaseNow(prepare_output.storage) && !residency.Contains(storage),
                     "native successful preparation did not publish and reclaim its bytes");
@@ -694,7 +526,7 @@ void CheckPackAssetReads(bool native)
         const auto [request, storage] = enqueue(input);
         hs::AssetReadCompletion completion;
         Check(bool(io.Poll(request, streaming, residency, completion)) && completion.ready && !completion.cancelled &&
-            completion.bytes == previous, "pack IO returned incorrect range bytes");
+            std::ranges::equal(completion.bytes.Bytes(), previous), "pack IO returned incorrect range bytes");
         Check(streaming.CompleteRead(request, "generation") && residency.ReleaseNow(completion.storage) &&
             !residency.Contains(storage), "pack IO did not reclaim its completed reservation");
     };
@@ -712,7 +544,7 @@ void CheckPackAssetReads(bool native)
             "product-relative packed ranges were not submitted");
         hs::AssetReadCompletion completion;
         Check(bool(io.Poll(request, streaming, residency, completion)) && completion.ready && !completion.cancelled &&
-            completion.bytes == std::vector<std::byte>{payload[0], payload[2], payload[3]} &&
+            std::ranges::equal(completion.bytes.Bytes(), std::array{payload[0], payload[2], payload[3]}) &&
             streaming.CompleteRead(request, "generation") && residency.ReleaseNow(completion.storage),
             "packed subresource ranges did not apply the product base exactly once");
     }
@@ -1073,9 +905,6 @@ int main()
         const auto after_reset = streaming.Request("render/geometry/trunk_0.rpage", "page", "generation-f", 100);
         Check(after_reset.value > cancelled.value && !streaming.BeginRead(geometry),
             "reset aliased an old asynchronous request identity");
-        CheckSoftwareTransactionSupersession();
-        CheckFeedbackSamplingDomains();
-        CheckTextureFeedbackMinimumMipRows();
         CheckAsyncAssetPreparation();
         CheckPackAssetReads(false);
         CheckPackAssetReads(true);

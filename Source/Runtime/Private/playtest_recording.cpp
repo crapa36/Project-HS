@@ -581,7 +581,7 @@ Result PlaytestRecorder::Finish(bool execution_valid)
                 {"first_kill_seconds", static_cast<double>(impl_->first_kill_tick) / 60.0},
                 {"phase_ticks", impl_->phase_ticks},
                 {"skill_press_counts", impl_->skill_press_counts},
-                {"findings", findings}, {"user_review", "awaiting"}};
+                {"findings", findings}};
     std::ofstream report(impl_->directory / "analysis.md", std::ios::trunc);
     report << "# Project HS 플레이테스트 분석\n\n"
                  << "- 결과: " << outcome << "\n- 레벨: " << probe.level

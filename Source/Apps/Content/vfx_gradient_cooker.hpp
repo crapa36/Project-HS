@@ -1,11 +1,15 @@
 #pragma once
-#include <nlohmann/json.hpp>
 #include <filesystem>
+#include <map>
+#include <nlohmann/json_fwd.hpp>
+#include <string>
+#include <utility>
+#include <cstdint>
 
 namespace hs::content
 {
-// Preserve supplied rows and append pairs introduced by default expansion.
-// Returns the complete cooked row map; source specification remains unchanged.
-nlohmann::json CookVfxGradientDefaults(const nlohmann::json &spec,
-    const std::filesystem::path &source_dds, const std::filesystem::path &output_dds);
+using VfxGradientRows = std::map<std::pair<std::string, std::string>, std::uint32_t>;
+
+VfxGradientRows CookVfxGradientDefaults(const nlohmann::json &spec,
+    const std::filesystem::path &staged_dds);
 }

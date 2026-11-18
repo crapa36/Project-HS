@@ -227,8 +227,6 @@ RenderSnapshotExchange::ReadPair RenderSnapshotExchange::Consumer::AcquireLatest
             pair.current.ui = pair.ui_frame->draw_content->models;
         pair.has_previous = packet.has_previous;
         if (pair.has_previous) pair.previous = packet.previous.View();
-        pair.current_publication_sequence =
-            exchange_->slots_[*current_].publish_sequence.load(std::memory_order_relaxed);
         pair.has_current = true;
     }
     return pair;
