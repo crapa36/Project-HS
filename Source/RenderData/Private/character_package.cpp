@@ -76,12 +76,12 @@ void ValidateVertices(std::span<const Vertex> vertices, std::uint32_t bone_count
 
 template <typename Data, typename Vertex>
 void Validate(const Data &data, std::span<const Vertex> vertices,
-              bool validate_mask, bool embedded = true, std::size_t palette_count = 0)
+              bool validate_mask, bool require_vertices = true, std::size_t palette_count = 0)
 {
     const auto pose_count = palette_count ? palette_count : data.transforms.size();
     Require(data.bone_count > 0 && data.bone_count <= kMaxCharacterBones &&
             data.material_count > 0 && data.material_count <= kMaxCharacterMaterials &&
-            (!embedded || (!vertices.empty() && vertices.size() <= 3'000'000 &&
+            (!require_vertices || (!vertices.empty() && vertices.size() <= 3'000'000 &&
             vertices.size() % 3 == 0)) &&
             data.parents.size() == data.bone_count &&
             data.inverse_bind_matrices.size() == data.bone_count &&
@@ -249,31 +249,22 @@ std::optional<MonsterCharacterData> DecodeMonster(const PackageView &package)
 }
 } // namespace
 
-namespace
-{
-std::vector<std::byte> BuildCharacterImpl(
+std::vector<std::byte> BuildCharacterMetadataPackage(
     AssetId asset_id, std::span<const std::string> dependencies,
-    const CharacterPackageData &character, const GeometryMetadata *geometry,
-    std::span<const CharacterMaterialBinding> material_bindings = {},
-    const MonsterCharacterData *monster = nullptr)
+    const CharacterPackageData &character, const GeometryMetadata &geometry,
+    std::span<const CharacterMaterialBinding> material_bindings,
+    const MonsterCharacterData *monster)
 {
+    Require((geometry.flags & kGeometryFlagSkinned) && geometry.index_count == character.vertices.size() &&
+            geometry.max_material_index < character.material_count, "character geometry metadata mismatch");
+    Require(geometry.page_dependency_index < dependencies.size(), "missing character page dependency");
+    const auto &page_id = dependencies[geometry.page_dependency_index];
+    Require(page_id.starts_with("render/geometry/character/") && page_id.ends_with(".rpage"), "invalid character page product");
+    const auto metadata_id = "render/" + page_id.substr(16,page_id.size()-16-6) + ".rpkg";
+    Require(MakeAssetId(metadata_id).value == asset_id.value, "character page product identity mismatch");
     Validate(character, std::span(character.vertices), false);
-    Require(!monster || geometry,"embedded character cannot contain cooked monster deformation");
-    if(monster) ValidateMonster(*monster,character.bone_count,character.clips,*geometry,dependencies);
-    // Shared skeleton scalar encoding serves both layouts. Only the explicit
-    // embedded layout allocates and serializes the expanded vertex chunk.
-    std::vector<std::byte> geometry_bytes;
-    if (geometry) geometry_bytes = EncodeGeometryMetadata(*geometry, dependencies, {});
-    else
-    {
-        std::vector<ExpandedVertex> vertices;
-        vertices.reserve(character.vertices.size());
-        for (const auto &vertex : character.vertices)
-            vertices.push_back({vertex.position, vertex.normal, vertex.bone_indices,
-                                vertex.bone_weights, vertex.uv, vertex.tangent,
-                                vertex.material_index, vertex.reserved});
-        geometry_bytes = EncodeExpandedVertices(vertices);
-    }
+    if(monster) ValidateMonster(*monster,character.bone_count,character.clips,geometry,dependencies);
+    const auto geometry_bytes = EncodeGeometryMetadata(geometry, dependencies, metadata_id);
     auto metadata = Bytes(1, 16);
     Put(metadata, 0, character.bone_count, 4);
     Put(metadata, 4, character.material_count, 4);
@@ -316,23 +307,16 @@ std::vector<std::byte> BuildCharacterImpl(
             PutFloat(transforms, offset + 12 + j * 4, transform.rotation[j]);
     }
     std::vector<ChunkSource> chunks{
-        ChunkSource{geometry ? 13u : 1u, 1, true, geometry_bytes,
-                    geometry ? 1u : character.vertices.size(),
-                    geometry ? kGeometryMetadataStride : kExpandedVertexStride},
+        ChunkSource{13, 1, true, geometry_bytes, 1, kGeometryMetadataStride},
         ChunkSource{3, 1, true, metadata, 1, 16},
         ChunkSource{4, 1, true, parents, character.bone_count, 2},
         ChunkSource{5, 1, true, inverse, character.bone_count, 64},
         ChunkSource{6, 1, true, mask, character.bone_count, 4},
         ChunkSource{7, 1, true, clips, character.clips.size(), 16}};
     if(!monster) chunks.push_back({8,1,true,transforms,character.transforms.size(),40});
-    std::vector<std::byte> binding_bytes;
-    if (geometry)
-    {
-        binding_bytes = EncodeCharacterMaterialBindings(material_bindings, dependencies, character.material_count);
-        chunks.push_back({static_cast<std::uint32_t>(ChunkType::CharacterMaterialBindings), 1, true,
-            binding_bytes, material_bindings.size(), kCharacterMaterialBindingStride});
-    }
-    else Require(material_bindings.empty(), "embedded interchange cannot carry production material bindings");
+    const auto binding_bytes = EncodeCharacterMaterialBindings(material_bindings, dependencies, character.material_count);
+    chunks.push_back({static_cast<std::uint32_t>(ChunkType::CharacterMaterialBindings), 1, true,
+        binding_bytes, material_bindings.size(), kCharacterMaterialBindingStride});
     std::array<std::vector<std::byte>,4> deformation;
     if(monster)
     {
@@ -345,13 +329,12 @@ std::vector<std::byte> BuildCharacterImpl(
     }
     return BuildPackage(asset_id, dependencies, chunks);
 }
-} // namespace
 
 namespace
 {
 CharacterPackageData DecodeCommon(
     const PackageView &package,
-    bool validate_upper_body_mask, bool embedded, const MonsterCharacterData *monster = nullptr)
+    bool validate_upper_body_mask, const MonsterCharacterData *monster)
 {
     std::array<const ChunkView *, static_cast<std::size_t>(ChunkType::CharacterLodDirectory) + 1> chunks{};
     for (const auto &chunk : package.chunks)
@@ -360,8 +343,8 @@ CharacterPackageData DecodeCommon(
         Require(type < chunks.size() && !chunks[type], "duplicate or unsupported chunk");
         chunks[type] = &chunk;
     }
-    Require(package.chunks.size() == (embedded ? 7u : monster ? 11u : 8u) &&
-            (embedded ? chunks[1] && !chunks[13] && !chunks[25] : chunks[13] && !chunks[1] && chunks[25]) && chunks[3] && chunks[4] &&
+    Require(package.chunks.size() == (monster ? 11u : 8u) &&
+            chunks[13] && !chunks[1] && chunks[25] && chunks[3] && chunks[4] &&
             chunks[5] && chunks[6] && chunks[7] && !chunks[2] &&
             (monster ? !chunks[8] && chunks[37] && chunks[38] && chunks[39] && chunks[40] : chunks[8] != nullptr),
             "missing or unexpected character chunk");
@@ -381,11 +364,6 @@ CharacterPackageData DecodeCommon(
             transform_count > 0 && transform_count <= 800'000 &&
             (monster ? monster->final_matrices.size() : chunks[8]->count) == transform_count,
             "character chunk counts disagree");
-    if (embedded)
-        for (const auto &vertex : DecodeExpandedVertices(chunks[1]->bytes, chunks[1]->version))
-            character.vertices.push_back({vertex.position, vertex.normal,
-                vertex.bone_indices, vertex.bone_weights, vertex.uv, vertex.tangent,
-                vertex.material_index, vertex.optical_component_id});
     for (std::size_t i = 0; i < character.bone_count; ++i)
     {
         character.parents.push_back(static_cast<std::uint16_t>(Get(chunks[4]->bytes, i * 2, 2)));
@@ -420,45 +398,14 @@ CharacterPackageData DecodeCommon(
             transform.rotation[j] = GetFloat(chunks[8]->bytes, offset + 12 + j * 4);
         character.transforms.push_back(transform);
     }
-    Validate(character, std::span<const SkinnedVertex>(character.vertices), validate_upper_body_mask, embedded,
+    Validate(character, std::span<const SkinnedVertex>(character.vertices), validate_upper_body_mask, false,
         monster ? monster->final_matrices.size() : 0);
     return character;
 }
 }
 
-CharacterPackageData DecodeEmbeddedCharacterPackage(std::span<const std::byte> bytes,
-    AssetId asset, bool validate_mask)
-{ return DecodeCommon(ReadPackage(bytes, asset), validate_mask, true); }
-
 void ValidateCharacterSource(const CharacterPackageData &character, bool validate_mask)
 { Validate(character, std::span(character.vertices), validate_mask); }
-
-std::vector<std::byte> BuildEmbeddedCharacterPackage(AssetId asset,
-    std::span<const std::string> deps, const CharacterPackageData &character)
-{ return BuildCharacterImpl(asset, deps, character, nullptr); }
-
-std::vector<std::byte> BuildCharacterPackage(AssetId asset,
-    std::span<const std::string> deps, const CharacterPackageData &character)
-{ return BuildEmbeddedCharacterPackage(asset, deps, character); }
-CharacterPackageData DecodeCharacterPackage(std::span<const std::byte> bytes,
-    AssetId asset, bool validate_mask)
-{ return DecodeEmbeddedCharacterPackage(bytes, asset, validate_mask); }
-
-std::vector<std::byte> BuildCharacterMetadataPackage(AssetId asset,
-    std::span<const std::string> deps, const CharacterPackageData &character,
-    const GeometryMetadata &geometry, std::span<const CharacterMaterialBinding> material_bindings,
-    const MonsterCharacterData *monster)
-{
-    Require((geometry.flags & kGeometryFlagSkinned) && geometry.index_count == character.vertices.size() &&
-            geometry.max_material_index < character.material_count, "character geometry metadata mismatch");
-    Require(geometry.page_dependency_index < deps.size(), "missing character page dependency");
-    const auto &page_id = deps[geometry.page_dependency_index];
-    Require(page_id.starts_with("render/geometry/character/") && page_id.ends_with(".rpage"), "invalid character page product");
-    const auto metadata_id = "render/" + page_id.substr(16,page_id.size()-16-6) + ".rpkg";
-    Require(MakeAssetId(metadata_id).value == asset.value, "character page product identity mismatch");
-    (void)EncodeGeometryMetadata(geometry, deps, metadata_id);
-    return BuildCharacterImpl(asset, deps, character, &geometry, material_bindings, monster);
-}
 
 CharacterMetadataPackageData DecodeCharacterMetadataPackage(std::span<const std::byte> bytes,
     AssetId asset, bool validate_mask)
@@ -470,7 +417,7 @@ CharacterMetadataPackageData DecodeCharacterMetadataPackage(const PackageView &v
     bool validate_mask)
 {
     auto monster = DecodeMonster(view);
-    auto source = DecodeCommon(view, validate_mask, false, monster ? &*monster : nullptr);
+    auto source = DecodeCommon(view, validate_mask, monster ? &*monster : nullptr);
     const auto found = std::ranges::find(view.chunks, ChunkType::GeometryMetadata, &ChunkView::type);
     Require(found != view.chunks.end(), "missing production geometry metadata");
     const auto geometry = DecodeGeometryMetadata(found->bytes, view.dependencies, {});

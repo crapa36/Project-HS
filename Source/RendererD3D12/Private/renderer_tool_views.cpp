@@ -34,17 +34,16 @@ Result D3D12Renderer::ConfigureView(const RenderViewConfiguration &configuration
             : ViewFailure("Configure Main through Resize or ApplyOptions.");
     }
     if (found != state.owned_views.end() && found->second->role != configuration.role)
-        return ViewFailure("A view role is fixed until ReleaseView.");
+        return ViewFailure("A view role is fixed for the renderer lifetime.");
     if (found != state.owned_views.end())
     {
         const auto &owner = *found->second;
         if (owner.state.output_extent == configuration.output_extent &&
             owner.state.render_capacity == configuration.render_capacity &&
-            owner.configuration_revision == state.view_configuration_revision &&
-            owner.content_generation == state.resource_generation_id && owner.pipeline_revision == state.pipeline_revision)
+            owner.configuration_revision == state.view_configuration_revision)
             return Result::Success();
     }
-    if (EffectiveDynamicResolution(state.config.dynamic_resolution, state.ResolveFeatures(state.config)))
+    if (state.config.dynamic_resolution)
     {
         ViewExtent minimum;
         if (!ResolveDynamicResolutionExtent(configuration.output_extent, state.config.dynamic_min_percent, minimum) ||
@@ -118,8 +117,7 @@ Result D3D12Renderer::Impl::PrepareToolViews(std::span<const RenderViewSample> s
         if (found == owned_views.end() || !found->second->ready)
             return ViewFailure("Configure the tool view before submitting its sample.");
         const auto &owner = *found->second;
-        if (owner.configuration_revision != view_configuration_revision ||
-            owner.content_generation != resource_generation_id || owner.pipeline_revision != pipeline_revision)
+        if (owner.configuration_revision != view_configuration_revision)
             return ViewFailure("Reconfigure the tool view after renderer configuration changes.");
         const auto capacity = owner.state.render_capacity;
         if (!ExtentValid(sample.render_active) || sample.render_active.width > capacity.width ||
@@ -141,9 +139,7 @@ Result D3D12Renderer::Impl::PrepareToolViews(std::span<const RenderViewSample> s
 
 Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewConfiguration &input, std::unique_ptr<OwnedView> &output, bool decal_work)
 {
-    auto reconstruction_config = config;
-    const auto feature_plan = ResolveFeatures(config);
-    reconstruction_config.dynamic_resolution = EffectiveDynamicResolution(config.dynamic_resolution, feature_plan);
+    const bool dynamic_resolution = config.dynamic_resolution;
     auto candidate = std::make_unique<OwnedView>();
     candidate->view_id = input.id;
     candidate->role = input.role;
@@ -151,13 +147,11 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewConfiguration &inpu
     candidate->width = input.output_extent.width; candidate->height = input.output_extent.height;
     candidate->display_state = owned_views.at(kMainRenderViewId.value)->display_state;
     candidate->configuration_revision = view_configuration_revision;
-    candidate->content_generation = resource_generation_id;
-    candidate->pipeline_revision = pipeline_revision;
     auto &v = *candidate;
     ViewExtent native_capacity;
-    if (auto r = ResolveNativeReconstruction(reconstruction_config, input.output_extent, v.reconstruction_plan, native_capacity); !r) return r;
+    if (auto r = ResolveNativeReconstruction(config, dynamic_resolution, input.output_extent, v.reconstruction_plan, native_capacity); !r) return r;
     if (auto r = PrepareReconstructionProvider(config.reconstruction_request ? &*config.reconstruction_request : nullptr,
-            reconstruction_config.dynamic_resolution, config.dynamic_min_percent, config.dynamic_max_percent, input.output_extent,
+            dynamic_resolution, config.dynamic_min_percent, config.dynamic_max_percent, input.output_extent,
             v.reconstruction_plan, native_capacity, v.reconstruction_provider, &config); !r) return r;
     const auto capacity = input.render_capacity;
     if (v.reconstruction_provider && (native_capacity.width > capacity.width || native_capacity.height > capacity.height))
@@ -166,9 +160,13 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewConfiguration &inpu
     (void)UpdateViewState(v.state, input.output_extent, capacity, active);
     v.render_width = active.width; v.render_height = active.height;
     if (auto r = PrepareOptionTargets(v.targets, input.render_capacity.width, input.render_capacity.height,
-            config.shadow_resolution, config.bloom, input.output_extent.width, input.output_extent.height,
+            config.bloom, input.output_extent.width, input.output_extent.height,
             UsesInternalResolveTargets(v.reconstruction_plan),
             RequiredLightingAuxiliaries(config)); !r) return r;
+    if (auto r = PrepareOptionPools(v.targets.transient_pools, capacity.width, capacity.height,
+            config.bloom, v.width, v.height); !r) return r;
+    if (auto r = CreateViewDepthHeap(v); !r) return r;
+    WriteDepthViews(v);
     candidate->transient_textures_common = enhanced;
     if (auto r = PrepareUiResources(v.ui, v.width, v.height); !r) return r;
     D3D12MA::ALLOCATION_DESC allocation{}; allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
@@ -186,8 +184,10 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewConfiguration &inpu
     ViewFeatureCandidates features;
     if (auto r = PrepareViewFeatures(v, config, capacity, input.output_extent, decal_work, features); !r)
         return r;
+    LocalShadowCandidate local_shadows;
+    if (auto r = PrepareLocalShadows(v, config, local_shadows); !r) return r;
     if (auto r = CommitViewFeaturePrefix(v, features, completed); !r) return r;
-    if (auto r = CommitAdditionalShadows(v, std::move(features.additional)); !r) return r;
+    if (auto r = v.local_shadows.Commit(std::move(local_shadows), completed); !r) return r;
     if (auto r = CommitVolumetrics(v, std::move(features.volume)); !r) return r;
     ReconstructionGuidesCandidate guides;
     if (v.reconstruction_provider)
@@ -203,23 +203,5 @@ Result D3D12Renderer::Impl::PrepareOwnedView(const RenderViewConfiguration &inpu
     return Result::Success();
 }
 
-
-Result D3D12Renderer::ReleaseView(ViewId id)
-{
-    if (!id.value || id == kMainRenderViewId) return ViewFailure("The main presentation view cannot be released independently.");
-    const auto found = impl_->owned_views.find(id.value);
-    if (found == impl_->owned_views.end()) return Result::Success();
-    if (auto r = impl_->ActivateView(kMainRenderViewId); !r) return r;
-    if (auto r = impl_->WaitForGpu(); !r) return r;
-    if (auto r = impl_->RetireHlodView(id); !r) return r;
-    if (auto r = impl_->ResetOwnedViewAfterCompletion(*found->second); !r) return r;
-    if (impl_->streamline_session)
-        if (auto r = impl_->streamline_session->SelectReconstructionViewAfterCompletion(0); !r) return r;
-    if (impl_->fsr_session)
-        if (auto r = impl_->fsr_session->SelectReconstructionViewAfterCompletion(0); !r) return r;
-    impl_->timing_previous_source_endpoints.erase(id.value);
-    impl_->owned_views.erase(found);
-    return Result::Success();
-}
 
 } // namespace hs

@@ -75,7 +75,7 @@ constexpr D3D12_RESOURCE_STATES kAllShaderRead =
 
 Result CheckOitFormats(ID3D12Device *device)
 {
-    for (const auto format : {DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R16_FLOAT})
+    for (const auto format : {DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R16G16_FLOAT})
     {
         D3D12_FEATURE_DATA_FORMAT_SUPPORT support{format};
         const auto queried = device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT,
@@ -101,9 +101,6 @@ Result D3D12Renderer::Impl::CreateAllocation(AllocationResource &output,
                                             const D3D12_CLEAR_VALUE *clear)
 {
     bool bootstrap_allocation = essential_bootstrap_active;
-#if defined(HS_DEVELOPMENT_TOOLS)
-    bootstrap_allocation = bootstrap_allocation && !resident_preparation_accounting.enabled;
-#endif
     ResidencySegment bootstrap_segment = ResidencySegment::Local;
     if (bootstrap_allocation)
     {
@@ -121,10 +118,6 @@ Result D3D12Renderer::Impl::CreateAllocation(AllocationResource &output,
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                 "Essential renderer bootstrap exceeds the adapter-reported physical memory allowance.");
     }
-#if defined(HS_DEVELOPMENT_TOOLS)
-    else if (auto admitted = AdmitResidentAllocation(resource, allocation); !admitted)
-        return admitted;
-#endif
     const auto effective_state =
         enhanced && resource.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER
             ? D3D12_RESOURCE_STATE_COMMON
@@ -149,9 +142,6 @@ Result D3D12Renderer::Impl::CreateAllocation(AllocationResource &output,
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
             "Essential renderer bootstrap allocation exceeds the adapter-reported physical memory allowance.");
     }
-#if defined(HS_DEVELOPMENT_TOOLS)
-    RecordResidentAllocation(output, allocation.HeapType);
-#endif
     return Result::Success();
 }
 
@@ -171,8 +161,7 @@ Result D3D12Renderer::Impl::ResolvePresentation(const RendererConfig &candidate,
         if (auto bound = fsr_session->Initialize(device.Get()); !bound) return bound;
 #endif
     }
-    const bool effective_dynamic_resolution = EffectiveDynamicResolution(
-        candidate.dynamic_resolution, ResolveFeatures(candidate));
+    const bool effective_dynamic_resolution = candidate.dynamic_resolution;
     auto result = sdk_presentation.Resolve(device.Get(), request, streamline_session.get(),
         fsr_session.get(), {capacity, output, display.format, display.color_space, candidate.vsync,
             effective_dynamic_resolution, static_cast<float>(candidate.target_render_fps)}, true);
@@ -396,241 +385,28 @@ Result D3D12Renderer::Impl::CreatePostProcessTargets(OwnedView &owner)
     if (auto checked = CheckOitFormats(device.Get()); !checked) return checked;
     if (auto descriptors = CreateSharedDescriptorHeaps(); !descriptors) return descriptors;
     owner.transient_textures_common = enhanced;
-    owner.targets.gbuffer_base.Reset();
-    owner.targets.gbuffer_normal.Reset();
-    owner.targets.gbuffer_metadata.Reset();
-    owner.targets.gbuffer_material.Reset();
-    owner.targets.gbuffer_motion.Reset();
-    owner.targets.gbuffer_surface_history.Reset();
-    for (auto &sidecar : owner.targets.material_sidecars) sidecar.Reset();
-    owner.targets.visibility_ids.Reset(); owner.targets.visibility_front_face.Reset();
-    owner.targets.visibility_pixels.Reset(); owner.targets.visibility_counts.Reset(); owner.targets.visibility_dispatch_args.Reset();
-    owner.targets.hdr_color.Reset();
-    owner.targets.subsurface_diffuse.Reset();
-    owner.targets.environment_specular.Reset();
-    owner.targets.oit_accumulation.Reset();
-    owner.targets.oit_revealage.Reset();
-    owner.targets.post_a.Reset();
-    owner.targets.post_b.Reset();
-    for (auto &history : owner.targets.temporal_history) history.Reset();
-    for (auto &history : owner.targets.temporal_normal_history) history.Reset();
-    for (auto &history : owner.targets.temporal_material_history) history.Reset();
-    owner.targets.display_linear.Reset();
-    owner.targets.composite_hdr.Reset();
-    for (auto &history : owner.targets.hzb_history) history.Reset();
-    owner.temporal_history_valid = false;
-    owner.temporal_targets_initialized = false;
-    owner.view_targets_initialized = false;
-    owner.material_sidecars_initialized = false;
-    owner.temporal_read_index = 0;
-    owner.hzb_history_valid = false;
-    owner.last_history_frame_slot = UINT32_MAX;
-    owner.hzb_read_index = 0;
-    owner.targets.hzb_layout = MakeHzbLayout(owner.render_width, owner.render_height);
-
-    D3D12MA::ALLOCATION_DESC allocation{};
-    allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
-    auto create_target = [&](AllocationResource &output, DXGI_FORMAT format,
-                             const float *clear_color,
-                             std::uint32_t target_width = 0,
-                             std::uint32_t target_height = 0) -> Result {
-        D3D12_RESOURCE_DESC description{};
-        description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-        description.Width = target_width ? target_width : owner.render_width;
-        description.Height = target_height ? target_height : owner.render_height;
-        description.DepthOrArraySize = 1;
-        description.MipLevels = 1;
-        description.Format = format;
-        description.SampleDesc = {1, 0};
-        description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-        description.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
-        if (config.surface_frontend == SurfaceFrontend::VisibilityBuffer &&
-            (&output == &owner.targets.gbuffer_base || &output == &owner.targets.gbuffer_normal ||
-             &output == &owner.targets.gbuffer_metadata || &output == &owner.targets.gbuffer_material ||
-             &output == &owner.targets.gbuffer_motion || &output == &owner.targets.gbuffer_surface_history))
-            description.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-        D3D12_CLEAR_VALUE clear{};
-        clear.Format = format;
-        std::copy_n(clear_color, 4, clear.Color);
-        return CreateAllocation(output, allocation, description,
-                                D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, &clear);
-    };
-
-    constexpr float black[4] = {0, 0, 0, 0};
-    constexpr float normal_clear[4] = {0, 0, 0, 0};
-    constexpr float metadata_clear[4] = {0, 0, 0, 0};
-    constexpr float reveal_clear[4] = {1, 1, 1, 1};
-    for (auto [resource, format, clear] : {
-             std::tuple{&owner.targets.gbuffer_base, DXGI_FORMAT_R8G8B8A8_UNORM, black},
-             std::tuple{&owner.targets.gbuffer_normal, DXGI_FORMAT_R16G16_SNORM, normal_clear},
-             std::tuple{&owner.targets.gbuffer_metadata, DXGI_FORMAT_R32_UINT, metadata_clear},
-             std::tuple{&owner.targets.hdr_color, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
-             std::tuple{&owner.targets.oit_accumulation, DXGI_FORMAT_R32G32B32A32_FLOAT, black},
-             std::tuple{&owner.targets.oit_revealage, DXGI_FORMAT_R16_FLOAT, reveal_clear},
-             std::tuple{&owner.targets.gbuffer_material, DXGI_FORMAT_R8G8B8A8_UNORM, black},
-             std::tuple{&owner.targets.gbuffer_motion, DXGI_FORMAT_R16G16_FLOAT, black},
-             std::tuple{&owner.targets.gbuffer_surface_history, DXGI_FORMAT_R32G32_FLOAT, black},
-         })
+    if (auto prepared = PrepareOptionTargets(owner.targets, owner.render_width, owner.render_height,
+            config.bloom, owner.width, owner.height, UsesInternalResolveTargets(owner.reconstruction_plan),
+            RequiredLightingAuxiliaries(config)); !prepared) return prepared;
+    if (auto prepared = PrepareExposureResources(owner); !prepared) return prepared;
+    WriteDepthViews(owner);
+    D3D12_SHADER_RESOURCE_VIEW_DESC bloom_view{};
+    bloom_view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    bloom_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+    bloom_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    bloom_view.Texture2D.MipLevels = 1;
+    for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
     {
-        if (auto created = create_target(*resource, format, clear); !created)
+        auto handle = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + kBloomTextureDescriptorOffset) * srv_stride;
+        for (unsigned slot = 0; slot < 3; ++slot)
         {
-            return created;
+            device->CreateShaderResourceView(nullptr, &bloom_view, handle);
+            handle.ptr += srv_stride;
         }
+        WriteOptionTargetDescriptors(owner, frame);
+        WriteViewDescriptors(owner, frame, owner.temporal_read_index);
     }
-    if (auto created = PrepareLightingAuxiliaries({&owner.targets.subsurface_diffuse, &owner.targets.environment_specular},
-            {owner.render_width, owner.render_height}, RequiredLightingAuxiliaries(config)); !created) return created;
-    if (auto created = create_target(owner.targets.post_a, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                                     black, owner.width, owner.height); !created) return created;
-    if (config.bloom)
-        if (auto created = create_target(owner.targets.post_b, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                                         black, owner.width, owner.height); !created) return created;
-    const bool native_resolve = UsesInternalResolveTargets(owner.reconstruction_plan);
-    if (native_resolve)
-    for (auto *resource : {&owner.targets.temporal_history[0], &owner.targets.temporal_history[1]})
-        if (auto created = create_target(*resource, DXGI_FORMAT_R16G16B16A16_FLOAT,
-                                         black, owner.width, owner.height); !created)
-            return created;
-    OptionTargets view_targets;
-    if (auto created = PrepareViewTargets(view_targets, owner.render_width, owner.render_height,
-                                          owner.width, owner.height, native_resolve); !created)
-        return created;
-    owner.targets.temporal_normal_history.swap(view_targets.temporal_normal_history);
-    owner.targets.temporal_material_history.swap(view_targets.temporal_material_history);
-    using std::swap;
-    swap(owner.targets.display_linear, view_targets.display_linear);
-    swap(owner.targets.composite_hdr, view_targets.composite_hdr);
-    if (!owner.exposure_value.resource)
-        if (auto created = PrepareExposureResources(owner); !created) return created;
-    if (auto created = PrepareMaterialSidecars(owner.targets.material_sidecars, owner.render_width, owner.render_height); !created)
-        return created;
-    if (owner.targets.hzb_layout.elements >
-        std::numeric_limits<std::uint64_t>::max() / sizeof(float))
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-                               "HZB buffer size overflow.");
-    for (auto &history : owner.targets.hzb_history)
-        if (auto created = CreateAllocation(
-                history, allocation,
-                BufferDescription(owner.targets.hzb_layout.elements * sizeof(float),
-                                  D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS),
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-            !created)
-            return created;
-    auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += static_cast<SIZE_T>(kFrameCount) * rtv_stride;
-    for (auto [resource, format] : {
-             std::pair{owner.targets.gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM},
-             std::pair{owner.targets.gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16_SNORM},
-             std::pair{owner.targets.gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32_UINT},
-             std::pair{owner.targets.hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
-             std::pair{owner.targets.oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT},
-             std::pair{owner.targets.oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT},
-             std::pair{owner.targets.post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
-             std::pair{owner.targets.post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
-             std::pair{owner.targets.gbuffer_material.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM},
-             std::pair{owner.targets.gbuffer_motion.resource.Get(), DXGI_FORMAT_R16G16_FLOAT},
-         })
-    {
-        D3D12_RENDER_TARGET_VIEW_DESC view{};
-        view.Format = format;
-        view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-        device->CreateRenderTargetView(resource, &view, rtv);
-        rtv.ptr += rtv_stride;
-    }
-    rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += static_cast<SIZE_T>(kFrameCount + kLightingAuxRtvOffset) * rtv_stride;
-    for (auto *resource : {owner.targets.subsurface_diffuse.resource.Get(), owner.targets.environment_specular.resource.Get()})
-    {
-        D3D12_RENDER_TARGET_VIEW_DESC view{};
-        view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-        // An unused fixed MRT slot uses a null RTV, which discards shader writes.
-        device->CreateRenderTargetView(resource, &view, rtv);
-        rtv.ptr += rtv_stride;
-    }
-    rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += static_cast<SIZE_T>(kFrameCount + kTemporalRtvOffset) * rtv_stride;
-    for (auto &history : owner.targets.temporal_history)
-    {
-        D3D12_RENDER_TARGET_VIEW_DESC view{};
-        view.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-        device->CreateRenderTargetView(history.resource.Get(), &view, rtv);
-        rtv.ptr += rtv_stride;
-    }
-    rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += static_cast<SIZE_T>(kFrameCount + kSurfaceHistoryRtvOffset) * rtv_stride;
-    {
-        D3D12_RENDER_TARGET_VIEW_DESC view{};
-        view.Format = DXGI_FORMAT_R32G32_FLOAT;
-        view.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
-        device->CreateRenderTargetView(owner.targets.gbuffer_surface_history.resource.Get(), &view, rtv);
-    }
-
-    if (auto created = CreateVisibilityTargets(owner); !created) return created;
-    for (std::uint32_t frame_index = 0; frame_index < kFrameCount; ++frame_index)
-    {
-        const auto frame_offset = static_cast<SIZE_T>(frame_index) * kTextureDescriptorCount;
-        const auto srv_start = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-        const auto write_post_table = [&](std::uint32_t offset) {
-            auto srv = srv_start;
-            srv.ptr += (frame_offset + offset) * srv_stride;
-            const auto resources = std::array<ID3D12Resource *, kPostTextureDescriptorCount>{
-                owner.targets.gbuffer_base.resource.Get(), owner.targets.gbuffer_normal.resource.Get(),
-                owner.targets.gbuffer_metadata.resource.Get(), owner.targets.shadow.resource.Get(),
-                owner.targets.hdr_color.resource.Get(), owner.targets.oit_accumulation.resource.Get(),
-                owner.targets.oit_revealage.resource.Get(), owner.targets.post_a.resource.Get(),
-                owner.targets.post_b.resource.Get(), owner.ui.textures[frame_index].resource.Get()};
-            for (std::size_t index = 0; index < resources.size(); ++index)
-            {
-                D3D12_SHADER_RESOURCE_VIEW_DESC view{};
-                view.Format = kPostTextureSrvFormats[index];
-                view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-                view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-                view.Texture2D.MipLevels = 1;
-                device->CreateShaderResourceView(resources[index], &view, srv);
-                srv.ptr += srv_stride;
-            }
-        };
-        write_post_table(0);
-        write_post_table(kToneMapInputDescriptorOffset);
-        write_post_table(kFxaaInputDescriptorOffset);
-        auto srv = srv_start;
-        srv.ptr += (frame_offset +
-                    kPostTextureDescriptorCount + kCharacterDescriptorCount +
-                    kMonsterPbrDescriptorCount + kEnvironmentDescriptorCount - 2) * srv_stride;
-        const auto create_srv = [&](ID3D12Resource *resource, DXGI_FORMAT format) {
-            D3D12_SHADER_RESOURCE_VIEW_DESC view{};
-            view.Format = format;
-            view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-            view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            view.Texture2D.MipLevels = 1;
-            device->CreateShaderResourceView(resource, &view, srv);
-            srv.ptr += srv_stride;
-        };
-        create_srv(owner.targets.gbuffer_material.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
-        create_srv(owner.targets.gbuffer_motion.resource.Get(), DXGI_FORMAT_R16G16_FLOAT);
-        srv = srv_start;
-        srv.ptr += (frame_offset +
-                    kBloomTextureDescriptorOffset) * srv_stride;
-        // The frame graph resolves these slots after Prepare. Keep valid null
-        // descriptors while bloom is disabled and before the first bloom frame.
-        create_srv(nullptr, DXGI_FORMAT_R16G16B16A16_FLOAT);
-        create_srv(nullptr, DXGI_FORMAT_R16G16B16A16_FLOAT);
-        create_srv(nullptr, DXGI_FORMAT_R16G16B16A16_FLOAT);
-        srv = srv_start;
-        srv.ptr += (frame_offset +
-                    kTemporalTextureDescriptorOffset) * srv_stride;
-        create_srv(owner.targets.temporal_history[0].resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-        create_srv(owner.targets.temporal_history[1].resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
-        srv = srv_start;
-        srv.ptr += (frame_offset + kSurfaceDescriptorOffset) * srv_stride;
-        create_srv(owner.targets.depth.resource.Get(), DXGI_FORMAT_R32_FLOAT);
-        create_srv(owner.targets.gbuffer_surface_history.resource.Get(), DXGI_FORMAT_R32G32_FLOAT);
-    }
-    for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
-        WriteMaterialSidecarDescriptors(owner, frame);
-    for (std::uint32_t frame = 0; frame < kFrameCount; ++frame)
-        WriteViewDescriptors(owner, frame, owner.temporal_read_index, 1u - owner.temporal_read_index);
     return Result::Success();
 }
 
@@ -691,117 +467,66 @@ void D3D12Renderer::Impl::InitializeFrameSamplerDescriptors(std::uint32_t frame)
     device->CreateSampler(&sampling, sampler);
 }
 
-Result D3D12Renderer::Impl::CreateDepthAndShadow(OwnedView &owner)
+Result D3D12Renderer::Impl::PrepareDepthTexture(AllocationResource &target, std::uint32_t width, std::uint32_t height)
 {
-    owner.transient_textures_common = enhanced;
-    D3D12_DESCRIPTOR_HEAP_DESC dsv_description{};
-    dsv_description.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
-    dsv_description.NumDescriptors = 5 * kFrameCount;
-    auto result = device->CreateDescriptorHeap(&dsv_description, IID_PPV_ARGS(&dsv_heap));
-    if (FAILED(result))
-    {
-        return HResultFailure("Create DSV heap", result);
-    }
-    dsv_stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
-
+    D3D12_RESOURCE_DESC description{};
+    description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    description.Width = width;
+    description.Height = height;
+    description.DepthOrArraySize = description.MipLevels = 1;
+    description.Format = DXGI_FORMAT_R32_TYPELESS;
+    description.SampleDesc.Count = 1;
+    description.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
     D3D12_CLEAR_VALUE clear{};
     clear.Format = DXGI_FORMAT_D32_FLOAT;
     clear.DepthStencil = {0.0f, 0};
     D3D12MA::ALLOCATION_DESC allocation{};
     allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
+    return CreateAllocation(target, allocation, description, D3D12_RESOURCE_STATE_DEPTH_WRITE, &clear);
+}
 
-    D3D12_RESOURCE_DESC depth_description{};
-    depth_description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    depth_description.Width = owner.render_width;
-    depth_description.Height = owner.render_height;
-    depth_description.DepthOrArraySize = 1;
-    depth_description.MipLevels = 1;
-    depth_description.Format = DXGI_FORMAT_R32_TYPELESS;
-    depth_description.SampleDesc = {1, 0};
-    depth_description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    depth_description.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-    if (auto created = CreateAllocation(owner.targets.depth, allocation, depth_description,
-                                        D3D12_RESOURCE_STATE_DEPTH_WRITE, &clear);
-        !created)
-    {
-        return created;
-    }
-    D3D12_DEPTH_STENCIL_VIEW_DESC depth_view{};
-    depth_view.Format = DXGI_FORMAT_D32_FLOAT;
-    depth_view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-    depth_view.Texture2D.MipSlice = 0;
-    auto dsv = dsv_heap->GetCPUDescriptorHandleForHeapStart();
-    device->CreateDepthStencilView(owner.targets.depth.resource.Get(), &depth_view, dsv);
+Result D3D12Renderer::Impl::CreateViewDepthHeap(OwnedView &owner)
+{
+    D3D12_DESCRIPTOR_HEAP_DESC heap{};
+    heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+    heap.NumDescriptors = 3;
+    const auto result = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&owner.depth_heap));
+    if (FAILED(result)) return HResultFailure("Create view DSV heap", result);
+    const auto extent = std::clamp(config.shadow_resolution, 1024u, 2048u) * 2u;
+    return PrepareDepthTexture(owner.shadow_atlas, extent, extent);
+}
 
-    auto shadow_description = depth_description;
-    shadow_description.Format = DXGI_FORMAT_R32_TYPELESS;
-    const auto base_shadow = std::clamp(config.shadow_resolution, 1024u, 2048u);
-    shadow_description.Width = base_shadow * 2u;
-    shadow_description.Height = base_shadow * 2u;
-    shadow_description.DepthOrArraySize = 1;
-    if (auto created = CreateAllocation(owner.targets.shadow, allocation, shadow_description,
-                                        D3D12_RESOURCE_STATE_DEPTH_WRITE, &clear);
-        !created)
-    {
-        return created;
-    }
-    auto shadow_handle = dsv_heap->GetCPUDescriptorHandleForHeapStart();
-    shadow_handle.ptr += dsv_stride;
-    for (std::uint32_t cascade = 0; cascade < 3; ++cascade)
-    {
-        D3D12_DEPTH_STENCIL_VIEW_DESC view{};
-        view.Format = kDepthFormat;
-        view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-        view.Texture2D.MipSlice = 0;
-
-        device->CreateDepthStencilView(owner.targets.shadow.resource.Get(), &view, shadow_handle);
-        shadow_handle.ptr += dsv_stride;
-    }
-    depth_view.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
-    dsv.ptr += static_cast<SIZE_T>(4) * dsv_stride;
-    device->CreateDepthStencilView(owner.targets.depth.resource.Get(), &depth_view, dsv);
-    return Result::Success();
+void D3D12Renderer::Impl::WriteDepthViews(OwnedView &owner) noexcept
+{
+    auto handle = owner.depth_heap->GetCPUDescriptorHandleForHeapStart();
+    D3D12_DEPTH_STENCIL_VIEW_DESC view{};
+    view.Format = DXGI_FORMAT_D32_FLOAT;
+    view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
+    device->CreateDepthStencilView(owner.targets.depth.resource.Get(), &view, handle);
+    handle.ptr += dsv_stride;
+    device->CreateDepthStencilView(owner.shadow_atlas.resource.Get(), &view, handle);
+    handle.ptr += dsv_stride;
+    view.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
+    device->CreateDepthStencilView(owner.targets.depth.resource.Get(), &view, handle);
 }
 
 Result D3D12Renderer::Impl::PrepareOptionTargets(OptionTargets &targets,
                                                  std::uint32_t target_width,
                                                  std::uint32_t target_height,
-                                                 std::uint32_t shadow_resolution,
                                                  bool bloom,
                                                  std::uint32_t output_width,
                                                  std::uint32_t output_height,
                                                  bool native_resolve,
                                                  std::array<bool, 2> lighting_auxiliaries)
 {
-    if (auto checked = CheckOitFormats(device.Get()); !checked) return checked;
+    if (auto result = PrepareDepthTexture(targets.depth, target_width, target_height); !result) return result;
     D3D12MA::ALLOCATION_DESC allocation{};
     allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;
-    D3D12_RESOURCE_DESC description{};
-    description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    description.Width = target_width;
-    description.Height = target_height;
-    description.DepthOrArraySize = description.MipLevels = 1;
-    description.Format = DXGI_FORMAT_R32_TYPELESS;
-    description.SampleDesc.Count = 1;
-    description.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    description.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
-    D3D12_CLEAR_VALUE depth_clear{};
-    depth_clear.Format = DXGI_FORMAT_D32_FLOAT;
-    depth_clear.DepthStencil = {0.0f, 0};
-    if (auto result = CreateAllocation(targets.depth, allocation, description,
-                                       D3D12_RESOURCE_STATE_DEPTH_WRITE, &depth_clear); !result)
-        return result;
-    description.Format = DXGI_FORMAT_R32_TYPELESS;
-    description.Width = shadow_resolution * 2u;
-    description.Height = shadow_resolution * 2u;
-    if (auto result = CreateAllocation(targets.shadow, allocation, description,
-                                       D3D12_RESOURCE_STATE_DEPTH_WRITE, &depth_clear); !result)
-        return result;
 
     constexpr float black[4] = {0, 0, 0, 0};
     constexpr float normal_clear[4] = {0, 0, 0, 0};
     constexpr float metadata_clear[4] = {0, 0, 0, 0};
-    constexpr float reveal_clear[4] = {1, 1, 1, 1};
+    constexpr float reveal_clear[4] = {1, 0, 0, 0};
     const auto color_target = [&](AllocationResource &output, DXGI_FORMAT format,
                                   const float *color,
                                   std::uint32_t resource_width = 0,
@@ -832,7 +557,7 @@ Result D3D12Renderer::Impl::PrepareOptionTargets(OptionTargets &targets,
              std::tuple{&targets.gbuffer_metadata, DXGI_FORMAT_R32_UINT, metadata_clear},
              std::tuple{&targets.hdr_color, DXGI_FORMAT_R16G16B16A16_FLOAT, black},
              std::tuple{&targets.oit_accumulation, DXGI_FORMAT_R32G32B32A32_FLOAT, black},
-             std::tuple{&targets.oit_revealage, DXGI_FORMAT_R16_FLOAT, reveal_clear},
+             std::tuple{&targets.oit_revealage, DXGI_FORMAT_R16G16_FLOAT, reveal_clear},
              std::tuple{&targets.gbuffer_material, DXGI_FORMAT_R8G8B8A8_UNORM, black},
              std::tuple{&targets.gbuffer_motion, DXGI_FORMAT_R16G16_FLOAT, black},
              std::tuple{&targets.gbuffer_surface_history, DXGI_FORMAT_R32G32_FLOAT, black},
@@ -873,8 +598,7 @@ Result D3D12Renderer::Impl::PrepareOptionTargets(OptionTargets &targets,
             !result)
             return result;
 
-    return PrepareOptionPools(targets.transient_pools, target_width, target_height, bloom,
-                              output_width, output_height);
+    return Result::Success();
 }
 
 Result D3D12Renderer::Impl::PrepareOptionPools(
@@ -915,7 +639,7 @@ void D3D12Renderer::Impl::CommitOptionTargets(OwnedView &owner, OptionTargets &t
 #endif
     using std::swap;
     auto &current = owner.targets;
-    swap(current.depth, targets.depth); swap(current.shadow, targets.shadow);
+    swap(current.depth, targets.depth);
     swap(current.gbuffer_base, targets.gbuffer_base); swap(current.gbuffer_normal, targets.gbuffer_normal);
     swap(current.gbuffer_metadata, targets.gbuffer_metadata); swap(current.gbuffer_material, targets.gbuffer_material);
     swap(current.gbuffer_motion, targets.gbuffer_motion); swap(current.gbuffer_surface_history, targets.gbuffer_surface_history);
@@ -943,7 +667,6 @@ void D3D12Renderer::Impl::CommitOptionTargets(OwnedView &owner, OptionTargets &t
     owner.temporal_targets_initialized = false; owner.view_targets_initialized = false;
     owner.material_sidecars_initialized = false;
     SwapOptionPools(owner, targets.transient_pools);
-    (void)owner;
 }
 
 void D3D12Renderer::Impl::SwapOptionPools(OwnedView &owner,
@@ -956,27 +679,6 @@ void D3D12Renderer::Impl::SwapOptionPools(OwnedView &owner,
 void D3D12Renderer::Impl::WriteOptionTargetDescriptors(OwnedView &owner, std::uint32_t frame) noexcept
 {
     StartupOperationScope startup_timing(RendererStartupOperation::DescriptorWrite);
-    auto dsv = dsv_heap->GetCPUDescriptorHandleForHeapStart();
-    dsv.ptr += static_cast<SIZE_T>(frame * 5) * dsv_stride;
-    D3D12_DEPTH_STENCIL_VIEW_DESC depth_view{};
-    depth_view.Format = DXGI_FORMAT_D32_FLOAT;
-    depth_view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-    depth_view.Texture2D.MipSlice = 0;
-    device->CreateDepthStencilView(owner.targets.depth.resource.Get(), &depth_view, dsv);
-    dsv.ptr += dsv_stride;
-    D3D12_DEPTH_STENCIL_VIEW_DESC shadow_view{};
-    shadow_view.Format = kDepthFormat;
-    shadow_view.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
-    for (std::uint32_t cascade = 0; cascade < 3; ++cascade)
-    {
-        device->CreateDepthStencilView(owner.targets.shadow.resource.Get(), &shadow_view, dsv);
-        dsv.ptr += dsv_stride;
-    }
-    depth_view.Flags = D3D12_DSV_FLAG_READ_ONLY_DEPTH;
-    dsv = dsv_heap->GetCPUDescriptorHandleForHeapStart();
-    dsv.ptr += static_cast<SIZE_T>(frame * 5 + 4) * dsv_stride;
-    device->CreateDepthStencilView(owner.targets.depth.resource.Get(), &depth_view, dsv);
-
     auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
     rtv.ptr += static_cast<SIZE_T>(kFrameCount + frame * kRtvBankStride) * rtv_stride;
     for (auto [resource, format] : {
@@ -985,7 +687,7 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors(OwnedView &owner, std::ui
              std::pair{owner.targets.gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32_UINT},
              std::pair{owner.targets.hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
              std::pair{owner.targets.oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT},
-             std::pair{owner.targets.oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT},
+             std::pair{owner.targets.oit_revealage.resource.Get(), DXGI_FORMAT_R16G16_FLOAT},
              std::pair{owner.targets.post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
              std::pair{owner.targets.post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT},
              std::pair{owner.targets.gbuffer_material.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM},
@@ -1054,10 +756,10 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors(OwnedView &owner, std::ui
             create_srv(owner.targets.gbuffer_base.resource.Get(), DXGI_FORMAT_R8G8B8A8_UNORM);
             create_srv(owner.targets.gbuffer_normal.resource.Get(), DXGI_FORMAT_R16G16_SNORM);
             create_srv(owner.targets.gbuffer_metadata.resource.Get(), DXGI_FORMAT_R32_UINT);
-            create_srv(owner.targets.shadow.resource.Get(), DXGI_FORMAT_R32_FLOAT);
+            create_srv(owner.shadow_atlas.resource.Get(), DXGI_FORMAT_R32_FLOAT);
             create_srv(owner.targets.hdr_color.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
             create_srv(owner.targets.oit_accumulation.resource.Get(), DXGI_FORMAT_R32G32B32A32_FLOAT);
-            create_srv(owner.targets.oit_revealage.resource.Get(), DXGI_FORMAT_R16_FLOAT);
+            create_srv(owner.targets.oit_revealage.resource.Get(), DXGI_FORMAT_R16G16_FLOAT);
             create_srv(owner.targets.post_a.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
             create_srv(owner.targets.post_b.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
             create_srv(owner.ui.textures[frame_index].resource.Get(), DXGI_FORMAT_B8G8R8A8_UNORM);
@@ -1093,27 +795,12 @@ void D3D12Renderer::Impl::WriteOptionTargetDescriptors(OwnedView &owner, std::ui
         device->CreateShaderResourceView(owner.targets.gbuffer_surface_history.resource.Get(), &view, srv);
     }
     WriteMaterialSidecarDescriptors(owner, frame);
-    WriteViewDescriptors(owner, frame, owner.temporal_read_index, 1u - owner.temporal_read_index);
-    D3D12_SHADER_RESOURCE_VIEW_DESC ui_view{};
-    ui_view.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    ui_view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-    ui_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-    ui_view.Texture2D.MipLevels = 1;
-    for (const auto table : {0u, kToneMapInputDescriptorOffset, kFxaaInputDescriptorOffset})
-    {
-        auto descriptor = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-        descriptor.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + table + 9) * srv_stride;
-        device->CreateShaderResourceView(owner.ui.textures[frame].resource.Get(), &ui_view, descriptor);
-    }
+
 }
 
 Result D3D12Renderer::Impl::CreateGpuData()
 {
     residency.Reset();
-#if defined(HS_DEVELOPMENT_TOOLS)
-    if (resident_preparation_accounting.enabled)
-        if (auto budget = UpdateResidencyBudget(); !budget) return budget;
-#endif
     D3D12MA::ALLOCATION_DESC upload_allocation{};
     upload_allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
     D3D12_RANGE no_read{};
@@ -1557,9 +1244,6 @@ Result D3D12Renderer::Impl::CreateGpuData()
 
     // Particle execution state belongs to the live renderer, independently of
     // the immutable resident asset generation.
-#if defined(HS_DEVELOPMENT_TOOLS)
-    if (!resident_preparation_accounting.enabled)
-#endif
     {
         D3D12MA::ALLOCATION_DESC default_allocation{};
         default_allocation.HeapType = D3D12_HEAP_TYPE_DEFAULT;

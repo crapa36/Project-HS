@@ -60,7 +60,6 @@ struct VfxGroundGeometry
     float spacing{1}, scroll{}; // border: metres and m/s; hatch: repeat count and local UV units/s
     float range{}, half_angle_radians{};
     float inner_radius{}, outer_radius{}, gap_half_angle_radians{};
-    std::vector<float> gap_angles_radians;
     float progress{}, animation_phase{};
     std::uint32_t tick_count{};
     std::uint32_t spokes{}, rings{};
@@ -71,20 +70,20 @@ struct VfxGroundGeometry
     std::uint32_t frame_gap_count{};
 
     [[nodiscard]] std::size_t GapCount() const noexcept
-    { return uniform_gaps.Active() ? uniform_gaps.count : (frame_gap_count ? frame_gap_count : gap_angles_radians.size()); }
+    { return uniform_gaps.Active() ? uniform_gaps.count : frame_gap_count; }
     [[nodiscard]] float GapAngleRadians(std::size_t index,
-        std::span<const float> frame_gap_angles = {}) const noexcept
+        std::span<const float> frame_gap_angles) const noexcept
     {
         if (uniform_gaps.Active()) return uniform_gaps.GroundRadians(static_cast<std::uint32_t>(index));
-        return frame_gap_count ? frame_gap_angles[frame_gap_first + index] : gap_angles_radians[index];
+        return frame_gap_angles[frame_gap_first + index];
     }
-    [[nodiscard]] bool GapStorageConsistent(std::size_t frame_gap_size = 0) const noexcept
+    [[nodiscard]] bool GapStorageConsistent(std::size_t frame_gap_size) const noexcept
     {
         if (!uniform_gaps.Valid()) return false;
         if (uniform_gaps.Active())
-            return gap_angles_radians.empty() && frame_gap_first == 0 && frame_gap_count == 0;
+            return frame_gap_first == 0 && frame_gap_count == 0;
         if (frame_gap_count != 0)
-            return gap_angles_radians.empty() && frame_gap_first <= frame_gap_size &&
+            return frame_gap_first <= frame_gap_size &&
                 frame_gap_count <= frame_gap_size - frame_gap_first;
         return frame_gap_first == 0;
     }

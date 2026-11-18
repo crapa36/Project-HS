@@ -1,12 +1,16 @@
 #pragma once
 
 #include <hs/renderer/renderer.hpp>
+#include <utility>
+
+#ifdef HS_DEVELOPMENT_TOOLS
 #include <Windows.h>
 #include <chrono>
-#include <utility>
+#endif
 
 namespace hs::renderer_detail
 {
+#ifdef HS_DEVELOPMENT_TOOLS
 // Only the synchronous Initialize owner installs this pointer. Runtime reload,
 // frame allocation/waits and capture=false never read a clock through these scopes.
 inline thread_local RendererStartupTimings *active_startup_timings{};
@@ -52,18 +56,36 @@ public:
     explicit StartupOperationScope(RendererStartupOperation operation) noexcept
         : StartupTimer(active_startup_timings ? &active_startup_timings->operations[static_cast<std::size_t>(operation)] : nullptr) {}
 };
+#else
+class StartupOperationScope
+{
+public:
+    explicit constexpr StartupOperationScope(RendererStartupOperation) noexcept {}
+    constexpr void Stop() noexcept {}
+};
+#endif
+
 template<class Function>
 decltype(auto) MeasureStartupStep(RendererStartupStep step, Function &&function)
 {
+#ifdef HS_DEVELOPMENT_TOOLS
     StartupStepScope timer(step);
+#else
+    (void)step;
+#endif
     return std::forward<Function>(function)();
 }
 template<class Function>
 decltype(auto) MeasureStartupOperation(RendererStartupOperation operation, Function &&function)
 {
+#ifdef HS_DEVELOPMENT_TOOLS
     StartupOperationScope timer(operation);
+#else
+    (void)operation;
+#endif
     return std::forward<Function>(function)();
 }
+#ifdef HS_DEVELOPMENT_TOOLS
 class StartupCapture
 {
 public:
@@ -101,4 +123,5 @@ private:
     RendererStartupTimings *previous_{};
     std::chrono::steady_clock::time_point begin_{};
 };
+#endif
 } // namespace hs::renderer_detail

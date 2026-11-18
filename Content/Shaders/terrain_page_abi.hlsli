@@ -24,4 +24,18 @@
 #define HS_TERRAIN_GPU_PLANE_MIP_FIELDS(U1) \
     U1(firstMip) U1(residentMinMip) U1(mipCount) U1(qualityMipPlusOne)
 
+#if !defined(__cplusplus) && !defined(HS_TERRAIN_PAGE_BAKE)
+struct HsTerrainPageSection
+{
+#define HS_TERRAIN_F2(name) float2 name;
+#define HS_TERRAIN_U1(name) uint name;
+#define HS_TERRAIN_U2(name) uint2 name;
+    HS_TERRAIN_GPU_SECTION_FIELDS(HS_TERRAIN_F2, HS_TERRAIN_U1, HS_TERRAIN_U2)
+#undef HS_TERRAIN_F2
+#undef HS_TERRAIN_U1
+#undef HS_TERRAIN_U2
+};
+StructuredBuffer<HsTerrainPageSection> HsTerrainSections : register(HS_TERRAIN_JOIN(t,HS_TERRAIN_SECTION_SRV),HS_TERRAIN_JOIN(space,HS_TERRAIN_PAGE_SPACE));
+#endif
+
 #endif

@@ -3,13 +3,15 @@
 
 cbuffer LightListConstants : register(b0, space19)
 {
-    float4x4 WorldToView;
-    float4x4 Projection;
-    float4x4 InverseProjection;
-    float4 CameraOriginNear;
-    float4 ExtentFarLog;
-    uint4 Grid;
-    uint4 Limits;
+#define HS_LIGHT_LIST_SHADER_TYPE_Float4 float4
+#define HS_LIGHT_LIST_SHADER_TYPE_Uint4 uint4
+#define HS_LIGHT_LIST_SHADER_TYPE_Matrix float4x4
+#define HS_LIGHT_LIST_DECLARE_CONSTANT(kind,native,shader,offset) HS_LIGHT_LIST_SHADER_TYPE_##kind shader;
+    HS_LIGHT_LIST_CONSTANT_FIELDS(HS_LIGHT_LIST_DECLARE_CONSTANT)
+#undef HS_LIGHT_LIST_DECLARE_CONSTANT
+#undef HS_LIGHT_LIST_SHADER_TYPE_Matrix
+#undef HS_LIGHT_LIST_SHADER_TYPE_Uint4
+#undef HS_LIGHT_LIST_SHADER_TYPE_Float4
 };
 RWByteAddressBuffer LightGrid : register(u0, space19);
 // Per-dispatch light/camera data is invariant across the group's 64 cells.
@@ -20,8 +22,8 @@ void HsClusterBounds(uint3 cell, out float3 lower, out float3 upper)
     const float slice_near = CameraOriginNear.w * exp2(ExtentFarLog.w * float(cell.z) / float(Grid.z));
     const float slice_far = cell.z + 1u == Grid.z ? ExtentFarLog.z :
         CameraOriginNear.w * exp2(ExtentFarLog.w * float(cell.z + 1u) / float(Grid.z));
-    const float2 pixel_lower = float2(cell.xy * 16u);
-    const float2 pixel_upper = min(pixel_lower + 16.0, ExtentFarLog.xy);
+    const float2 pixel_lower = float2(cell.xy * HS_LIGHT_LIST_TILE_PIXELS);
+    const float2 pixel_upper = min(pixel_lower + float(HS_LIGHT_LIST_TILE_PIXELS), ExtentFarLog.xy);
     lower = 3.402823466e+38; upper = -3.402823466e+38;
     [unroll] for (uint corner = 0u; corner < 4u; ++corner)
     {
@@ -65,5 +67,5 @@ void BuildLightLists(uint3 dispatch : SV_DispatchThreadID, uint lane : SV_GroupI
         if (!world_query && dot(separation, separation) > bounds.w) continue;
         membership[index / 32u] |= 1u << (index % 32u);
     }
-    LightGrid.Store4(HsLightHeaderBytes + cell_index * 16u, membership);
+    LightGrid.Store4(HsLightHeaderBytes + cell_index * HS_LIGHT_LIST_MASK_BYTES, membership);
 }

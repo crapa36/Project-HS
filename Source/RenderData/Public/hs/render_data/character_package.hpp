@@ -83,15 +83,9 @@ struct CharacterMetadataPackageData
 void ValidateCharacterSource(const CharacterPackageData &character,
                              bool validate_upper_body_mask = true);
 
-[[nodiscard]] std::vector<std::byte> BuildEmbeddedCharacterPackage(
-    AssetId asset_id, std::span<const std::string> dependencies,
-    const CharacterPackageData &character);
-[[nodiscard]] CharacterPackageData DecodeEmbeddedCharacterPackage(
-    std::span<const std::byte> bytes, AssetId expected_asset_id,
-    bool validate_upper_body_mask = true);
 // Production metadata requires one opaque binding for every FBX slot plus the
 // jelly body's transparent binding. Old metadata without required chunk25 must
-// be recooked; embedded interchange above keeps its existing seven chunks.
+// be recooked.
 [[nodiscard]] std::vector<std::byte> BuildCharacterMetadataPackage(
     AssetId asset_id, std::span<const std::string> dependencies,
     const CharacterPackageData &character, const GeometryMetadata &geometry,
@@ -111,11 +105,4 @@ void ValidateCharacterGeometry(const CharacterMetadataPackageData &character,
 void ValidateCharacterGeometry(const CharacterMetadataPackageData &character,
                                const GeometryMetadata &metadata, const PreparedGeometryPage &page);
 
-// Backward-compatible embedded interchange aliases; production uses metadata.
-[[nodiscard]] std::vector<std::byte> BuildCharacterPackage(
-    AssetId asset_id, std::span<const std::string> dependencies,
-    const CharacterPackageData &character);
-[[nodiscard]] CharacterPackageData DecodeCharacterPackage(
-    std::span<const std::byte> bytes, AssetId expected_asset_id,
-    bool validate_upper_body_mask = true);
 } // namespace hs::render_data

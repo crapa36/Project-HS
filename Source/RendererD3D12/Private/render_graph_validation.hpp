@@ -46,7 +46,6 @@ struct PassInfo
     QueueHint queue{};
     bool has_execute{};
     std::span<const ResourceUse> uses;
-    std::span<const std::uint32_t> predecessor_ids;
 };
 
 // Pass indices refer to the input PassInfo span. A cross-queue dependency means
@@ -108,11 +107,8 @@ struct AliasPlan
 
 [[nodiscard]] Result Compile(std::span<const ResourceInfo> resources,
                              std::span<const PassInfo> passes,
-                             CompiledSchedule &schedule);
-
-[[nodiscard]] Result Compile(std::span<const ResourceInfo> resources,
-                             std::span<const PassInfo> passes,
-                             std::vector<std::uint32_t> &execution_order);
+                             CompiledSchedule &schedule,
+                             std::span<const std::pair<std::uint32_t, std::uint32_t>> ordering = {});
 
 // Plans physical aliasing only where the compiled schedule proves that every
 // use of the first resource completes before every use of the next resource.

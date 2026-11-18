@@ -107,7 +107,8 @@ bool Covered(std::span<const Interval> initialized, std::span<const Interval> ra
 } // namespace
 
 Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo> passes,
-               CompiledSchedule &schedule)
+               CompiledSchedule &schedule,
+               std::span<const std::pair<std::uint32_t, std::uint32_t>> ordering)
 {
     schedule.Clear();
     const auto fail = [](std::string message) {
@@ -196,7 +197,7 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
                 return fail("RenderGraph names an invalid or nonexistent resource version.");
             const bool write_access = use.access == Access::RenderTarget || use.access == Access::DepthWrite ||
                 use.access == Access::UnorderedWrite || use.access == Access::CopyDest;
-            if (use.access == Access::Undefined || static_cast<unsigned>(use.access) > static_cast<unsigned>(Access::ShadingRateSource) ||
+            if (use.access == Access::Undefined || static_cast<unsigned>(use.access) > static_cast<unsigned>(Access::ConstantBuffer) ||
                 use.writes != write_access || (!use.writes && !use.reads))
                 return fail("RenderGraph read/write declaration disagrees with its access.");
             if (!QueueAccessCompatible(pass.queue, use.access))
@@ -205,9 +206,10 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
                 return fail("RenderGraph depth shader read requires a texture.");
             if (use.access == Access::ShadingRateSource && handle.kind != ResourceKind::Texture)
                 return fail("RenderGraph shading rate source requires a texture.");
-            if ((use.access == Access::IndexBuffer || use.access == Access::VertexShaderRead) &&
+            if ((use.access == Access::IndexBuffer || use.access == Access::VertexShaderRead ||
+                 use.access == Access::ConstantBuffer) &&
                 handle.kind != ResourceKind::Buffer)
-                return fail("RenderGraph geometry input requires a buffer.");
+                return fail("RenderGraph buffer input requires a buffer.");
             // One callback has one access/state for each physical resource. A
             // disjoint range does not authorize simultaneous physical writers.
             if (state.seen_pass == index)
@@ -259,15 +261,18 @@ Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo
         if (before < 0 || after < 0 || before == after) return;
         successors[before].push_back(static_cast<std::uint32_t>(after));
     };
-    for (std::uint32_t consumer = 0; consumer < pass_count; ++consumer)
-        for (const auto producer_id : passes[consumer].predecessor_ids)
-        {
-            const auto producer = pass_indices.find(producer_id);
-            if (producer == pass_indices.end() || producer->second == consumer)
-                return fail("RenderGraph ordering dependency names an absent or identical pass.");
-            schedule.explicit_ordering.emplace_back(producer->second, consumer);
-            edge(producer->second, consumer);
-        }
+    for (const auto &[producer_id, consumer_id] : ordering)
+    {
+        const auto producer = pass_indices.find(producer_id);
+        const auto consumer = pass_indices.find(consumer_id);
+        if (producer == pass_indices.end() || consumer == pass_indices.end() ||
+            producer->second == consumer->second)
+            return fail("RenderGraph ordering dependency names an absent or identical pass.");
+        schedule.explicit_ordering.emplace_back(producer->second, consumer->second);
+        edge(producer->second, consumer->second);
+    }
+    std::stable_sort(schedule.explicit_ordering.begin(), schedule.explicit_ordering.end(),
+        [](const auto &left, const auto &right) { return left.second < right.second; });
     const auto interval_slice = [&](RangeSlice slice) {
         return std::span<const Interval>{interval_arena.data() + slice.first, slice.count};
     };
@@ -621,12 +626,4 @@ Result PlanTransientAliases(std::span<const ResourceInfo> resources,
     return Result::Success();
 }
 
-Result Compile(std::span<const ResourceInfo> resources, std::span<const PassInfo> passes,
-               std::vector<std::uint32_t> &execution_order)
-{
-    CompiledSchedule schedule;
-    const auto result = Compile(resources, passes, schedule);
-    execution_order = std::move(schedule.execution_order);
-    return result;
-}
 } // namespace hs::render_graph

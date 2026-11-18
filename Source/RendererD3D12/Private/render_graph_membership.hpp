@@ -54,17 +54,4 @@ inline bool AppendUniqueBatchResource(std::vector<std::uint32_t> &ordered,
     return true;
 }
 
-inline void EnsureBatchResourceMembershipDomain(std::vector<std::uint64_t> &membership,
-    std::size_t resource_count)
-{
-    const auto word_count = (resource_count + 63u) / 64u;
-    if (membership.size() < word_count) membership.resize(word_count, 0);
-}
-
-inline void ResetBatchResourceMembership(std::vector<std::uint32_t> &ordered,
-    std::vector<std::uint64_t> &membership)
-{
-    std::fill(membership.begin(), membership.end(), std::uint64_t{});
-    ordered.clear();
-}
 }

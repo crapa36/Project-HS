@@ -121,11 +121,10 @@ bool HsVirtualShadowLookupLevel(float3 light, uint level, float2 depth_gradient,
             // Guard texels contain this page's enlarged projection. Never sample
             // a neighboring physical tile, even at floating-point boundaries.
             const int2 pixel = clamp(center + HsShadowFilterOffsets[sample_index], origin, origin + 131);
-            const float static_caster = HsShadowStaticBank.Load(int3(pixel, 0));
 #if defined(HS_LOCAL_PROBE_CAPTURE)
-            const float caster = static_caster;
+            const float caster = HsShadowStaticBank.Load(int3(pixel, 0));
 #else
-            const float caster = max(static_caster, HsShadowDynamicBank.Load(int3(pixel, 0)));
+            const float caster = HsShadowDynamicBank.Load(int3(pixel, 0));
 #endif
             const float2 delta = (float2(pixel - origin) + 0.5 - position) * float2(map.y, -map.y);
             const float tap_receiver = receiver - dot(depth_gradient, delta) * depth.y;

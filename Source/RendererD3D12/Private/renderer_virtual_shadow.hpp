@@ -176,7 +176,7 @@ struct ShadowCasterRange
 };
 struct VirtualShadowReceiver
 {
-    // World AABB. minimum.w: 0 requests pages and extends depth; 1 extends depth only.
+    // World AABB. minimum.w is reserved and must be 0.
     // maximum.w: 0 world-query enclosure; 1 camera-only GPU feedback envelope
     // whose CPU coverage proof is the independent actual-draw surface range.
     // The GPU ignores this discriminator. Keep the 32-byte GPU payload.
@@ -374,8 +374,8 @@ class VirtualShadowSystem
         const VirtualShadowFramePlan &,VirtualShadowOutputs &,VirtualShadowLayout *layout=nullptr);
     [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const VirtualShadowInputs &,
         const VirtualShadowFramePlan &,const VirtualShadowLayout &,VirtualShadowOutputs &);
-    [[nodiscard]] bool MatchesLayout(const VirtualShadowInputs &,
-        const VirtualShadowFramePlan &,const VirtualShadowLayout &) const noexcept;
+    [[nodiscard]] bool MatchesShape(const VirtualShadowFramePlan &,bool material_sampling,
+        const VirtualShadowLayout &) const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &,const CompletionSet &,bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);
     [[nodiscard]] VirtualShadowCacheStatus CacheStatus() const noexcept;
@@ -384,6 +384,8 @@ class VirtualShadowSystem
     [[nodiscard]] std::array<const AllocationResource *, 5> DiagnosticResources() const noexcept;
     // Called only after all old submissions have reliably completed.
   private:
+    [[nodiscard]] bool MatchesLayout(const VirtualShadowInputs &,
+        const VirtualShadowFramePlan &,const VirtualShadowLayout &) const noexcept;
     [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const VirtualShadowInputs &,
         const VirtualShadowFramePlan &,VirtualShadowOutputs &,VirtualShadowLayout *,
         const VirtualShadowLayout *);

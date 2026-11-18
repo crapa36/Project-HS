@@ -70,8 +70,7 @@ struct HdrPostMotionLayout
     std::array<ResourceVersion, 8> versions{};
     std::array<ResourceVersion, 9> inputs{};
     ResourceVersion output{};
-    std::array<std::uint32_t, 4> pass_indices{};
-    std::uint32_t pass_count{};
+    std::uint32_t first_pass{};
     bool enabled{}, motion{}, dof{}, transparent_guides{};
 };
 struct HdrPostGradeLayout
@@ -79,8 +78,7 @@ struct HdrPostGradeLayout
     std::uint64_t target_generation{};
     std::array<ResourceHandle, 8> imports{};
     ResourceVersion input{}, lut{}, output{};
-    std::array<std::uint32_t, 2> pass_indices{};
-    std::uint32_t pass_count{};
+    std::uint32_t first_pass{};
     bool enabled{}, imports_in_grade{}, initialize_lut{};
 };
 struct HdrPostTargets;

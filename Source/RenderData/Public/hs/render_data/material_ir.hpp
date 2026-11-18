@@ -17,7 +17,7 @@ namespace hs::render_data
 {
 enum class MaterialType { Float, Float3, Bool, Uint, Float2, Float4, TextureRef, SamplerRef,
                           TerrainResult, SurfaceClosure };
-enum class MaterialGraphKind { Rock0, Leaf0, Opaque, Masked, Terrain, Translucent, HeroRefractive, Decal };
+enum class MaterialGraphKind { Opaque = 2, Masked, Terrain, Translucent, HeroRefractive, Decal };
 enum class MaterialNormalSpace { Tangent, World };
 enum class MaterialOp
 {
@@ -216,14 +216,9 @@ struct MaterialNode
 
 struct MaterialGraph
 {
-    MaterialGraphKind kind{MaterialGraphKind::Rock0};
+    MaterialGraphKind kind{MaterialGraphKind::Opaque};
     std::vector<MaterialNode> nodes; // topological order; dead nodes are validated, then pruned
     std::vector<MaterialParameterDefinition> parameters;
-    std::size_t base_color_output{};
-    std::size_t roughness_output{};
-    std::size_t opacity_output{};
-    std::size_t normal_output{kNoMaterialInput};
-    std::size_t ao_output{kNoMaterialInput};
     std::size_t terrain_output{kNoMaterialInput};
     std::size_t closure_output{kNoMaterialInput};
     std::vector<MaterialTextureDefinition> textures;
@@ -232,7 +227,7 @@ struct MaterialGraph
     DecalReceiverPolicy decal_receivers;
 };
 
-enum class MaterialPreparationDomain { Generic, Environment, Hero, Decal };
+enum class MaterialPreparationDomain { Environment, Hero, Decal };
 struct ClosureReflection;
 
 class PreparedMaterial
@@ -258,16 +253,13 @@ private:
     friend std::string EmitUniformClosureHlsl(const PreparedMaterial &, std::string_view);
     friend std::string EmitDecalMaterialContextHlsl(const PreparedMaterial &, std::string_view, std::uint32_t);
     friend void ValidateMaterialSampleLayers(const PreparedMaterial &, std::span<const std::uint32_t>, std::uint32_t);
-    friend std::string EmitRock0MaterialHlsl(const PreparedMaterial &);
-    friend std::string EmitLeaf0MaterialHlsl(const PreparedMaterial &);
-    friend std::string EmitEnvironmentMaterialHlsl(const PreparedMaterial &);
     friend std::string EmitEnvironmentMaterialContextHlsl(const PreparedMaterial &, std::size_t);
     friend std::string EmitCharacterMaterialContextHlsl(const PreparedMaterial &, std::string_view, std::string_view);
 };
 
 [[nodiscard]] PreparedMaterial PrepareMaterial(MaterialGraph graph,
-    MaterialPreparationDomain domain = MaterialPreparationDomain::Generic);
-// Generic follows Environment opacity semantics; Hero evaluates closure opacity even when opaque.
+    MaterialPreparationDomain domain = MaterialPreparationDomain::Environment);
+// Hero evaluates closure opacity even when opaque.
 [[nodiscard]] MaterialContextDemand AnalyzeContextDemand(const PreparedMaterial &material);
 // Returns declared texture slots reachable from masked opacity; implicit alpha
 // context sources conservatively retain every declared texture slot.
@@ -293,13 +285,10 @@ struct ClosureReflection
 // uniformity: declared numeric parameters and pure operations on them are uniform.
 // Scattering layers have one field set each: duplicate kinds and scattering on
 // Unlit are invalid. Emission may stack additively on Basic or Unlit.
-[[nodiscard]] ClosureReflection AnalyzeClosure(const MaterialGraph &graph);
 [[nodiscard]] ClosureReflection AnalyzeClosure(const PreparedMaterial &material);
 // Returns exact IOR/absorption float bits only when both optical inputs are
 // statically constant in the material graph. Runtime-controlled profiles fall
 // back to authored thickness and cannot participate in paired-surface matching.
-[[nodiscard]] std::optional<std::array<std::uint32_t, 4>>
-SolidTransmissionProfileBits(const MaterialGraph &graph);
 [[nodiscard]] std::optional<std::array<std::uint32_t, 4>>
 SolidTransmissionProfileBits(const PreparedMaterial &material);
 // Reapply advanced layers to a provided basic closure in lighting. Whole families
@@ -320,46 +309,22 @@ SolidTransmissionProfileBits(const PreparedMaterial &material);
 // Subsurface/SolidTransmission optical inputs are uniform in this renderer profile;
 // unsupported varying inputs fail validation. Thin, subsurface and solid transport
 // cannot share a chain. SolidTransmission is restricted to transparent domains.
-[[nodiscard]] std::string EmitUniformClosureHlsl(const MaterialGraph &graph,
-    std::string_view function_name = "HsMaterialApplyUniformLayers");
 [[nodiscard]] std::string EmitUniformClosureHlsl(const PreparedMaterial &material,
     std::string_view function_name = "HsMaterialApplyUniformLayers");
 
-// Validate the typed graph independently of its JSON source.
-void ValidateRock0MaterialGraph(const MaterialGraph &graph);
-void ValidateLeaf0MaterialGraph(const MaterialGraph &graph);
-void ValidateEnvironmentMaterialGraph(const MaterialGraph &graph);
-void ValidateCharacterMaterialGraph(const MaterialGraph &graph);
-void ValidateTerrainMaterialGraph(const MaterialGraph &graph);
-void ValidateDecalMaterialGraph(const MaterialGraph &graph);
 // Emits one typed evaluator and its declared texture at t<texture_register>/space36.
 // HsDecalContext is a decal-only extension; shared geometry context is unchanged.
-[[nodiscard]] std::string EmitDecalMaterialContextHlsl(const MaterialGraph &graph,
-    std::string_view function_name, std::uint32_t texture_register);
 [[nodiscard]] std::string EmitDecalMaterialContextHlsl(const PreparedMaterial &material,
     std::string_view function_name, std::uint32_t texture_register);
 // Proves every authored sample layer is in its declared texture array. Context
 // layer is enumerated; unknown bool conditions conservatively include both branches.
-void ValidateMaterialSampleLayers(const MaterialGraph &graph,
-    std::span<const std::uint32_t> texture_layer_counts, std::uint32_t max_context_layer);
 void ValidateMaterialSampleLayers(const PreparedMaterial &material,
     std::span<const std::uint32_t> texture_layer_counts, std::uint32_t max_context_layer);
-[[nodiscard]] std::string EmitRock0MaterialHlsl(const MaterialGraph &graph);
-[[nodiscard]] std::string EmitRock0MaterialHlsl(const PreparedMaterial &material);
-[[nodiscard]] std::string EmitLeaf0MaterialHlsl(const MaterialGraph &graph);
-[[nodiscard]] std::string EmitLeaf0MaterialHlsl(const PreparedMaterial &material);
-[[nodiscard]] std::string EmitEnvironmentMaterialHlsl(const MaterialGraph &graph);
-[[nodiscard]] std::string EmitEnvironmentMaterialHlsl(const PreparedMaterial &material);
-// Context evaluator owns authored sampling; legacy numeric emitters above retain
-// their sampled-value signatures. The texture ordinal is the shared material ID order.
-[[nodiscard]] std::string EmitEnvironmentMaterialContextHlsl(
-    const MaterialGraph &graph, std::size_t material_ordinal);
+// The texture ordinal is the shared material ID order.
 [[nodiscard]] std::string EmitEnvironmentMaterialContextHlsl(
     const PreparedMaterial &material, std::size_t material_ordinal);
 // Shared hero adapter supplies sampled textures/expression/charge in ctx. No
 // texture declarations are emitted; local node names can be concatenated safely.
-[[nodiscard]] std::string EmitCharacterMaterialContextHlsl(const MaterialGraph &graph,
-    std::string_view surface_function, std::string_view opacity_function);
 [[nodiscard]] std::string EmitCharacterMaterialContextHlsl(const PreparedMaterial &material,
     std::string_view surface_function, std::string_view opacity_function);
 } // namespace hs::render_data

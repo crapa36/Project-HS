@@ -31,22 +31,20 @@ struct TextureFeedbackLayout
     {
         TextureStreamId texture;
         TextureHandle imported{};
-        ResourceVersion cleared{}, sampled{};
         std::uint32_t width{}, height{}, slices{}, mip_count{};
+        bool opacity_sampling{};
     };
     BufferHandle terrain_requests{};
-    ResourceVersion terrain_cleared{}, terrain_sampled{};
-    BufferHandle metadata{};
     ResourceVersion metadata_version{};
     std::vector<Owner> owners;
-    std::uint32_t clear_pass_index{}, clear_pass_id{};
-    std::uint32_t decode_pass_index{}, decode_pass_id{};
+    std::uint32_t clear_pass_index{}, decode_pass_index{};
 };
 class RendererTextureFeedback
 {
   public:
-    RendererTextureFeedback();
-    ~RendererTextureFeedback();
+    RendererTextureFeedback() = default;
+    RendererTextureFeedback(RendererTextureFeedback &&) noexcept = default;
+    RendererTextureFeedback &operator=(RendererTextureFeedback &&) noexcept = default;
     RendererTextureFeedback(const RendererTextureFeedback &) = delete;
     RendererTextureFeedback &operator=(const RendererTextureFeedback &) = delete;
     [[nodiscard]] Result Initialize(ID3D12Device *, D3D12MA::Allocator *, bool hardware,
@@ -59,27 +57,15 @@ class RendererTextureFeedback
     [[nodiscard]] Result WriteDescriptors(std::uint32_t, ID3D12DescriptorHeap *, ID3D12DescriptorHeap *,
         D3D12_CPU_DESCRIPTOR_HANDLE first, D3D12_GPU_DESCRIPTOR_HANDLE gpu_first,
         D3D12_CPU_DESCRIPTOR_HANDLE terrain_cpu, D3D12_GPU_DESCRIPTOR_HANDLE terrain_gpu, UINT stride);
-    [[nodiscard]] ResourceVersion ImportMetadata(RenderGraphBuilder &, std::uint32_t frame) const;
     [[nodiscard]] Result ImportMetadata(RenderGraphBuilder &, std::uint32_t frame,
-        ResourceVersion &, TextureFeedbackLayout *) const;
-    [[nodiscard]] Result BindRetainedMetadata(RenderGraphBuilder &, std::uint32_t frame,
-        const TextureFeedbackLayout &, ResourceVersion &) const;
+        TextureFeedbackLayout &, bool restore, ResourceVersion &) const;
     [[nodiscard]] Result AddClearPass(RenderGraphBuilder &, std::uint32_t frame,
-        std::uint32_t pass_id, std::vector<TextureFeedbackGraphBinding> &,
-        TextureFeedbackLayout *layout = nullptr);
-    [[nodiscard]] Result BindRetainedClear(RenderGraphBuilder &, std::uint32_t frame,
-        std::uint32_t pass_id, const TextureFeedbackLayout &,
-        std::vector<TextureFeedbackGraphBinding> &);
+        TextureFeedbackLayout &, bool restore, std::vector<TextureFeedbackGraphBinding> &);
     static void DeclareSampling(PassBuilder &, std::vector<TextureFeedbackGraphBinding> &,
         bool opacity_only = false);
     [[nodiscard]] Result AddDecodePass(RenderGraphBuilder &, std::uint32_t frame,
-        std::uint32_t pass_id, std::span<const TextureFeedbackGraphBinding>,
-        TextureFeedbackLayout *layout = nullptr);
-    [[nodiscard]] Result BindRetainedDecode(RenderGraphBuilder &, std::uint32_t frame,
-        std::uint32_t pass_id, const TextureFeedbackLayout &,
-        std::span<const TextureFeedbackGraphBinding>);
-    [[nodiscard]] bool MatchesLayout(std::uint32_t frame, std::uint32_t clear_pass_id,
-        std::uint32_t decode_pass_id, const TextureFeedbackLayout &) const noexcept;
+        TextureFeedbackLayout &, bool restore, std::span<const TextureFeedbackGraphBinding>);
+    [[nodiscard]] bool MatchesLayout(std::uint32_t frame, const TextureFeedbackLayout &) const noexcept;
     void MarkSubmitted(std::uint32_t frame, const CompletionSet &) noexcept;
     [[nodiscard]] Result Consume(std::uint32_t frame, const CompletionSet &completed,
         std::uint64_t demand_frame, RendererTextureStreaming &);
@@ -89,15 +75,20 @@ class RendererTextureFeedback
         std::span<std::uint32_t, HS_TERRAIN_PAGE_TILE_CAPACITY> words,
         std::span<const TextureStreamId> &planes) const;
 #endif
-    void SwapState(RendererTextureFeedback &) noexcept;
   private:
-    [[nodiscard]] Result AddClearPassImpl(RenderGraphBuilder &, std::uint32_t,
-        std::uint32_t, std::vector<TextureFeedbackGraphBinding> &,
-        TextureFeedbackLayout *, const TextureFeedbackLayout *);
-    [[nodiscard]] Result AddDecodePassImpl(RenderGraphBuilder &, std::uint32_t,
-        std::uint32_t, std::span<const TextureFeedbackGraphBinding>,
-        TextureFeedbackLayout *, const TextureFeedbackLayout *);
-    struct Impl;
-    std::unique_ptr<Impl> impl_;
+    struct FeedbackOwner;
+    struct FeedbackFrame;
+    void SampleAllocatorStats(ResidencyManager &);
+    ResidencyTicket RegisterNativeAllocation(ResidencyManager &, ResidencyCategory, std::uint64_t,
+                                            bool pinned, D3D12_HEAP_TYPE);
+    Result Allocate(AllocationResource &, const D3D12_RESOURCE_DESC &, D3D12_HEAP_TYPE, D3D12_RESOURCE_STATES);
+    Result MakeOwner(FeedbackOwner &, const TextureStreamView &, ResidencyManager &);
+    static void ReleaseAccounting(const FeedbackFrame &, ResidencyManager &) noexcept;
+
+    Microsoft::WRL::ComPtr<ID3D12Device> device_;
+    Microsoft::WRL::ComPtr<ID3D12Device8> device8_;
+    D3D12MA::Allocator *allocator_{};
+    bool hardware_{}, unified_memory_{};
+    std::vector<std::shared_ptr<FeedbackFrame>> frames_;
 };
 } // namespace hs

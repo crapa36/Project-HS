@@ -252,14 +252,6 @@ void D3D12Renderer::Impl::WriteGeometryPageDescriptors(std::uint32_t frame_slot)
 {
     if (frame_slot >= kFrameCount) return;
     auto &bank = geometry_page_descriptor_banks[frame_slot];
-    const auto heap_start = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-    if (bank.heap_owner.Get() != srv_cpu_heap.Get() || bank.heap_start != heap_start.ptr || bank.stride != srv_stride)
-    {
-        bank = {};
-        bank.heap_owner = srv_cpu_heap;
-        bank.heap_start = heap_start.ptr;
-        bank.stride = srv_stride;
-    }
     auto descriptor = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     descriptor.ptr += static_cast<SIZE_T>(
         frame_slot * kTextureDescriptorCount + kGeometryDescriptorOffset + 1) * srv_stride;

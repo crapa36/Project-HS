@@ -19,8 +19,9 @@ namespace hs
 namespace
 {
 using Microsoft::WRL::ComPtr;
-constexpr std::uint32_t kTilePixels = 16, kSlices = 24;
-constexpr std::uint32_t kMaxLights = 128;
+constexpr std::uint32_t kTilePixels = HS_LIGHT_LIST_TILE_PIXELS;
+constexpr std::uint32_t kSlices = HS_LIGHT_LIST_DEPTH_SLICES;
+constexpr std::uint32_t kMaxLights = HS_LIGHT_LIST_MAX_LIGHTS;
 static_assert(kLightShadowRequested == 1u); // Packed metadata.z reserves higher bits for record+1.
 constexpr std::uint32_t kDescriptorCount = kLightListResourceCount, kHeaderBytes = sizeof(LightListConstants);
 constexpr std::uint64_t kMaxBufferBytes = UINT64(UINT32_MAX) & ~UINT64(3);
@@ -217,7 +218,7 @@ struct LightListSystem::Impl
     {
         const RenderGraphBuilder *graph{};
         std::shared_ptr<LightListTargets> targets;
-        std::array<Import, kLightListResourceCount> imports{};
+        std::array<Import, kLightListResourceCount + 1> imports{};
         std::uint32_t slot{};
     } pending;
 };
@@ -251,7 +252,7 @@ Result LightListSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *alloca
     const std::uint64_t cells = UINT64((capacity.width + kTilePixels - 1) / kTilePixels) *
         ((capacity.height + kTilePixels - 1) / kTilePixels) * kSlices;
     const std::array<std::uint64_t, kLightListResourceCount> widths{
-        UINT64(maxLights) * sizeof(GpuLightRecord), kHeaderBytes + cells * 16};
+        UINT64(maxLights) * sizeof(GpuLightRecord), kHeaderBytes + cells * HS_LIGHT_LIST_MASK_BYTES};
     const std::uint64_t uploadStride = (kHeaderBytes + widths[0] + 255) & ~UINT64(255);
     if (std::ranges::any_of(widths, [](std::uint64_t size) { return size > kMaxBufferBytes; }) ||
         uploadStride > std::numeric_limits<SIZE_T>::max() / slots)
@@ -490,6 +491,16 @@ Result LightListSystem::RegisterFrame(RenderGraphBuilder &graph,const LightListI
         if(capture)capture->resources[index]=handle;
         pending.imports[index] = {&resource, handle}; versions[index] = graph.Version(handle);
     }
+    if(auto checked=storage->upload.EnsureNativeContract(storage->device.Get());!checked)return checked;
+    const auto uploadHandle=retained?retained->upload:
+        graph.ImportBuffer({storage->upload.resource.Get(), storage->upload.graph_completion,
+            storage->upload.graph_queue, {}, storage->upload.NativeContract()}, storage->upload.graph_access, "LightList.Upload");
+    if(retained&&!graph.BindBuffer(uploadHandle,{storage->upload.resource.Get(), storage->upload.graph_completion,
+        storage->upload.graph_queue, {}, storage->upload.NativeContract()},storage->upload.graph_access))
+        return LightFailure(ErrorCode::InvalidState,"Light-list retained upload binding failed.");
+    if(capture)capture->upload=uploadHandle;
+    pending.imports[kLightListResourceCount]={&storage->upload,uploadHandle};
+    const auto uploadVersion=graph.Version(uploadHandle);
     if(capture)capture->passes[0]=graph.PassCount();
     auto uploadBinding=retained?graph.BindPass(retained->passes[0],130):
         std::optional<PassBuilder>{graph.AddPass(130,"LightListUpload",QueueHint::Direct)};
@@ -497,6 +508,8 @@ Result LightListSystem::RegisterFrame(RenderGraphBuilder &graph,const LightListI
     auto &upload=*uploadBinding;
     if(retained){versions[0]=retained->uploaded[0];versions[1]=retained->uploaded[1];}
     else{versions[0]=upload.Write(versions[0],Access::CopyDest);versions[1]=upload.Write(versions[1],Access::CopyDest);}
+    if(!retained)upload.Read(uploadVersion,Access::CopySource,
+        BufferRange{uploadOffset,kHeaderBytes+records.size()*sizeof(GpuLightRecord)});
     if(capture)capture->uploaded={versions[0],versions[1]};
     upload.SetExecuteChecked([storage, slot, uploadOffset, recordBytes = UINT64(records.size()) * sizeof(GpuLightRecord)](RenderPassContext &context) -> Result {
         auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
@@ -517,6 +530,7 @@ Result LightListSystem::RegisterFrame(RenderGraphBuilder &graph,const LightListI
         {
             cluster.Read(versions[0],Access::ComputeRead);
             versions[1]=cluster.ReadWrite(versions[1],Access::UnorderedWrite);
+            cluster.Read(uploadVersion,Access::ConstantBuffer,BufferRange{uploadOffset,kHeaderBytes});
         }
         cluster.SetExecuteChecked([storage, slot, uploadOffset, cells = constants.limits.w](RenderPassContext &context) -> Result {
             auto *commands = static_cast<ID3D12GraphicsCommandList *>(context.NativeCommandList());
@@ -534,6 +548,7 @@ Result LightListSystem::RegisterFrame(RenderGraphBuilder &graph,const LightListI
         outputs.resources[index] = frame.buffers[index].resource.Get(); outputs.srvs[index] = storage->Cpu(slot, index, true);
         if(!retained)graph.SetFinalAccess(versions[index], Access::AllShaderRead);
     }
+    if(!retained)graph.SetFinalAccess(uploadVersion,Access::CopySource);
     outputs.lights = versions[0]; outputs.grid = versions[1];
     outputs.light_count = UINT(sorted.size()); outputs.directional_count = directionalCount;
     impl_->pending = std::move(pending);
@@ -553,7 +568,6 @@ Result LightListSystem::CompleteSubmission(const RenderGraphBuilder &graph, cons
     if (pending.graph != &graph) return LightFailure(ErrorCode::InvalidArgument, "Light-list completion refers to a different graph.");
     auto storage = pending.targets;
     storage->completion.Merge(completion); storage->frames[pending.slot].completion.Merge(completion);
-    storage->upload.graph_completion.Merge(completion);
     for (const auto &imported : pending.imports)
     {
         const auto resourceCompletion = graph.ResourceCompletion(imported.handle);

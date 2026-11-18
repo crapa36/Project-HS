@@ -25,9 +25,8 @@ namespace hs
 class RendererPipelineCache;
 struct AllocationResource;
 constexpr std::uint32_t kLayeredTranslucencyMaxLayers = 4;
-// Native root parameter 36: CBV, contiguous SRVs, then the counter UAV.
+// Native root parameter 36: CBV followed by contiguous SRVs.
 constexpr std::uint32_t kLayeredTranslucencySrvCount = HS_TRANSLUCENCY_SRV_COUNT;
-constexpr std::uint32_t kLayeredTranslucencyUavOffset = HS_TRANSLUCENCY_UAV_TABLE_OFFSET;
 constexpr std::uint32_t kLayeredTranslucencyTableSize = HS_TRANSLUCENCY_TABLE_SIZE;
 constexpr std::uint32_t kLayeredTranslucencyPhaseCount = HS_TRANSLUCENCY_PHASE_COUNT;
 constexpr std::uint32_t kLayeredTranslucencyDescriptorsPerFrame =
@@ -35,7 +34,12 @@ constexpr std::uint32_t kLayeredTranslucencyDescriptorsPerFrame =
 // Keep the historical semantic value in diagnostic logs; Guide is not a pass.
 enum class LayeredTranslucencyPhase : std::uint8_t { Front = 0, Exit = 1, Tail = 2, Composite = 4 };
 struct LayeredTranslucencyGuide { ResourceVersion version; ID3D12Resource *resource{}; };
-struct LayeredTranslucencySceneRead { ResourceVersion version; Access access{Access::ShaderRead}; };
+struct LayeredTranslucencySceneRead
+{
+    ResourceVersion version;
+    Access access{Access::ShaderRead};
+    bool operator==(const LayeredTranslucencySceneRead &) const noexcept = default;
+};
 using LayeredTranslucencyDraw = std::function<void(ID3D12GraphicsCommandList *, ID3D12PipelineState *,
     LayeredTranslucencyPhase, std::uint32_t, D3D12_GPU_DESCRIPTOR_HANDLE)>;
 struct TranslucencyDiagnosticsContributorInput
@@ -61,7 +65,6 @@ struct LayeredTranslucencyInputs
     CompletionSet completed;
     // Reserved suffix of the current native frame SRV heap. Root owns its lease.
     ID3D12DescriptorHeap *shader_heap{};
-    D3D12_CPU_DESCRIPTOR_HANDLE table_cpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE table_gpu{};
     std::uint32_t descriptor_stride{};
     std::span<const LayeredTranslucencySceneRead> peel_reads;
@@ -69,8 +72,6 @@ struct LayeredTranslucencyInputs
     // Previous geometry is consumed only by motion-writing front/water phases.
     ResourceVersion previous_instances{}, previous_skin{};
     LayeredTranslucencyDraw draw;
-    // Optional original CPU descriptor owner with the same logical layout as shader_heap.
-    ID3D12DescriptorHeap *descriptor_source_heap{};
     // Used only by a capture_translucency_diagnostics target. Sources are copied at registration.
     std::span<const TranslucencyDiagnosticsContributorInput> work_contributors;
     TranslucencyDiagnosticsDraw work_draw;
@@ -82,15 +83,16 @@ struct LayeredTranslucencyInputs
 struct LayeredTranslucencyOutputs
 {
     ResourceVersion accumulation, revealage;
-    ResourceVersion depth, motion, history, classification, metadata, unpeeled_fragment_count, transport;
+    ResourceVersion depth, motion, history, classification, metadata, transport;
     ID3D12Resource *depth_resource{}, *motion_resource{}, *history_resource{};
-    ID3D12Resource *classification_resource{}, *metadata_resource{}, *unpeeled_fragment_count_resource{}, *transport_resource{};
+    ID3D12Resource *classification_resource{}, *metadata_resource{};
     // RG16F transport = {solid transmission present, animated emissive present}.
-    D3D12_CPU_DESCRIPTOR_HANDLE depth_srv{}, motion_srv{}, history_srv{}, classification_srv{}, metadata_srv{}, unpeeled_fragment_count_srv{}, transport_srv{};
     ResourceVersion corrected;
     ID3D12Resource *corrected_resource{};
     D3D12_CPU_DESCRIPTOR_HANDLE corrected_srv{};
+    D3D12_CPU_DESCRIPTOR_HANDLE descriptors{};
 };
+void InitializeNullTranslucencyDescriptors(ID3D12Device *, D3D12_CPU_DESCRIPTOR_HANDLE, UINT stride);
 struct TranslucencyDiagnosticsRetainedLayout
 {
     static constexpr std::size_t kMaxContributors = kTranslucencyDiagnosticsContributors;
@@ -115,12 +117,11 @@ struct LayeredTranslucencyLayout
     TextureHandle exit{};
     std::array<TextureHandle, 2> color{};
     std::array<TextureHandle, 6> guides{};
-    TextureHandle unpeeled_fragment_count{};
     std::array<BufferHandle, kLayeredTranslucencyMaxLayers> occupancy_results{};
     std::array<std::uint32_t, kLayeredTranslucencyMaxLayers> front_pass{}, copy_pass{}, composite_pass{};
     std::uint32_t exit_pass{};
-    std::uint32_t unpeeled_fragment_count_clear_pass{}, tail_pass{};
-    ResourceVersion unpeeled_fragment_count_version{}, accumulation_version{}, revealage_version{}, corrected_version{};
+    std::uint32_t tail_pass{};
+    ResourceVersion accumulation_version{}, revealage_version{};
     TranslucencyDiagnosticsRetainedLayout work{};
 };
 struct LayeredTranslucencyTargets;
@@ -167,7 +168,7 @@ class TranslucencySystem
     [[nodiscard]] Result ConsumeCompletedWork(const CompletionSet &, std::vector<RendererTranslucencyDiagnosticsSample> &);
     [[nodiscard]] RendererTranslucencyDiagnosticsStatus WorkStatus() const;
 #if defined(HS_DEVELOPMENT_TOOLS)
-    [[nodiscard]] std::array<const AllocationResource *, 15> DiagnosticResources() const noexcept;
+    [[nodiscard]] std::array<const AllocationResource *, 14> DiagnosticResources() const noexcept;
 #endif
     // Called only after all old submissions have reliably completed.
   private:

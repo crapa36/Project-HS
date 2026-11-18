@@ -42,8 +42,10 @@ inline Result ValidatePackedCatalog(const RendererConfig &config)
         config.packed_geometry, config.packed_materials, config.packed_characters,
         config.packed_animations, config.packed_vfx_mesh_atlas,
         config.packed_source_revisions, config.packed_revision_bulks};
-    if (config.packed_content && (!config.packed_content->Identity() || view.bulks.empty()))
+    if (!config.packed_content || !config.packed_content->Identity() || view.bulks.empty())
         return Result::Failure(ErrorCode::InvalidArgument, "RendererPack", "Pack owner or catalogue is absent.");
+    if (config.development_catalog)
+        return Result::Failure(ErrorCode::InvalidArgument,"RendererPack","A development catalogue cannot use a pack owner.");
     const auto same = [](auto a, auto b) { return a.size() == b.size() && (a.empty() || a.data() == b.data()); };
     const auto matches = [&](const render_data::RendererCatalogView &prepared) {
         return same(view.bulks,prepared.bulks) && same(view.textures,prepared.textures) &&
@@ -52,23 +54,14 @@ inline Result ValidatePackedCatalog(const RendererConfig &config)
             view.atlas == prepared.atlas && same(view.source_revisions,prepared.source_revisions) &&
             same(view.revision_bulks,prepared.revision_bulks);
     };
-    // Both factories own immutable metadata; only owner/binding identity remains dynamic.
     if (config.prepared_renderer_catalog)
     {
-        if (config.development_catalog || !config.packed_content ||
-            config.packed_content->Size() != config.prepared_renderer_catalog->PackSize() ||
+        if (config.packed_content->Size() != config.prepared_renderer_catalog->PackSize() ||
             !matches(config.prepared_renderer_catalog->View()))
             return Result::Failure(ErrorCode::InvalidArgument,"RendererPack","Prepared catalogue owner or bindings differ.");
         return Result::Success();
     }
-    if (config.development_catalog)
-    {
-        if (config.packed_content || !matches(config.development_catalog->View()))
-            return Result::Failure(ErrorCode::InvalidArgument,"RendererPack","Development catalogue owner or bindings differ.");
-        return Result::Success();
-    }
-    const auto valid = render_data::ValidateRendererCatalog(view,
-        config.packed_content ? std::optional{config.packed_content->Size()} : std::nullopt);
+    const auto valid = render_data::ValidateRendererCatalog(view, config.packed_content->Size());
     return valid ? Result::Success() : Result::Failure(ErrorCode::InvalidArgument,"RendererPack",std::string(valid.Message()));
 }
 
@@ -110,7 +103,6 @@ inline render_data::TexturePackageView ReadRendererTexturePackage(const Renderer
     const auto asset = MakeAssetId(id);
     if (config.development_catalog)
         return render_data::BindTextureDescriptor(bytes, config.development_catalog->AdmitTexture(asset, bytes));
-    if (!config.packed_content) return render_data::ReadTexturePackage(bytes, asset);
     const auto handle = FindRendererTexture(config, asset);
     if (!handle) throw std::runtime_error("Missing compiled texture descriptor: " + std::string(id));
     return render_data::BindTextureDescriptor(bytes, config.packed_textures[handle.value]);
@@ -122,7 +114,6 @@ inline render_data::VolumeTexturePackageView ReadRendererVolumeTexturePackage(co
     const auto asset = MakeAssetId(id);
     if (config.development_catalog)
         return render_data::BindVolumeTextureDescriptor(bytes, config.development_catalog->AdmitTexture(asset, bytes));
-    if (!config.packed_content) return render_data::ReadVolumeTexturePackage(bytes, asset);
     const auto handle = FindRendererTexture(config, asset);
     if (!handle) throw std::runtime_error("Missing compiled volume texture descriptor: " + std::string(id));
     return render_data::BindVolumeTextureDescriptor(bytes, config.packed_textures[handle.value]);
@@ -130,7 +121,7 @@ inline render_data::VolumeTexturePackageView ReadRendererVolumeTexturePackage(co
 
 template <class TextureView>
 inline bool RendererTextureDependencyMatches(const RendererConfig &config, std::string_view id,
-    const TextureView &view, std::string_view dependency)
+    const TextureView &, std::string_view dependency)
 {
     if (config.development_catalog)
     {
@@ -138,7 +129,6 @@ inline bool RendererTextureDependencyMatches(const RendererConfig &config, std::
         return descriptor && descriptor->dependencies.size() == 1 &&
             descriptor->dependencies[0].value == MakeAssetId(dependency).value;
     }
-    if (!config.packed_content) return view.dependencies.size() == 1 && view.dependencies[0] == dependency;
     const auto handle = FindRendererTexture(config, MakeAssetId(id));
     if (!handle) return false;
     const auto dependencies = config.packed_textures[handle.value].dependencies;
@@ -190,13 +180,10 @@ inline Result ResolveRendererAsset(const RendererConfig &config, std::string_vie
         std::optional<LooseRendererAsset::WholeFileProof> proof;
         if (config.development_catalog)
         {
-            const auto asset = MakeAssetId(logical).value;
-            const auto found = std::lower_bound(config.packed_bulks.begin(), config.packed_bulks.end(), asset,
-                [](const auto &entry, std::uint64_t value) { return entry.asset_id.value < value; });
-            if (found != config.packed_bulks.end() && found->asset_id.value == asset)
-                if (found->range.byte_count)
-                    proof = LooseRendererAsset::WholeFileProof{
-                        found->range.byte_count, found->range.expected_digest};
+            if (const auto *found = FindCanonicalRendererBulk(config, logical);
+                found && found->range.byte_count)
+                proof = LooseRendererAsset::WholeFileProof{
+                    found->range.byte_count, found->range.expected_digest};
         }
         source = RendererAssetSource::Loose(std::move(path), std::move(proof));
     }
@@ -295,6 +282,15 @@ inline std::string RendererProductDigest(const RendererConfig &config, std::stri
     }
     const auto found = config.product_digests.find(logical);
     return found == config.product_digests.end() ? std::string{} : found->second;
+}
+
+inline Result ResolveRendererGeometrySource(const RendererConfig &config, std::string_view id,
+    RendererAssetSource &output)
+{
+    if (auto result = ResolveRendererAsset(config, id, output, false); !result) return result;
+    if (output.IsPacked()) return Result::Success();
+    return std::get<LooseRendererAsset>(output.storage).BindExpectedDigest(
+        RendererProductDigest(config, id, false));
 }
 
 } // namespace hs

@@ -27,7 +27,7 @@ namespace
 using Microsoft::WRL::ComPtr;
 constexpr std::string_view kProduct="render/lighting/local_probes.spkg";
 std::atomic<std::uint64_t> g_local_probe_generation{};
-constexpr std::array<std::string_view,2> kShaders{"render/shader/local_probe_sh_cs.dxil","render/shader/local_probe_ggx_cs.dxil"};
+constexpr std::array<std::string_view,2> kShaders{"lighting/producer/local_probe_sh_cs.dxil","lighting/producer/local_probe_ggx_cs.dxil"};
 constexpr std::uint32_t kBakeSrvCount=6;
 Result Failure(ErrorCode code,std::string message)
 { return Result::Failure(code,"hs_renderer_local_probe",std::move(message)); }
@@ -691,12 +691,6 @@ LocalProbeBakeStatus LocalProbeSystem::BakeStatus(const CompletionSet &completed
     return {s->capture_sources_ready,s->bake_submitted&&s->captured_views==total&&
         (s->package_baked||s->finished_capture_identity==s->capture_identity)&&
         s->bake_completion.IsSatisfiedBy(completed)};
-}
-bool LocalProbeSystem::CaptureIdentityPending(const CompletionSet &completed) const noexcept
-{
-    const auto &s=impl_->storage;
-    return s&&s->usable&&s->capture_ready&&s->current_request&&
-        (!s->bake_submitted||!s->bake_completion.IsSatisfiedBy(completed));
 }
 #endif
 #if !defined(HS_OFFLINE_PROBE_BAKER)

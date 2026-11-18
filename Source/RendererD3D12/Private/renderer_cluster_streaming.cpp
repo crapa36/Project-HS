@@ -521,7 +521,7 @@ Result D3D12Renderer::Impl::PumpClusterStreaming(std::uint32_t frame_slot)
             static_cast<void>(residency.ReleaseNow(ticket));
         stream.read_residency = {}; stream.decoded_residency = {};
         stream.decoded = {};
-        std::vector<std::byte>{}.swap(stream.read_storage);
+        stream.read_storage.Reset();
         stream.upload_pending = true;
     }
     if (hlod_runtime)

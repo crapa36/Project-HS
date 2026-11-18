@@ -12,7 +12,6 @@ void SkinCache::BeginFrame(bool reset_history)
     preparing_ = true;
     reset_history_ = reset_history;
     active_count_ = 0;
-    history_valid_count_ = 0;
 }
 
 SkinCacheSample SkinCache::Resolve(RenderSceneInstanceKey key,
@@ -52,7 +51,6 @@ SkinCacheSample SkinCache::Resolve(RenderSceneInstanceKey key,
     if (inserted)
     {
         ++active_count_;
-        if (sample.history_valid) ++history_valid_count_;
     }
     return sample;
 }
@@ -76,7 +74,6 @@ void SkinCache::Clear() noexcept
     entries_.clear();
     Abort();
     active_count_ = 0;
-    history_valid_count_ = 0;
 }
 
 } // namespace hs

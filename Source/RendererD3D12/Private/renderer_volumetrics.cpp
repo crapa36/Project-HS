@@ -545,11 +545,6 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
     {
         if(!MatchesLayout(in,*retained))
             return Fail(ErrorCode::InvalidState,"Volumetric retained topology variant changed.");
-        for(UINT stage=0;stage<6;++stage)
-            if(!graph.BindPass(retained->pass_index[stage],170+stage))
-                return Fail(ErrorCode::InvalidState,"Volumetric retained pass changed.");
-        if(retained->hero&&!graph.BindPass(retained->pass_index[6],176))
-            return Fail(ErrorCode::InvalidState,"Volumetric retained hero pass changed.");
         for(UINT index=0;index<retained->imports.size();++index)
         {
             const bool used=index!=2||retained->hero;
@@ -682,6 +677,20 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
     }
     for(auto *resource:s->Resources())if(resource->resource)
         if(auto certified=resource->EnsureNativeContract(s->device.Get());!certified)return certified;
+    std::optional<std::uint32_t> next_pass;
+    if (retained) next_pass = retained->first_pass;
+    else if (layout) layout->first_pass = graph.PassCount();
+    auto density_pass = graph.AddOrBindNextPass(next_pass, 170, "VolumetricDensity");
+    auto hero_pass = next.heroes_state.empty() ? std::nullopt :
+        graph.AddOrBindNextPass(next_pass, 176, "VolumetricHeroDensity");
+    auto lighting_pass = graph.AddOrBindNextPass(next_pass, 171, "VolumetricLighting");
+    auto temporal_pass = graph.AddOrBindNextPass(next_pass, 172, "VolumetricTemporal");
+    auto spatial_pass = graph.AddOrBindNextPass(next_pass, 173, "VolumetricSpatial");
+    auto integrate_pass = graph.AddOrBindNextPass(next_pass, 174, "VolumetricIntegrate");
+    auto resolve_pass = graph.AddOrBindNextPass(next_pass, 175, "VolumetricResolve");
+    if (!density_pass || (!next.heroes_state.empty() && !hero_pass) || !lighting_pass ||
+        !temporal_pass || !spatial_pass || !integrate_pass || !resolve_pass)
+        return Fail(ErrorCode::InvalidState, "Volumetric retained pass changed.");
     auto &lease=s->slots[next.slot];lease.binder={};lease.reads.clear();impl_->pending=std::move(next);auto &p=impl_->pending;
     bool imports_valid=true;
     auto import=[&](AllocationResource &resource,std::string_view name,UINT index)
@@ -804,9 +813,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
     // These CPU-upload buffers have no graph writers; descriptors still select
     // the waited slot, while whole-buffer reads keep slot offsets out of topology.
     auto constants=[&](PassBuilder &pass){pass.Read(p.constants,Access::ComputeRead);};
-    if(layout)layout->pass_index[0]=graph.PassCount();
-    auto density=retained?*graph.BindPass(retained->pass_index[0],170):
-        graph.AddPass(170,"VolumetricDensity",QueueHint::Direct);
+    auto &density = *density_pass;
     if(!retained)
     {
         constants(density);
@@ -820,9 +827,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
     if(!p.heroes_state.empty())
     {
         if(!retained)*uav_versions[VmUavRaw]=density.Write(*uav_versions[VmUavRaw],Access::UnorderedWrite);
-        if(layout)layout->pass_index[6]=graph.PassCount();
-        auto hero=retained?*graph.BindPass(retained->pass_index[6],176):
-            graph.AddPass(176,"VolumetricHeroDensity",QueueHint::Direct);
+        auto &hero = *hero_pass;
         if(!retained)
         {
             constants(hero);
@@ -848,9 +853,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
             return Result::Success();
         });
     }
-    if(layout)layout->pass_index[1]=graph.PassCount();
-    auto lighting=retained?*graph.BindPass(retained->pass_index[1],171):
-        graph.AddPass(171,"VolumetricLighting",QueueHint::Direct);
+    auto &lighting = *lighting_pass;
     if(!retained)
     {
         constants(lighting);
@@ -874,9 +877,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
             lighting.ReadWrite(*uav_versions[VmUavRaw],Access::UnorderedWrite);
     }
     lighting.SetExecuteChecked(execute(1));
-    if(layout)layout->pass_index[2]=graph.PassCount();
-    auto temporal=retained?*graph.BindPass(retained->pass_index[2],172):
-        graph.AddPass(172,"VolumetricTemporal",QueueHint::Direct);
+    auto &temporal = *temporal_pass;
     if(!retained)
     {
         constants(temporal);
@@ -887,9 +888,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
         *uav_versions[VmUavCurrent]=temporal.Write(*uav_versions[VmUavCurrent],Access::UnorderedWrite);
     }
     temporal.SetExecuteChecked(execute(2));
-    if(layout)layout->pass_index[3]=graph.PassCount();
-    auto spatial=retained?*graph.BindPass(retained->pass_index[3],173):
-        graph.AddPass(173,"VolumetricSpatial",QueueHint::Direct);
+    auto &spatial = *spatial_pass;
     if(!retained)
     {
         constants(spatial);
@@ -899,9 +898,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
         *uav_versions[VmUavFiltered]=spatial.Write(*uav_versions[VmUavFiltered],Access::UnorderedWrite);
     }
     spatial.SetExecuteChecked(execute(3));
-    if(layout)layout->pass_index[4]=graph.PassCount();
-    auto integrate=retained?*graph.BindPass(retained->pass_index[4],174):
-        graph.AddPass(174,"VolumetricIntegrate",QueueHint::Direct);
+    auto &integrate = *integrate_pass;
     if(!retained)
     {
         constants(integrate);
@@ -912,9 +909,7 @@ Result VolumetricSystem::RegisterImpl(RenderGraphBuilder &graph,const Volumetric
 #undef HS_VM_WRITE
     }
     integrate.SetExecuteChecked(execute(4));
-    if(layout)layout->pass_index[5]=graph.PassCount();
-    auto resolve=retained?*graph.BindPass(retained->pass_index[5],175):
-        graph.AddPass(175,"VolumetricResolve",QueueHint::Direct);
+    auto &resolve = *resolve_pass;
     if(!retained)
     {
         constants(resolve);

@@ -34,7 +34,6 @@ struct HlodRuntimeFrame
     std::uint32_t prepared_generation{};
     std::uint32_t prepared_hlod_generation{};
     std::size_t prepared_leaf_count{};
-    std::uint64_t prepared_pipeline_revision{};
     bool enabled{}, registered{}, readback_pending{};
 };
 struct HlodViewRuntime

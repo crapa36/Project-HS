@@ -20,7 +20,6 @@
 
 namespace hs
 {
-#if defined(HS_DEVELOPMENT_TOOLS)
 FrameContext *D3D12Renderer::Impl::SubmittedFrame(const OwnedView &owner) noexcept
 {
     if (owner.last_submitted_frame_slot >= kFrameCount || !owner.last_submitted_frame_id) return nullptr;
@@ -159,7 +158,7 @@ Result D3D12Renderer::Impl::WritePng(const std::filesystem::path &path,
     return Result::Success();
 }
 
-Result D3D12Renderer::CapturePng(const std::filesystem::path &path, ViewId view_id)
+Result D3D12Renderer::CaptureOutputAndParticles(const std::filesystem::path &path, ViewId view_id)
 {
     if (!impl_->initialized)
     {
@@ -180,8 +179,11 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path, ViewId view_
     UINT rows{};
     UINT64 row_size{};
     UINT64 total_size{};
-    impl_->device->GetCopyableFootprints(&description, 0, 1, 0, &footprint, &rows, &row_size,
-                                         &total_size);
+    if (!path.empty())
+    {
+        impl_->device->GetCopyableFootprints(&description, 0, 1, 0, &footprint, &rows, &row_size,
+                                             &total_size);
+    }
 
     constexpr auto particle_argument_bytes = kParticleDrawBinCount * kRibbonArgumentStride;
     AllocationResource readback;
@@ -207,19 +209,26 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path, ViewId view_
     {
         return HResultFailure("Reset capture list", result);
     }
-    impl_->TransitionTexture(output.Get(),
-                             D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE,
-                             D3D12_BARRIER_LAYOUT_PRESENT,
-                             D3D12_BARRIER_LAYOUT_COPY_SOURCE);
+    if (!path.empty())
+    {
+        impl_->TransitionTexture(output.Get(),
+                                 D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                 D3D12_BARRIER_LAYOUT_PRESENT,
+                                 D3D12_BARRIER_LAYOUT_COPY_SOURCE);
 
-    D3D12_TEXTURE_COPY_LOCATION destination{};
-    destination.pResource = readback.resource.Get();
-    destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    destination.PlacedFootprint = footprint;
-    D3D12_TEXTURE_COPY_LOCATION source{};
-    source.pResource = output.Get();
-    source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    impl_->command_list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        D3D12_TEXTURE_COPY_LOCATION destination{};
+        destination.pResource = readback.resource.Get();
+        destination.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        destination.PlacedFootprint = footprint;
+        D3D12_TEXTURE_COPY_LOCATION source{};
+        source.pResource = output.Get();
+        source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        impl_->command_list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
+        impl_->TransitionTexture(output.Get(),
+                                 D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT,
+                                 D3D12_BARRIER_LAYOUT_COPY_SOURCE,
+                                 D3D12_BARRIER_LAYOUT_PRESENT);
+    }
     impl_->TransitionBuffer(
         impl_->indirect_arguments.resource.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
         D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_BARRIER_SYNC_COMPUTE_SHADING,
@@ -233,10 +242,6 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path, ViewId view_
         D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_BARRIER_SYNC_COPY,
         D3D12_BARRIER_SYNC_COMPUTE_SHADING, D3D12_BARRIER_ACCESS_COPY_SOURCE,
         D3D12_BARRIER_ACCESS_UNORDERED_ACCESS);
-    impl_->TransitionTexture(output.Get(),
-                             D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT,
-                             D3D12_BARRIER_LAYOUT_COPY_SOURCE,
-                             D3D12_BARRIER_LAYOUT_PRESENT);
     if (auto wait = SubmitCaptureCopy(*impl_, frame.allocator.Get(), readback); !wait)
     {
         return wait;
@@ -250,52 +255,31 @@ Result D3D12Renderer::CapturePng(const std::filesystem::path &path, ViewId view_
     {
         return HResultFailure("Map capture", result);
     }
-    auto *png_pixels = static_cast<const std::byte *>(mapped_data);
-    auto png_pitch = footprint.Footprint.RowPitch;
-    std::vector<std::byte> preview;
-    if (description.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
+    auto write = Result::Success();
+    if (!path.empty())
     {
-        HdrPreview(png_pixels, png_pitch, view.width, view.height,
-                   view.display_state.paper_white_nits, preview);
-        png_pixels = preview.data();
-        png_pitch = view.width * 4;
+        auto *png_pixels = static_cast<const std::byte *>(mapped_data);
+        auto png_pitch = footprint.Footprint.RowPitch;
+        std::vector<std::byte> preview;
+        if (description.Format == DXGI_FORMAT_R10G10B10A2_UNORM)
+        {
+            HdrPreview(png_pixels, png_pitch, view.width, view.height,
+                       view.display_state.paper_white_nits, preview);
+            png_pixels = preview.data();
+            png_pitch = view.width * 4;
+        }
+        write = impl_->WritePng(path, png_pixels, png_pitch, {view.width, view.height});
     }
-    const auto write = impl_->WritePng(path, png_pixels, png_pitch, {view.width, view.height});
-    std::array<D3D12_DRAW_ARGUMENTS, kParticleDrawBinCount> particle_draws{};
     impl_->last_particle_count = 0;
-    for (std::size_t bin = 0; bin < particle_draws.size(); ++bin)
+    for (std::size_t bin = 0; bin < kParticleDrawBinCount; ++bin)
     {
-        std::memcpy(&particle_draws[bin], static_cast<const std::byte *>(mapped_data) +
+        D3D12_DRAW_ARGUMENTS draw{};
+        std::memcpy(&draw, static_cast<const std::byte *>(mapped_data) +
             total_size + bin * kRibbonArgumentStride + sizeof(std::uint32_t), sizeof(D3D12_DRAW_ARGUMENTS));
-        impl_->last_particle_count += particle_draws[bin].InstanceCount;
+        impl_->last_particle_count += draw.InstanceCount;
     }
-    std::ofstream particle_stats(path.parent_path() / "particle_stats.json", std::ios::trunc);
-    particle_stats << std::format("{{\"alive\":{},\"capacity\":{},\"draw_bins\":[",
-        impl_->last_particle_count, kParticleCount * std::clamp(impl_->config.particle_percentage, 50u, 100u) / 100u);
-    for (std::size_t bin = 0; bin < particle_draws.size(); ++bin)
-    {
-        if (bin != 0) particle_stats << ',';
-        particle_stats << std::format("{{\"bin\":{},\"vertices\":{},\"instances\":{}}}",
-            bin, particle_draws[bin].VertexCountPerInstance, particle_draws[bin].InstanceCount);
-    }
-    particle_stats << "]}\n";
     D3D12_RANGE no_write{};
     readback.resource->Unmap(0, &no_write);
-    if (const auto *hlod = impl_->ActiveHlodView(); write && hlod)
-    {
-        const auto &admission = impl_->hlod_runtime->admission_status;
-        std::ofstream stats(path.parent_path() / "hlod_stats.json", std::ios::trunc);
-        stats << std::format(
-            "{{\"matching_scene\":{},\"demand_frame_id\":{},\"fault_bits\":{},"
-            "\"selected_proxies\":{},\"selected_groups\":{},\"admitted_groups\":{},"
-            "\"admitted_pages\":{},\"missing_slots\":{},\"optional_capacity\":{}}}\n",
-            static_cast<bool>(hlod->matching_scene), hlod->demand_frame_id,
-            hlod->last_status[0], hlod->last_status[1], hlod->last_status[2],
-            admission[0], admission[1], admission[2], admission[3]);
-        if (!stats)
-            return Result::Failure(ErrorCode::TaskFailed, "hs_renderer_d3d12",
-                                   "Could not write HLOD capture statistics.");
-    }
     return write;
 }
 
@@ -323,6 +307,7 @@ struct SurfaceCapture
     switch (format)
     {
     case DXGI_FORMAT_R32_UINT: return "DXGI_FORMAT_R32_UINT";
+    case DXGI_FORMAT_R16_UINT: return "DXGI_FORMAT_R16_UINT";
     case DXGI_FORMAT_R32G32_UINT: return "DXGI_FORMAT_R32G32_UINT";
     case DXGI_FORMAT_R16G16_SNORM: return "DXGI_FORMAT_R16G16_SNORM";
     case DXGI_FORMAT_R8G8B8A8_UNORM: return "DXGI_FORMAT_R8G8B8A8_UNORM";
@@ -439,6 +424,12 @@ struct CaptureNativeAccess
         if (texture) return false;
         native = {D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER,
                   D3D12_BARRIER_SYNC_VERTEX_SHADING, D3D12_BARRIER_ACCESS_VERTEX_BUFFER,
+                  D3D12_BARRIER_LAYOUT_COMMON};
+        return true;
+    case Access::ConstantBuffer:
+        if (texture) return false;
+        native = {D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER,
+                  D3D12_BARRIER_SYNC_ALL_SHADING, D3D12_BARRIER_ACCESS_CONSTANT_BUFFER,
                   D3D12_BARRIER_LAYOUT_COMMON};
         return true;
     case Access::IndexBuffer:
@@ -708,7 +699,7 @@ template <typename Impl>
 }
 } // namespace
 
-Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &path)
+Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &path, std::ostream *summary)
 {
     if (!impl_->initialized)
     {
@@ -787,85 +778,100 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
     if (owner.decal_surface_active &&
         (!decal_surfaces[0] || !decal_surfaces[1] || !decal_surfaces[2]))
         return contract_failure("Submitted decal Surface exports are unavailable for capture.");
-    const auto *surface_base = owner.decal_surface_active ? decal_surfaces[0] : &owner.targets.gbuffer_base;
-    const auto *surface_normal = owner.decal_surface_active ? decal_surfaces[1] : &owner.targets.gbuffer_normal;
-    const auto *surface_material = owner.decal_surface_active ? decal_surfaces[2] : &owner.targets.gbuffer_material;
+    const auto history_current = owner.temporal_read_index;
+    const auto light_resources = owner.light_list.DiagnosticResources();
     std::vector<SurfaceCapture> surfaces{
         SurfaceCapture{"gbuffer_metadata", &owner.targets.gbuffer_metadata,
                        DXGI_FORMAT_R32_UINT, Access::ShaderRead},
-        SurfaceCapture{"gbuffer_normal", surface_normal,
-                       DXGI_FORMAT_R16G16_SNORM, Access::ShaderRead},
-        SurfaceCapture{"gbuffer_material", surface_material,
-                       DXGI_FORMAT_R8G8B8A8_UNORM, Access::ShaderRead},
+    };
+    if (!summary)
+    {
+        const auto *surface_normal = owner.decal_surface_active ? decal_surfaces[1] : &owner.targets.gbuffer_normal;
+        const auto *surface_material = owner.decal_surface_active ? decal_surfaces[2] : &owner.targets.gbuffer_material;
+        surfaces.insert(surfaces.end(), {
+            SurfaceCapture{"gbuffer_normal", surface_normal,
+                           DXGI_FORMAT_R16G16_SNORM, Access::ShaderRead},
+            SurfaceCapture{"gbuffer_material", surface_material,
+                           DXGI_FORMAT_R8G8B8A8_UNORM, Access::ShaderRead},
+        });
+    }
+    const auto motion_index = surfaces.size();
+    surfaces.insert(surfaces.end(), {
         SurfaceCapture{"gbuffer_motion", &owner.targets.gbuffer_motion,
                        DXGI_FORMAT_R16G16_FLOAT, Access::ShaderRead},
         SurfaceCapture{"surface_history", &owner.targets.gbuffer_surface_history,
                        DXGI_FORMAT_R32G32_FLOAT, Access::ShaderRead},
         SurfaceCapture{"depth", &owner.targets.depth, DXGI_FORMAT_R32_TYPELESS, Access::DepthWrite},
-        SurfaceCapture{"gbuffer_base", surface_base,
-                       DXGI_FORMAT_R8G8B8A8_UNORM, Access::ShaderRead},
-        SurfaceCapture{"lighting_hdr", &owner.targets.hdr_color,
-                       DXGI_FORMAT_R16G16B16A16_FLOAT, Access::ShaderRead},
-        SurfaceCapture{"composite_hdr", &owner.targets.composite_hdr,
-                       DXGI_FORMAT_R16G16B16A16_FLOAT, Access::ShaderRead},
-        SurfaceCapture{"oit_accumulation", &owner.targets.oit_accumulation,
-                       DXGI_FORMAT_R32G32B32A32_FLOAT, Access::ShaderRead},
-        SurfaceCapture{"oit_revealage", &owner.targets.oit_revealage,
-                       DXGI_FORMAT_R16_FLOAT, Access::ShaderRead},
-    };
-    // Only the last submitted view can make the CSM atlas current.
-    if (owner.shadow_atlas_active)
-        surfaces.push_back(SurfaceCapture{"shadow_atlas", &owner.targets.shadow,
-                           DXGI_FORMAT_R32_TYPELESS, Access::DepthWrite});
-    for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
-        surfaces.push_back(SurfaceCapture{plane == 0 ? "material_sidecar_0" : "material_sidecar_1",
-            &owner.targets.material_sidecars[plane], impl_->MaterialSidecarFormat(plane), Access::ShaderRead});
+    });
+    auto gbuffer_count = surfaces.size();
     const auto append_diagnostic = [&](const char *name, const AllocationResource *resource) {
         if (resource && resource->resource && resource->graph_access != Access::Undefined)
             surfaces.push_back(SurfaceCapture{name, resource, resource->resource->GetDesc().Format,
                                                resource->graph_access});
     };
-    const auto history_current = owner.temporal_read_index;
-    const auto history_previous = 1u - history_current;
-    append_diagnostic("temporal_current", &owner.targets.temporal_history[history_current]);
-    append_diagnostic("temporal_previous", &owner.targets.temporal_history[history_previous]);
-    append_diagnostic("temporal_normal_previous", &owner.targets.temporal_normal_history[history_previous]);
-    append_diagnostic("temporal_material_previous", &owner.targets.temporal_material_history[history_previous]);
-    append_diagnostic("exposure_current", &owner.exposure_value);
-    append_diagnostic("exposure_previous", &owner.exposure_value);
-    constexpr std::array ao_names{"ao_raw", "ao_resolved", "ao_contact", "ao_history", "ao_previous_history"};
-    const auto ao_resources = owner.ambient_occlusion.DiagnosticResources();
-    for (std::size_t index = 0; index < ao_resources.size(); ++index)
-        append_diagnostic(ao_names[index], ao_resources[index]);
-    constexpr std::array ssr_names{"ssr_raw", "ssr_history", "ssr_validation"};
-    const auto ssr_resources = owner.screen_reflections.DiagnosticResources(owner.frame_number - 1u);
-    for (std::size_t index = 0; index < ssr_resources.size(); ++index)
-        append_diagnostic(ssr_names[index], ssr_resources[index]);
-#if defined(HS_DEVELOPMENT_TOOLS)
-    if (owner.translucency_capture_active)
+    if (!summary)
     {
-        constexpr std::array names{"translucency_depth", "translucency_motion", "translucency_history",
-            "translucency_classification", "translucency_metadata", "translucency_unpeeled", "translucency_transport", "translucency_color",
-            "translucency_depth_layer1", "translucency_optical_component_0", "translucency_optical_component_1",
-            "translucency_optical_component_2", "translucency_optical_component_3", "translucency_exit_depth",
-            "translucency_metadata_layer1"};
-        const auto resources = owner.translucency.DiagnosticResources();
-        for (std::size_t index = 0; index < resources.size(); ++index)
-            append_diagnostic(names[index], resources[index]);
-    }
+        const auto *surface_base = owner.decal_surface_active ? decal_surfaces[0] : &owner.targets.gbuffer_base;
+        surfaces.push_back(SurfaceCapture{"gbuffer_base", surface_base,
+            DXGI_FORMAT_R8G8B8A8_UNORM, Access::ShaderRead});
+        gbuffer_count = surfaces.size();
+        surfaces.insert(surfaces.end(), {
+            SurfaceCapture{"lighting_hdr", &owner.targets.hdr_color,
+                           DXGI_FORMAT_R16G16B16A16_FLOAT, Access::ShaderRead},
+            SurfaceCapture{"composite_hdr", &owner.targets.composite_hdr,
+                           DXGI_FORMAT_R16G16B16A16_FLOAT, Access::ShaderRead},
+            SurfaceCapture{"oit_accumulation", &owner.targets.oit_accumulation,
+                           DXGI_FORMAT_R32G32B32A32_FLOAT, Access::ShaderRead},
+            SurfaceCapture{"oit_revealage", &owner.targets.oit_revealage,
+                           DXGI_FORMAT_R16G16_FLOAT, Access::ShaderRead},
+        });
+        // Only the last submitted view can make the CSM atlas current.
+        if (owner.shadow_atlas_active)
+            surfaces.push_back(SurfaceCapture{"shadow_atlas", &owner.shadow_atlas,
+                               DXGI_FORMAT_R32_TYPELESS, Access::DepthWrite});
+        for (std::uint32_t plane = 0; plane < impl_->material_sidecar_layout.plane_count; ++plane)
+            surfaces.push_back(SurfaceCapture{plane == 0 ? "material_sidecar_0" : "material_sidecar_1",
+                &owner.targets.material_sidecars[plane], impl_->MaterialSidecarFormat(plane), Access::ShaderRead});
+        const auto history_previous = 1u - history_current;
+        append_diagnostic("temporal_current", &owner.targets.temporal_history[history_current]);
+        append_diagnostic("temporal_previous", &owner.targets.temporal_history[history_previous]);
+        append_diagnostic("temporal_normal_previous", &owner.targets.temporal_normal_history[history_previous]);
+        append_diagnostic("temporal_material_previous", &owner.targets.temporal_material_history[history_previous]);
+        append_diagnostic("exposure_current", &owner.exposure_value);
+        append_diagnostic("exposure_previous", &owner.exposure_value);
+        constexpr std::array ao_names{"ao_raw", "ao_resolved", "ao_contact", "ao_history", "ao_previous_history"};
+        const auto ao_resources = owner.ambient_occlusion.DiagnosticResources();
+        for (std::size_t index = 0; index < ao_resources.size(); ++index)
+            append_diagnostic(ao_names[index], ao_resources[index]);
+        constexpr std::array ssr_names{"ssr_raw", "ssr_history", "ssr_validation"};
+        const auto ssr_resources = owner.screen_reflections.DiagnosticResources(owner.frame_number - 1u);
+        for (std::size_t index = 0; index < ssr_resources.size(); ++index)
+            append_diagnostic(ssr_names[index], ssr_resources[index]);
+#if defined(HS_DEVELOPMENT_TOOLS)
+        if (owner.translucency_capture_active)
+        {
+            constexpr std::array names{"translucency_depth", "translucency_motion", "translucency_history",
+                "translucency_classification", "translucency_metadata", "translucency_transport", "translucency_color",
+                "translucency_depth_layer1", "translucency_optical_component_0", "translucency_optical_component_1",
+                "translucency_optical_component_2", "translucency_optical_component_3", "translucency_exit_depth",
+                "translucency_metadata_layer1"};
+            const auto resources = owner.translucency.DiagnosticResources();
+            for (std::size_t index = 0; index < resources.size(); ++index)
+                append_diagnostic(names[index], resources[index]);
+        }
 #endif
-    const auto adaptive_resources = owner.adaptive_shading.DiagnosticResources();
-    append_diagnostic("adaptive_density", adaptive_resources[0]);
-    append_diagnostic("adaptive_rate", adaptive_resources[1]);
-    constexpr std::array shadow_names{"virtual_shadow_metadata", "virtual_shadow_pages",
-        "virtual_shadow_static", "virtual_shadow_dynamic", "virtual_shadow_counts"};
-    const auto shadow_resources = owner.virtual_shadows.DiagnosticResources();
-    for (std::size_t index = 0; index < shadow_resources.size(); ++index)
-        append_diagnostic(shadow_names[index], shadow_resources[index]);
-    constexpr std::array light_names{"light_records", "light_grid"};
-    const auto light_resources = owner.light_list.DiagnosticResources();
-    for (std::size_t index = 0; index < light_resources.resources.size(); ++index)
-        append_diagnostic(light_names[index], light_resources.resources[index]);
+        const auto adaptive_resources = owner.adaptive_shading.DiagnosticResources();
+        append_diagnostic("adaptive_density", adaptive_resources[0]);
+        append_diagnostic("adaptive_rate", adaptive_resources[1]);
+        constexpr std::array shadow_names{"virtual_shadow_metadata", "virtual_shadow_pages",
+            "virtual_shadow_static", "virtual_shadow_dynamic", "virtual_shadow_counts"};
+        const auto shadow_resources = owner.virtual_shadows.DiagnosticResources();
+        for (std::size_t index = 0; index < shadow_resources.size(); ++index)
+            append_diagnostic(shadow_names[index], shadow_resources[index]);
+        constexpr std::array light_names{"light_records", "light_grid"};
+        for (std::size_t index = 0; index < light_resources.resources.size(); ++index)
+            append_diagnostic(light_names[index], light_resources.resources[index]);
+    }
     if (terrain_submission_available)
     {
         append_diagnostic("terrain_static_scene", static_scene ? &static_scene->instances : nullptr);
@@ -896,14 +902,14 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         surface.final_sync = native.sync;
         surface.final_native_access = native.access;
         surface.final_layout = native.layout;
-        surface.raw_path = path.parent_path() /
-            (path.stem().string() + "." + surface.name + ".raw");
+        if (!summary)
+            surface.raw_path = path.parent_path() / (path.stem().string() + "." + surface.name + ".raw");
     }
 
     const auto width = static_cast<std::uint32_t>(
         surfaces.front().resource->resource->GetDesc().Width);
     const auto height = surfaces.front().resource->resource->GetDesc().Height;
-    for (const auto &surface : std::span(surfaces).first(7))
+    for (const auto &surface : std::span(surfaces).first(gbuffer_count))
     {
         const auto description = surface.resource->resource->GetDesc();
         if (description.Width != width || description.Height != height)
@@ -1009,13 +1015,10 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
             static_cast<std::size_t>(x) * (surface.row_size / width);
     };
     const auto &metadata = surfaces[0];
-    const auto &motion = surfaces[3];
-    const auto &history = surfaces[4];
-    const auto &depth = surfaces[5];
+    const auto &motion = surfaces[motion_index];
+    const auto &history = surfaces[motion_index + 1];
+    const auto &depth = surfaces[motion_index + 2];
     std::uint64_t foreground_depth_pixels{};
-    std::uint64_t background_depth_pixels{};
-    std::uint64_t foreground_valid_metadata_pixels{};
-    std::uint64_t background_invalid_metadata_pixels{};
     std::uint64_t historical_foreground_pixels{};
     std::uint64_t nonzero_motion_pixels{};
     std::uint64_t grass_pixels{}, historical_grass_pixels{}, moving_grass_pixels{};
@@ -1054,7 +1057,6 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
                 depth_max = std::max(depth_max, depth_value);
                 if (!valid_metadata)
                     return unmap_failure("Foreground metadata is not marked valid.");
-                ++foreground_valid_metadata_pixels;
                 if ((metadata_flags & (3u << 8u)) == (2u << 8u))
                 {
                     ++grass_pixels;
@@ -1075,11 +1077,9 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
             }
             else if (depth_value == 0.0f)
             {
-                ++background_depth_pixels;
                 if (metadata_material != render_data::SurfaceLayout::invalid_material ||
                     metadata_flags != render_data::SurfaceLayout::invalid_material)
                     return unmap_failure("Background metadata is not cleared.");
-                ++background_invalid_metadata_pixels;
             }
             else
             {
@@ -1087,13 +1087,7 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
             }
         }
     }
-    // Viewport coverage is a fixture choice: a valid frame may contain only
-    // foreground or only cleared background. Validate every sampled surface.
-    if (foreground_valid_metadata_pixels != foreground_depth_pixels ||
-        background_invalid_metadata_pixels != background_depth_pixels)
-        return unmap_failure("Surface diagnostic contract counters are invalid.");
-
-    for (auto &surface : surfaces)
+    if (!summary) for (auto &surface : surfaces)
     {
         std::ofstream raw(surface.raw_path, std::ios::binary | std::ios::trunc);
         if (!raw)
@@ -1126,7 +1120,9 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
             return unmap_failure("Could not write surface diagnostic raw output.");
     }
 
-    std::ofstream metadata_output(path, std::ios::trunc);
+    std::ofstream file;
+    if (!summary) file.open(path, std::ios::trunc);
+    std::ostream &metadata_output = summary ? *summary : file;
     if (!metadata_output)
         return unmap_failure("Could not open surface diagnostic metadata output.");
     metadata_output << std::format(
@@ -1160,18 +1156,17 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         owner.static_membership_builds, owner.static_binding_rebinds);
     metadata_output << std::format("  \"decal_surface_active\": {},\n", owner.decal_surface_active);
     metadata_output << "  \"terrain_surface_pages\": " << (impl_->terrain_static_pages_current ? "true" : "false") << ",\n";
-    metadata_output << std::format("  \"terrain_archive_reads\": {},\n", impl_->terrain_archive_reads);
     const auto probe_revision = impl_->local_probes.RevisionDiagnostics();
     const auto write_probe_revision = [&](const char *name, const render_data::SceneProbeRevisions &value) {
         metadata_output << std::format("    \"{}\": {{\"environment\": \"{}\", \"material\": \"{}\", "
-            "\"light\": \"{}\", \"static_layout\": \"{}\"}},\n", name,
+            "\"light\": \"{}\", \"static_layout\": \"{}\"}}", name,
             value.environment, value.material, value.light, value.static_layout);
     };
     metadata_output << "  \"local_probe_revisions\": {\n";
     write_probe_revision("baseline", probe_revision.baseline);
+    metadata_output << ",\n";
     write_probe_revision("compatibility", probe_revision.compatibility);
-    metadata_output << std::format("    \"material_parameter_revision\": {}\n  }},\n",
-        probe_revision.material_parameter_revision);
+    metadata_output << "\n  },\n";
     metadata_output << "  \"terrain_texture_mips\": [";
     bool first_texture = true;
     for (std::uint32_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
@@ -1323,8 +1318,8 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
         write_floats("jitter_uv", &captured_constants.surface_jitter_uv.x, 4);
         write_floats("options", &captured_constants.temporal_options.x, 4);
         metadata_output << std::format(
-            "    \"particle_terrain\": {{\"upper_bound\": {}, \"origin_y\": {}, \"section_count\": {}}},\n",
-            captured_constants.particle_terrain.x, captured_constants.particle_terrain.y,
+            "    \"particle_terrain\": {{\"upper_bound\": {}, \"section_count\": {}}},\n",
+            captured_constants.particle_terrain.x,
             std::bit_cast<std::uint32_t>(captured_constants.particle_terrain.w));
         write_floats("camera_time", &captured_constants.camera_time.x, 4);
         write_floats("previous_grass_state", &captured_constants.previous_grass_state.x, 4);
@@ -1354,11 +1349,10 @@ Result D3D12Renderer::CaptureSurfaceDiagnostics(const std::filesystem::path &pat
     metadata_output << "  ],\n";
     metadata_output << std::format(
         "  \"foreground_depth_pixels\": {},\n  \"background_depth_pixels\": {},\n"
-        "  \"foreground_valid_metadata_pixels\": {},\n  \"background_invalid_metadata_pixels\": {},\n"
         "  \"historical_foreground_pixels\": {},\n  \"nonzero_motion_pixels\": {},\n"
         "  \"depth_min\": {},\n  \"depth_max\": {}\n}}\n",
-        foreground_depth_pixels, background_depth_pixels, foreground_valid_metadata_pixels,
-        background_invalid_metadata_pixels, historical_foreground_pixels, nonzero_motion_pixels,
+        foreground_depth_pixels, std::uint64_t{width} * height - foreground_depth_pixels,
+        historical_foreground_pixels, nonzero_motion_pixels,
         depth_min, depth_max);
     if (!metadata_output)
         return unmap_failure("Could not write surface diagnostic metadata output.");
@@ -2275,28 +2269,6 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
                 "Cluster cut {} status violates its captured transaction contract.", cut.ordinal));
     }
 
-    const auto raw_path = [&](std::string_view name) {
-        return path.parent_path() / (path.stem().string() + "." + std::string(name) + ".raw");
-    };
-    const auto write_raw = [&](std::string_view name, const std::vector<std::byte> &bytes) {
-        std::ofstream output(raw_path(name), std::ios::binary | std::ios::trunc);
-        if (!output) return false;
-        output.write(reinterpret_cast<const char *>(bytes.data()),
-                     static_cast<std::streamsize>(bytes.size()));
-        return static_cast<bool>(output);
-    };
-    if (!write_raw("visibility_ids", ids_raw) || !write_raw("visibility_front_face", front_face_raw) ||
-        !write_raw("visibility_pixels", visibility_pixels_raw) ||
-        !write_raw("visibility_counts", visibility_counts_raw) ||
-        !write_raw("raster_records", raster_records_raw) ||
-        !write_raw("gbuffer_metadata", metadata_raw) ||
-        !write_raw("geometry_draw_records", geometry_records_raw) ||
-        (!cluster_refs_raw.empty() && !write_raw("cluster_refs", cluster_refs_raw)) ||
-        (!cluster_status_raw.empty() && !write_raw("cluster_status", cluster_status_raw)) ||
-        !write_raw("cluster_command_counts", cluster_command_counts_raw) ||
-        !write_raw("cluster_commands", cluster_commands_raw))
-        return invalid("Could not write visibility diagnostic raw output.");
-
     std::vector<std::uint8_t> seen(pixel_count);
     std::vector<std::uint8_t> used_raster_records(raster_capacity);
     std::array<std::uint32_t, kVisibilityVariantCount> variant_counts{};
@@ -2634,13 +2606,6 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
     for (std::size_t index = 0; index < variant_counts.size(); ++index)
         output << (index == 0 ? "" : ", ") << variant_counts[index];
     output << "],\n  \"cluster_command_readback_bytes\": " << command_readback_bytes
-           << ",\n  \"cluster_command_layout\": {\"schema_version\": 2, \"arguments\": {\"file\": \""
-           << json_escape(raw_path("cluster_commands").filename().string())
-           << "\", \"size\": " << cluster_commands_raw.size()
-           << "}, \"counts\": {\"file\": \""
-           << json_escape(raw_path("cluster_command_counts").filename().string())
-           << "\", \"stride\": 20, \"size\": " << cluster_command_counts_raw.size()
-           << "}}"
            << ",\n  \"cluster_commands\": [";
     for (std::size_t index = 0; index < cuts.size(); ++index)
     {
@@ -2696,8 +2661,6 @@ Result D3D12Renderer::CaptureVisibilityDiagnostics(const std::filesystem::path &
     return Result::Success();
 }
 
-#endif
-
 Result D3D12Renderer::Capture(const CaptureRequest &request)
 {
     if (!impl_->initialized)
@@ -2705,70 +2668,12 @@ Result D3D12Renderer::Capture(const CaptureRequest &request)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Renderer not initialized.");
     }
-    if (request.path.empty())
+    if (request.path.empty() && request.kind != CaptureKind::ParticleCount &&
+        !(request.kind == CaptureKind::SurfaceDiagnostics && request.surface_summary))
     {
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                "Capture output path is empty.");
     }
-    switch (request.kind)
-    {
-    case CaptureKind::Color:
-    case CaptureKind::SurfaceDiagnostics:
-    case CaptureKind::GeometryDiagnostics:
-    case CaptureKind::VisibilityDiagnostics:
-    case CaptureKind::HdrColor:
-    case CaptureKind::SceneProbePackage:
-        break;
-    default:
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-                               "Capture kind is invalid.");
-    }
-#if defined(HS_OFFLINE_PROBE_BAKER)
-    if(request.kind==CaptureKind::SceneProbePackage)
-    {
-        if(request.view_id!=kMainRenderViewId)
-            return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12",
-                "Scene-probe package capture is renderer-wide and requires the main view ID.");
-        if(auto waited=impl_->WaitForGpu();!waited) return waited;
-        const auto completed=impl_->graph_queue_executor.Completed();
-        auto &capture_pool = impl_->owned_views.at(impl_->active_view_id.value)->targets.transient_pools[0];
-        capture_pool.ResetCompletedClaims(completed);
-        std::vector<std::byte> bytes;
-        const auto barriers=impl_->enhanced?BarrierMode::Enhanced:BarrierMode::Legacy;
-        if(auto exported=impl_->local_probes.ExportBakedPackage(impl_->graph_queue_executor,
-                capture_pool,0,barriers,bytes);!exported) return exported;
-
-        std::error_code directory_error;
-        if(!request.path.parent_path().empty())
-            std::filesystem::create_directories(request.path.parent_path(),directory_error);
-        if(directory_error)
-            return Result::Failure(ErrorCode::TaskFailed,"hs_renderer_d3d12",
-                "Could not create scene-probe package output directory.");
-        auto temporary=request.path; temporary+=L".tmp";
-        {
-            std::ofstream output(temporary,std::ios::binary|std::ios::trunc);
-            output.write(reinterpret_cast<const char *>(bytes.data()),static_cast<std::streamsize>(bytes.size()));
-            output.flush();
-            if(!output)
-            {
-                output.close(); std::error_code ignored; std::filesystem::remove(temporary,ignored);
-                return Result::Failure(ErrorCode::TaskFailed,"hs_renderer_d3d12",
-                    "Could not write complete scene-probe package staging file.");
-            }
-        }
-        if(!MoveFileExW(temporary.c_str(),request.path.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))
-        {
-            const auto error=GetLastError(); std::error_code ignored; std::filesystem::remove(temporary,ignored);
-            return HResultFailure("Publish scene-probe package",HRESULT_FROM_WIN32(error));
-        }
-        return Result::Success();
-    }
-#else
-    if(request.kind==CaptureKind::SceneProbePackage) return Result::Failure(ErrorCode::InvalidArgument,"hs_renderer_d3d12","Scene probe export requires the offline baker.");
-#endif
-#if !defined(HS_DEVELOPMENT_TOOLS)
-    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Image and diagnostic capture require a development build.");
-#else
     if (request.view_id != kMainRenderViewId &&
         !impl_->owned_views.contains(request.view_id.value))
     {
@@ -2804,13 +2709,16 @@ Result D3D12Renderer::Capture(const CaptureRequest &request)
     switch (request.kind)
     {
     case CaptureKind::Color:
-        result = CapturePng(request.path, request.view_id);
+        result = CaptureOutputAndParticles(request.path, request.view_id);
+        break;
+    case CaptureKind::ParticleCount:
+        result = CaptureOutputAndParticles({}, request.view_id);
         break;
     case CaptureKind::HdrColor:
         result = CaptureHdrColor(*impl_, request.path);
         break;
     case CaptureKind::SurfaceDiagnostics:
-        result = CaptureSurfaceDiagnostics(request.path);
+        result = CaptureSurfaceDiagnostics(request.path, request.surface_summary);
         break;
     case CaptureKind::GeometryDiagnostics:
         result = CaptureGeometryDiagnostics(request.path);
@@ -2818,20 +2726,11 @@ Result D3D12Renderer::Capture(const CaptureRequest &request)
     case CaptureKind::VisibilityDiagnostics:
         result = CaptureVisibilityDiagnostics(request.path);
         break;
-    case CaptureKind::SceneProbePackage:
-        // Handled above before view-scoped capture routing.
-        result = Result::Failure(ErrorCode::InvalidState,"hs_renderer_d3d12",
-                                 "Scene-probe package capture was not dispatched.");
-        break;
     default:
-        // The request kind was checked above; keep the switch exhaustive if the
-        // enum gains another value without dispatching an invalid readback.
-        result = Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-                                 "Capture kind is invalid.");
-        break;
+        return restore(Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
+                                       "Capture kind is invalid."));
     }
     return restore(std::move(result));
-#endif
 }
 
 

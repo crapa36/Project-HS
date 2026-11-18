@@ -6,12 +6,19 @@
 #include <stdexcept>
 #include <tuple>
 
+#if defined(HS_DEVELOPMENT_TOOLS) && !defined(HS_OFFLINE_PROBE_BAKER)
+#include <imgui.h>
+#include <imgui_impl_dx12.h>
+#include <imgui_impl_win32.h>
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
+#endif
+
 namespace hs
 {
-#if !defined(HS_DEVELOPMENT_TOOLS) && !defined(HS_OFFLINE_PROBE_BAKER)
+#if !defined(HS_DEVELOPMENT_TOOLS) || defined(HS_OFFLINE_PROBE_BAKER)
 Result D3D12Renderer::Capture(const CaptureRequest &)
 {
-    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Capture requires a development build or offline baker.");
+    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Image capture requires the development renderer.");
 }
 #endif
 namespace
@@ -24,6 +31,20 @@ struct EssentialBootstrapScope
     ~EssentialBootstrapScope() { active_ = false; }
     bool &active_;
 };
+
+Result PrepareDevelopmentCatalog(RendererConfig &config)
+{
+    try
+    {
+        config.development_catalog = RendererDevelopmentCatalog::Build(config);
+        config.development_catalog->Bind(config);
+        return Result::Success();
+    }
+    catch (const std::runtime_error &error)
+    {
+        return Result::Failure(ErrorCode::InvalidArgument, "RendererDevelopmentCatalog", error.what());
+    }
+}
 
 template<class Options>
 Result ValidateNativeOptions(const Options &options)
@@ -102,8 +123,6 @@ Result D3D12Renderer::Impl::PrepareViewFeatures(const OwnedView &owner,
         return prepared;
     if (auto prepared = PrepareVirtualShadows(owner, candidate_config, capacity, candidates.shadows); !prepared)
         return prepared;
-    if (auto prepared = PrepareAdditionalShadows(owner, candidate_config, capacity, candidates.additional); !prepared)
-        return prepared;
     return PrepareVolumetrics(owner, candidate_config, capacity, candidates.volume);
 }
 
@@ -150,7 +169,89 @@ void RendererConfig::UseRendererCatalog(std::shared_ptr<const render_data::Rende
     packed_revision_bulks = view.revision_bulks;
 }
 
-Result D3D12Renderer::Initialize(const RendererConfig &config)
+#if !defined(HS_OFFLINE_PROBE_BAKER)
+Result D3D12Renderer::Impl::PrepareHardwareTextureStreaming()
+{
+    if (resource_generation_id.empty() || !resident_generation_lease)
+        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
+            "Hardware asset streaming requires the actual resident Generation lease.");
+    if (auto result = UpdateResidencyBudget(); !result) return result;
+    if (auto result = asset_io.Initialize(HS_WITH_DIRECTSTORAGE != 0 && !config.packed_content, 32u * 1024u * 1024u, residency); !result)
+        return result;
+    if (auto result = texture_streaming.Initialize(device.Get(), allocator, config.texture_quality,
+        QualityProfileFor(config.texture_quality).texture_finest_mip, config.texture_budget_mib, texture_streaming_capabilities, kFrameCount); !result) return result;
+    if (auto result = texture_feedback.Initialize(device.Get(), allocator,
+        texture_streaming_capabilities.sampler_feedback && texture_streaming_capabilities.tiled_resources,
+        kFrameCount); !result) return result;
+    std::vector<ShadowOpacityTexture> textures(kEnvironmentTextureCount + environment_material_textures.size());
+    for (std::size_t material = 0; material < environment_material_bindings.size(); ++material)
+    {
+        const auto &bindings = environment_material_bindings[material];
+        for (std::size_t slot = 0; slot < bindings.texture_indices.size(); ++slot)
+        {
+            const auto index = bindings.texture_indices[slot];
+            if (index == UINT32_MAX) continue;
+            if (index >= textures.size())
+                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Material texture alias has no selected owner.");
+            if (environment_material_variants[material] == render_data::EnvironmentMaterialVariant::MaskedTwoSided &&
+                (bindings.opacity_texture_mask & (1u << slot)))
+                textures[index].materials.set(material);
+        }
+    }
+    const auto register_texture = [&](const std::string &id, const render_data::TextureDescription &description,
+        AllocationResource &fallback, ResidencyTicket existing_ticket, ShadowOpacityTexture &texture) -> Result {
+        if (!fallback.resource || !fallback.allocation ||
+            fallback.resource->GetDesc().MipLevels > description.mip_count)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Selected texture fallback is incomplete.");
+        if (auto checked = fallback.EnsureNativeContract(device.Get()); !checked) return checked;
+        TextureStreamRegistration registration;
+        registration.generation = resource_generation_id; registration.logical_id = id;
+        if (auto result = ResolveRendererAsset(config, id, registration.source); !result) return result;
+        registration.generation_lease = resident_generation_lease; registration.description = description;
+        const auto asset = MakeAssetId(id);
+        if (config.development_catalog)
+            registration.descriptor = config.development_catalog->FindTexture(asset).value_or(render_data::TextureDescriptor{});
+        else if (const auto handle = FindRendererTexture(config, asset))
+            registration.descriptor = config.packed_textures[handle.value];
+        registration.fallback = fallback.resource;
+        registration.fallback_contract = *fallback.NativeContract();
+        registration.fallback_graph_access = fallback.graph_access;
+        registration.fallback_first_mip = description.mip_count - fallback.resource->GetDesc().MipLevels;
+        registration.fallback_allocation_bytes = fallback.allocation->GetSize();
+        registration.fallback_residency = existing_ticket; registration.pinned = description.mip_count == 1;
+        registration.opacity_sampling = texture.materials.any();
+        return texture_streaming.Register(std::move(registration), residency, texture.id);
+    };
+    for (std::uint32_t index = 0; index < kEnvironmentTextureCount; ++index)
+    {
+        if (auto result = register_texture(environment_texture_ids[index], environment_texture_descriptions[index],
+            environment_textures[index], index == 0 ? environment_fallback_residency : ResidencyTicket{},
+            textures[index]); !result) return result;
+        environment_texture_stream_ids[index] = textures[index].id;
+    }
+    for (std::size_t index = 0; index < environment_material_textures.size(); ++index)
+    {
+        auto &texture = environment_material_textures[index];
+        if (auto result = register_texture(texture.product_id, texture.description, texture.texture, {},
+            textures[kEnvironmentTextureCount + index]); !result) return result;
+    }
+    preferred_texture_scene.reset();
+    preferred_texture_materials.fill(false);
+    preferred_texture_initialized = false;
+    material_texture_stream_ids = {};
+    for (std::size_t material = 0; material < environment_material_bindings.size(); ++material)
+        for (std::size_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
+        {
+            const auto index = environment_material_bindings[material].texture_indices[slot];
+            if (index == UINT32_MAX) continue;
+            material_texture_stream_ids[material * render_data::kMaterialTextureSlots + slot] = textures[index].id;
+        }
+    std::erase_if(textures, [](const auto &texture) { return texture.materials.none(); });
+    shadow_opacity_textures = std::move(textures);
+    return texture_streaming.Configure(config.texture_quality, QualityProfileFor(config.texture_quality).texture_finest_mip, config.texture_budget_mib);
+}
+
+Result D3D12Renderer::Initialize(RendererConfig config)
 {
     if (impl_->initialized)
     {
@@ -158,7 +259,9 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
                                "Renderer already initialized.");
     }
     [[maybe_unused]] EssentialBootstrapScope essential_bootstrap_scope{impl_->essential_bootstrap_active};
+#if defined(HS_DEVELOPMENT_TOOLS)
     StartupCapture startup(impl_->startup_timings, config.capture_timing_stream);
+#endif
     auto &main_view = *impl_->owned_views.try_emplace(
         kMainRenderViewId.value, std::make_unique<Impl::OwnedView>()).first->second;
     main_view.view_id = kMainRenderViewId;
@@ -184,32 +287,20 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     impl_->auto_fg_cadence_sequence = 0;
     impl_->auto_fg_cadence_completed_sequence = 0;
     if (auto loaded = MeasureStartupStep(RendererStartupStep::QualityProfiles, [&] { return impl_->LoadQualityProfiles(config); }); !loaded) return loaded;
-    RendererConfig native_config = config;
-    if (!native_config.packed_content)
-    {
-        try
-        {
-            native_config.development_catalog = RendererDevelopmentCatalog::Build(native_config);
-            native_config.development_catalog->Bind(native_config);
-        }
-        catch (const std::runtime_error &error)
-        {
-            return Result::Failure(ErrorCode::InvalidArgument, "RendererDevelopmentCatalog", error.what());
-        }
-        if (auto valid = ValidatePackedCatalog(native_config); !valid) return valid;
-    }
+    if (!config.packed_content)
+        if (auto prepared = PrepareDevelopmentCatalog(config); !prepared) return prepared;
     if (config.requested_graphics)
     {
         if (!ValidateGraphicsSettings(*config.requested_graphics).empty())
             return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                    "Initial graphics settings request is invalid.");
         const auto options = ProjectRendererOptions(*config.requested_graphics, config, *impl_->quality_profiles);
-        ApplyProjectedRendererOptions(native_config, options);
+        ApplyProjectedRendererOptions(config, options);
     }
-    if (auto validated = MeasureStartupStep(RendererStartupStep::Configuration, [&] { return ValidateNativeOptions(native_config); }); !validated) return validated;
-    if (!std::isfinite(native_config.distortion_coverage) || native_config.distortion_coverage < 0 || native_config.distortion_coverage > 1)
+    if (auto validated = MeasureStartupStep(RendererStartupStep::Configuration, [&] { return ValidateNativeOptions(config); }); !validated) return validated;
+    if (!std::isfinite(config.distortion_coverage) || config.distortion_coverage < 0 || config.distortion_coverage > 1)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "Distortion coverage budget must be finite and within 0..1.");
-    if (native_config.vfx_light_count > 32)
+    if (config.vfx_light_count > 32)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12", "VFX light budget exceeds 32.");
     impl_->applied_graphics = {};
     impl_->applied_graphics_available = false;
@@ -225,16 +316,17 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     main_view.dynamic_lod_states = {};
     main_view.lod_session_epoch = 0;
     impl_->frame_submission_faulted = false;
-    impl_->material_parameter_revision = 0;
     impl_->material_parameter_counts.fill(0);
-    impl_->material_parameter_revisions.fill(0);
-    if (auto result = MeasureStartupStep(RendererStartupStep::Device, [&] { return impl_->CreateDevice(native_config, main_view); }); !result)
+#if defined(HS_DEVELOPMENT_TOOLS)
+    const auto startup_font_bytes = config.font_bytes;
+#endif
+    if (auto result = MeasureStartupStep(RendererStartupStep::Device, [&] { return impl_->CreateDevice(std::move(config), main_view); }); !result)
     {
         return result;
     }
-    impl_->resource_generation_id = native_config.content_generation_id;
-    impl_->resident_generation_lease = native_config.content_generation_lease;
-    impl_->resident_development_catalog = native_config.development_catalog;
+    impl_->resource_generation_id = impl_->config.content_generation_id;
+    impl_->resident_generation_lease = impl_->config.content_generation_lease;
+    impl_->resident_development_catalog = impl_->config.development_catalog;
     if (auto result = MeasureStartupStep(RendererStartupStep::MaterialSurfaceProfile, [&] { return impl_->LoadMaterialSurfaceProfile(impl_->config); }); !result) return result;
     if (auto result = MeasureStartupStep(RendererStartupStep::AdaptiveMaterialPolicies, [&] { return impl_->BuildAdaptiveMaterialPolicies(impl_->adaptive_material_policies); }); !result) return result;
     for (auto &pool : main_view.targets.transient_pools)
@@ -243,7 +335,8 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     {
         return result;
     }
-    if (auto result = MeasureStartupStep(RendererStartupStep::DepthShadow, [&] { return impl_->CreateDepthAndShadow(main_view); }); !result)
+    impl_->dsv_stride = impl_->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV);
+    if (auto result = MeasureStartupStep(RendererStartupStep::DepthShadow, [&] { return impl_->CreateViewDepthHeap(main_view); }); !result)
     {
         return result;
     }
@@ -259,7 +352,6 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     {
         return result;
     }
-    impl_->pipeline_revision = 1;
     if (auto result = MeasureStartupStep(RendererStartupStep::CharacterGeometryAnimation, [&] { return impl_->CreateGpuData(); }); !result)
     {
         return result;
@@ -273,11 +365,9 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
         return result;
     }
     MeasureStartupStep(RendererStartupStep::EnvironmentBrdfDescriptors, [&] { return impl_->WriteEnvironmentBrdfLutDescriptors(); });
-    if (auto result = MeasureStartupStep(RendererStartupStep::MaterialParameters, [&] { return impl_->PrepareMaterialParameters(impl_->config, false); }); !result)
+    if (auto result = MeasureStartupStep(RendererStartupStep::MaterialParameters, [&] { return impl_->PrepareMaterialParameters(impl_->config); }); !result)
         return result;
-    impl_->generation_material_parameters_valid = false;
     MeasureStartupStep(RendererStartupStep::MaterialParameters, [&] { return impl_->CommitMaterialParameters(); });
-    impl_->baked_generation_pipeline_revision = impl_->pipeline_revision;
     if (auto result = MeasureStartupStep(RendererStartupStep::EnvironmentMeshes, [&] { return impl_->CreateEnvironmentMeshes(); }); !result)
     {
         return result;
@@ -295,9 +385,9 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     VirtualShadowCandidate virtual_shadows;
     if (auto prepared = MeasureStartupStep(RendererStartupStep::VirtualShadows, [&] { return impl_->PrepareVirtualShadows(main_view, impl_->config,
             main_view.state.render_capacity, virtual_shadows); }); !prepared) return prepared;
-    Impl::AdditionalShadowPrepared additional_shadows;
-    if (auto prepared = MeasureStartupStep(RendererStartupStep::AdditionalShadows, [&] { return impl_->PrepareAdditionalShadows(main_view, impl_->config,
-            main_view.state.render_capacity, additional_shadows); }); !prepared) return prepared;
+    LocalShadowCandidate local_shadows;
+    if (auto prepared = MeasureStartupStep(RendererStartupStep::AdditionalShadows, [&] { return impl_->PrepareLocalShadows(main_view, impl_->config,
+            local_shadows); }); !prepared) return prepared;
     AdaptiveShadingCandidate adaptive;
     if (auto prepared = MeasureStartupStep(RendererStartupStep::AdaptiveShading, [&] { return impl_->PrepareAdaptiveShading(main_view, impl_->config,
             main_view.state.render_capacity, adaptive); }); !prepared) return prepared;
@@ -342,7 +432,8 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
             impl_->graph_queue_executor.Completed()); }); !committed) return committed;
     if (auto committed = MeasureStartupStep(RendererStartupStep::VirtualShadows, [&] { return main_view.virtual_shadows.Commit(std::move(virtual_shadows),
             impl_->graph_queue_executor.Completed()); }); !committed) return committed;
-    if (auto committed = MeasureStartupStep(RendererStartupStep::AdditionalShadows, [&] { return impl_->CommitAdditionalShadows(main_view, std::move(additional_shadows)); }); !committed) return committed;
+    if (auto committed = MeasureStartupStep(RendererStartupStep::AdditionalShadows, [&] { return main_view.local_shadows.Commit(std::move(local_shadows),
+            impl_->graph_queue_executor.Completed()); }); !committed) return committed;
     Impl::VolumetricPrepared volumetrics;
     if (auto prepared = MeasureStartupStep(RendererStartupStep::Volumetrics, [&] { return impl_->PrepareVolumetrics(main_view, impl_->config, main_view.state.render_capacity,
             volumetrics); }); !prepared) return prepared;
@@ -376,23 +467,23 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
-    if (config.font_bytes.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+    if (startup_font_bytes.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
     {
         ImGui::DestroyContext();
         return Result::Failure(ErrorCode::InvalidArgument, "hs_devtools", "Font exceeds Dear ImGui byte limit.");
     }
-    auto *font_data = ImGui::MemAlloc(config.font_bytes.size());
+    auto *font_data = ImGui::MemAlloc(startup_font_bytes.size());
     if (!font_data)
     {
         ImGui::DestroyContext();
         return Result::Failure(ErrorCode::InvalidState, "hs_devtools", "Cannot allocate Dear ImGui font data.");
     }
-    std::memcpy(font_data, config.font_bytes.data(), config.font_bytes.size());
+    std::memcpy(font_data, startup_font_bytes.data(), startup_font_bytes.size());
     // The atlas owns its copy; caller font storage may expire after initialization.
-    ImGui::GetIO().Fonts->AddFontFromMemoryTTF(font_data, static_cast<int>(config.font_bytes.size()),
+    ImGui::GetIO().Fonts->AddFontFromMemoryTTF(font_data, static_cast<int>(startup_font_bytes.size()),
         16.0f, nullptr, ImGui::GetIO().Fonts->GetGlyphRangesKorean());
     ImGui::StyleColorsDark();
-    if (!ImGui_ImplWin32_Init(static_cast<HWND>(config.window)))
+    if (!ImGui_ImplWin32_Init(static_cast<HWND>(impl_->config.window)))
     {
         ImGui::DestroyContext();
         return Result::Failure(ErrorCode::InvalidState, "hs_devtools",
@@ -438,8 +529,6 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     impl_->canonical_skin_frames.clear();
     main_view.view_session_id = 0;
     main_view.configuration_revision = impl_->view_configuration_revision;
-    main_view.content_generation = impl_->resource_generation_id;
-    main_view.pipeline_revision = impl_->pipeline_revision;
     main_view.history_output_extent = main_view.state.output_extent;
     main_view.ready = true;
     impl_->active_view_id = kMainRenderViewId;
@@ -447,13 +536,15 @@ Result D3D12Renderer::Initialize(const RendererConfig &config)
     impl_->active_native_viewport_id = 0;
     impl_->next_native_viewport_id = 1;
     impl_->initialized = true;
-    if (native_config.requested_graphics)
-        if (auto result = MeasureStartupStep(RendererStartupStep::InitialGraphicsSettings, [&] { return InitializeGraphicsSettings(*native_config.requested_graphics); }); !result)
+    if (impl_->config.requested_graphics)
+        if (auto result = MeasureStartupStep(RendererStartupStep::InitialGraphicsSettings, [&] { return InitializeGraphicsSettings(*impl_->config.requested_graphics); }); !result)
         {
             impl_->initialized = false;
             return result;
         }
+#if defined(HS_DEVELOPMENT_TOOLS)
     startup.Complete();
+#endif
     return Result::Success();
 }
 
@@ -472,14 +563,13 @@ void D3D12Renderer::HandleWindowMessage(const NativeWindowMessage &message) noex
 #endif
 }
 
-#if defined(HS_OFFLINE_PROBE_BAKER)
-Result D3D12Renderer::InitializeWorldTransportBake(const RendererConfig &configuration, WorldTransportBakeKind kind)
+#else
+Result D3D12Renderer::InitializeWorldTransportBake(RendererConfig &&native_config, WorldTransportBakeKind kind)
 {
-    if (configuration.content_generation_id.empty())
+    if (native_config.content_generation_id.empty())
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
                                "Static shadow bootstrap requires a selected Generation identity.");
 
-    RendererConfig native_config = configuration;
     if (native_config.packed_content)
         return Result::Failure(ErrorCode::InvalidArgument, "RendererPack",
                                "One-shot static shadow baking requires a loose SelectedGeneration.");
@@ -490,16 +580,7 @@ Result D3D12Renderer::InitializeWorldTransportBake(const RendererConfig &configu
         !native_config.packed_revision_bulks.empty())
         return Result::Failure(ErrorCode::InvalidArgument, "RendererPack",
                                "Catalog requires its opened pack owner.");
-    try
-    {
-        native_config.development_catalog = RendererDevelopmentCatalog::Build(native_config);
-        native_config.development_catalog->Bind(native_config);
-    }
-    catch (const std::runtime_error &error)
-    {
-        return Result::Failure(ErrorCode::InvalidArgument, "RendererDevelopmentCatalog", error.what());
-    }
-    if (auto valid = ValidatePackedCatalog(native_config); !valid) return valid;
+    if (auto prepared = PrepareDevelopmentCatalog(native_config); !prepared) return prepared;
 
     EssentialBootstrapScope essential_bootstrap_scope{impl_->essential_bootstrap_active};
 
@@ -509,10 +590,10 @@ Result D3D12Renderer::InitializeWorldTransportBake(const RendererConfig &configu
     main_view.role = RenderViewRole::Main;
     if (kind == WorldTransportBakeKind::SceneProbe)
         if (auto loaded = impl_->LoadQualityProfiles(native_config); !loaded) return loaded;
-    if (auto created = impl_->CreateDevice(native_config, main_view); !created) return created;
-    impl_->resource_generation_id = native_config.content_generation_id;
-    impl_->resident_generation_lease = native_config.content_generation_lease;
-    impl_->resident_development_catalog = native_config.development_catalog;
+    if (auto created = impl_->CreateDevice(std::move(native_config), main_view); !created) return created;
+    impl_->resource_generation_id = impl_->config.content_generation_id;
+    impl_->resident_generation_lease = impl_->config.content_generation_lease;
+    impl_->resident_development_catalog = impl_->config.development_catalog;
 
     if (kind == WorldTransportBakeKind::Terrain)
     {
@@ -523,7 +604,6 @@ Result D3D12Renderer::InitializeWorldTransportBake(const RendererConfig &configu
                                    "Terrain bake requires the admitted terrain material.");
         const auto &material = impl_->config.packed_materials[handle.value];
         impl_->material_surface_layouts[kTerrainMaterialOrdinal] = material.surface;
-        impl_->material_parameter_layouts[kTerrainMaterialOrdinal] = MaterialLayoutDigest(material);
         impl_->srv_stride = impl_->device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         constexpr auto lod_count = static_cast<std::uint32_t>(render_data::kEnvironmentGeometryLodCount);
         constexpr std::array meadow_lod0{static_cast<std::uint32_t>(render_data::kMeadowGeometryBegin) * lod_count};
@@ -540,8 +620,7 @@ Result D3D12Renderer::InitializeWorldTransportBake(const RendererConfig &configu
     if (auto loaded = impl_->LoadMaterialSurfaceProfile(impl_->config, material_scope); !loaded) return loaded;
     if (auto root = impl_->CreateRootSignature(); !root) return root;
     if (auto geometry = impl_->CreateStaticShadowBakeGeometry(); !geometry) return geometry;
-    if (auto parameters = impl_->PrepareMaterialParameters(impl_->config, false, material_scope); !parameters) return parameters;
-    impl_->generation_material_parameters_valid = false;
+    if (auto parameters = impl_->PrepareMaterialParameters(impl_->config, material_scope); !parameters) return parameters;
     impl_->CommitMaterialParameters();
     std::array<std::uint32_t, kEnvironmentMaterialNames.size()> shadow_pages{};
     constexpr auto lod_count = static_cast<std::uint32_t>(render_data::kEnvironmentGeometryLodCount);
@@ -554,7 +633,7 @@ Result D3D12Renderer::InitializeWorldTransportBake(const RendererConfig &configu
     return Result::Success();
 }
 
-Result D3D12Renderer::BakeStaticShadowPages(const RendererConfig &configuration,
+Result D3D12Renderer::BakeStaticShadowPages(RendererConfig configuration,
     const std::shared_ptr<const StaticRenderScene> &scene, const LightView &light,
     const std::function<Result(const render_data::StaticShadowArchiveDescription &)> &begin,
     const std::function<Result(std::uint32_t, std::int32_t, std::int32_t, std::span<const float>)> &page_sink)
@@ -580,7 +659,7 @@ Result D3D12Renderer::BakeStaticShadowPages(const RendererConfig &configuration,
                                    "Static shadow producer validation failed or message collection was incomplete.");
         return Result::Success();
     };
-    if (auto initialized = owner.InitializeWorldTransportBake(configuration, WorldTransportBakeKind::StaticShadow); !initialized)
+    if (auto initialized = owner.InitializeWorldTransportBake(std::move(configuration), WorldTransportBakeKind::StaticShadow); !initialized)
         return finish(initialized);
     return finish(owner.BakeStaticShadowPagesPrepared(scene, light, begin, page_sink));
 }
@@ -599,14 +678,12 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
     }
     ReconstructionPlan reconstruction;
     ViewExtent capacity;
-    auto reconstruction_config = impl_->config;
-    reconstruction_config.dynamic_resolution = EffectiveDynamicResolution(
-        impl_->config.dynamic_resolution, impl_->ResolveFeatures(impl_->config));
-    if (auto resolved = ResolveNativeReconstruction(reconstruction_config, {width, height},
+    const bool dynamic_resolution = impl_->config.dynamic_resolution;
+    if (auto resolved = ResolveNativeReconstruction(impl_->config, dynamic_resolution, {width, height},
             reconstruction, capacity); !resolved) return resolved;
     std::unique_ptr<ReconstructionProvider> provider;
     if (auto prepared = impl_->PrepareReconstructionProvider(impl_->config.reconstruction_request
-            ? &*impl_->config.reconstruction_request : nullptr, reconstruction_config.dynamic_resolution,
+            ? &*impl_->config.reconstruction_request : nullptr, dynamic_resolution,
             impl_->config.dynamic_min_percent, impl_->config.dynamic_max_percent, {width, height},
             reconstruction, capacity, provider, &impl_->config); !prepared) return prepared;
     ReconstructionGuidesCandidate guides;
@@ -623,11 +700,13 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
     Impl::UiResources ui_targets;
     if (auto prepared = impl_->PrepareUiResources(ui_targets, width, height); !prepared)
         return prepared;
-    if (auto result = impl_->PrepareOptionTargets(targets, render_width, render_height,
-                                                   impl_->config.shadow_resolution,
-                                                   impl_->config.bloom, width, height,
-                                                   UsesInternalResolveTargets(reconstruction),
-                                                   impl_->RequiredLightingAuxiliaries(impl_->config)); !result)
+    auto result = impl_->PrepareOptionTargets(targets, render_width, render_height,
+        impl_->config.bloom, width, height, UsesInternalResolveTargets(reconstruction),
+        impl_->RequiredLightingAuxiliaries(impl_->config));
+    if (result)
+        result = impl_->PrepareOptionPools(targets.transient_pools, render_width, render_height,
+            impl_->config.bloom, width, height);
+    if (!result)
     {
         const auto device_reason = impl_->device->GetDeviceRemovedReason();
         if (FAILED(device_reason))
@@ -738,7 +817,10 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
     }
     }
 
+    // A failed native commit cannot expose a partially replaced view as ready.
+    impl_->initialized = false;
     impl_->CommitOptionTargets(owned_view, targets);
+    impl_->WriteDepthViews(owned_view);
     impl_->CommitUiResources(owned_view, ui_targets);
     owned_view.transient_textures_common = impl_->enhanced;
     owned_view.width = width;
@@ -747,14 +829,11 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
     {
         // ResizeBuffers has succeeded; old native output dimensions cannot be
         // restored into this swapchain. Report the failed configuration exactly.
-        impl_->initialized = false;
         return committed;
     }
     owned_view.reconstruction_plan = std::move(reconstruction);
     if (auto committed = impl_->CommitViewFeaturePrefix(owned_view, view_features,
             impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (auto committed = impl_->CommitAdditionalShadows(owned_view, std::move(view_features.additional)); !committed)
-        return committed;
     owned_view.render_width = owned_view.reconstruction_plan.render_active.width;
     if (auto committed = impl_->CommitVolumetrics(owned_view, std::move(view_features.volume)); !committed)
         return committed;
@@ -764,6 +843,7 @@ Result D3D12Renderer::Resize(std::uint32_t width, std::uint32_t height)
     owned_view.dynamic_resolution_controller.Reset();
     owned_view.temporal_history_valid = false;
     owned_view.temporal_read_index = 0;
+    impl_->initialized = true;
     return Result::Success();
 }
 
@@ -786,18 +866,14 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     ApplyProjectedRendererOptions(feature_config, options);
     const auto previous_features = impl_->ResolveFeatures(impl_->config);
     const auto next_features = impl_->ResolveFeatures(feature_config);
-    const bool previous_dynamic_resolution = EffectiveDynamicResolution(
-        impl_->config.dynamic_resolution, previous_features);
-    const bool next_dynamic_resolution = EffectiveDynamicResolution(
-        feature_config.dynamic_resolution, next_features);
+    const bool previous_dynamic_resolution = impl_->config.dynamic_resolution;
+    const bool next_dynamic_resolution = feature_config.dynamic_resolution;
 
     const auto render_scale = std::clamp(options.render_scale_percent, 50u, 200u);
     const auto shadow_resolution = std::clamp(options.shadow_resolution, 1024u, 2048u);
     ReconstructionPlan reconstruction;
     ViewExtent capacity;
-    auto reconstruction_options = options;
-    reconstruction_options.dynamic_resolution = next_dynamic_resolution;
-    if (auto resolved = ResolveNativeReconstruction(reconstruction_options, {owned_view.width, owned_view.height},
+    if (auto resolved = ResolveNativeReconstruction(options, next_dynamic_resolution, {owned_view.width, owned_view.height},
             reconstruction, capacity); !resolved) return resolved;
     const bool reuse_provider = owned_view.reconstruction_provider &&
         reconstruction.temporal_enabled && options.temporal_reconstruction == impl_->config.temporal_reconstruction &&
@@ -822,7 +898,6 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
         if (auto prepared = impl_->PrepareReconstructionGuides(owned_view, impl_->config, capacity,
                 {owned_view.width, owned_view.height}, guides, provider->NeedsCompositionGuide()); !prepared) return prepared;
     const auto recreate_surfaces = capacity != owned_view.state.render_capacity ||
-        shadow_resolution != impl_->config.shadow_resolution ||
         UsesInternalResolveTargets(reconstruction) != UsesInternalResolveTargets(owned_view.reconstruction_plan) ||
         options.bloom != impl_->config.bloom ||
         impl_->RequiredLightingAuxiliaries(feature_config) != impl_->RequiredLightingAuxiliaries(impl_->config);
@@ -869,12 +944,19 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     }
     const auto target_height = capacity.height;
     Impl::OptionTargets targets;
+    const bool replace_shadow = shadow_resolution != impl_->config.shadow_resolution;
+    AllocationResource shadow;
+    if (replace_shadow)
+        if (auto prepared = impl_->PrepareDepthTexture(shadow, shadow_resolution * 2u, shadow_resolution * 2u); !prepared)
+            return prepared;
     if (recreate_surfaces)
     {
         if (auto prepared = impl_->PrepareOptionTargets(targets, target_width, target_height,
-            shadow_resolution, options.bloom, owned_view.width, owned_view.height,
+            options.bloom, owned_view.width, owned_view.height,
             UsesInternalResolveTargets(reconstruction),
             impl_->RequiredLightingAuxiliaries(feature_config)); !prepared) return prepared;
+        if (auto prepared = impl_->PrepareOptionPools(targets.transient_pools, target_width, target_height,
+                options.bloom, owned_view.width, owned_view.height); !prepared) return prepared;
     }
     const bool recreate_hdr_post = capacity != owned_view.state.render_capacity ||
         options.motion_blur != impl_->config.motion_blur ||
@@ -916,21 +998,19 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     LightListCandidate light_list;
     if (recreate_light_list)
         if (auto prepared = impl_->PrepareLightList(owned_view, feature_config, capacity, light_list); !prepared) return prepared;
-    // Quality and capacity alter shadow allocation here.
-    const bool recreate_virtual_shadows = capacity != owned_view.state.render_capacity ||
-        options.shadow_quality != impl_->config.shadow_quality ||
-        options.shadow_mode != impl_->config.shadow_mode;
-    const bool recreate_additional_shadows = recreate_virtual_shadows;
-    Impl::AdditionalShadowPrepared additional_shadows;
-    if (recreate_additional_shadows)
-        if (auto prepared = impl_->PrepareAdditionalShadows(owned_view, feature_config, capacity, additional_shadows); !prepared) return prepared;
+    const bool recreate_local_shadows = options.shadow_quality != impl_->config.shadow_quality;
+    const bool recreate_virtual_shadows = recreate_local_shadows ||
+        capacity != owned_view.state.render_capacity || options.shadow_mode != impl_->config.shadow_mode;
+    LocalShadowCandidate local_shadows;
+    if (recreate_local_shadows)
+        if (auto prepared = impl_->PrepareLocalShadows(owned_view, feature_config, local_shadows); !prepared) return prepared;
     VirtualShadowCandidate virtual_shadows;
     if (recreate_virtual_shadows)
         if (auto prepared = impl_->PrepareVirtualShadows(owned_view, feature_config, capacity,
                 virtual_shadows); !prepared) return prepared;
 #if defined(HS_DEVELOPMENT_TOOLS)
-    if (impl_->config.capture_timing_stream)
-        impl_->diagnostics.ObserveTransition(impl_->DiagnosticsMemory());
+    if (impl_->config.capture_timing_stream && impl_->local_budget_observation.valid)
+        impl_->diagnostics.ObserveTransition(impl_->local_budget_observation.last_valid.CurrentUsage);
 #endif
     const auto previous_hdr = owned_view.display_state.hdr_active;
     bool presentation_recreated{};
@@ -958,7 +1038,7 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     if (!presentation_recreated)
         if (auto display = impl_->ApplyDisplayOptions(options); !display) return display;
     if (previous_hdr != owned_view.display_state.hdr_active) owned_view.temporal_history_valid = false;
-    if (change_texture_policy || recreate_surfaces || recreate_adaptive || recreate_ambient || recreate_surface_lighting || recreate_transparency || replace_provider || recreate_hdr_post || recreate_screen_overlay || recreate_light_list || recreate_virtual_shadows || recreate_additional_shadows || recreate_volumetrics || recreate_decal_surface || recreate_local_probes)
+    if (change_texture_policy || replace_shadow || recreate_surfaces || recreate_adaptive || recreate_ambient || recreate_surface_lighting || recreate_transparency || replace_provider || recreate_hdr_post || recreate_screen_overlay || recreate_light_list || recreate_virtual_shadows || recreate_volumetrics || recreate_decal_surface || recreate_local_probes)
         if (auto drained = impl_->WaitForGpu(); !drained) return drained;
     if (replace_provider)
     {
@@ -966,6 +1046,8 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
             return committed;
         owned_view.temporal_history_valid = false;
     }
+    // Provider rejection may restore itself; partial feature replacement cannot.
+    impl_->initialized = false;
     if (recreate_adaptive)
         if (auto committed = owned_view.adaptive_shading.Commit(std::move(adaptive),
                 impl_->graph_queue_executor.Completed()); !committed) return committed;
@@ -1002,8 +1084,9 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     if (recreate_virtual_shadows)
         if (auto committed = owned_view.virtual_shadows.Commit(std::move(virtual_shadows),
                 impl_->graph_queue_executor.Completed()); !committed) return committed;
-    if (recreate_additional_shadows)
-        if (auto committed = impl_->CommitAdditionalShadows(owned_view, std::move(additional_shadows)); !committed) return committed;
+    if (recreate_local_shadows)
+        if (auto committed = owned_view.local_shadows.Commit(std::move(local_shadows),
+                impl_->graph_queue_executor.Completed()); !committed) return committed;
     if (recreate_surfaces)
     {
         impl_->CommitOptionTargets(owned_view, targets);
@@ -1016,6 +1099,14 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
         owned_view.temporal_history_valid = false;
         owned_view.temporal_read_index = 0;
     }
+    if (replace_shadow)
+    {
+        owned_view.shadow_atlas = std::move(shadow);
+#if defined(HS_DEVELOPMENT_TOOLS)
+        owned_view.shadow_atlas_active = false;
+#endif
+    }
+    if (replace_shadow || recreate_surfaces) impl_->WriteDepthViews(owned_view);
     if (reconstruction.temporal_enabled != impl_->config.temporal_reconstruction ||
         reconstruction.effective_provider != owned_view.reconstruction_plan.effective_provider ||
         reconstruction.effective_quality != owned_view.reconstruction_plan.effective_quality)
@@ -1073,12 +1164,11 @@ Result D3D12Renderer::ApplyOptions(const RendererOptions &options)
     ++impl_->view_configuration_revision;
     ++owned_view.history_generation;
     owned_view.configuration_revision = impl_->view_configuration_revision;
-    owned_view.content_generation = impl_->resource_generation_id;
-    owned_view.pipeline_revision = impl_->pipeline_revision;
     owned_view.temporal_history_valid = false;
     owned_view.hzb_history_valid = false;
     owned_view.last_history_frame_slot = UINT32_MAX;
     owned_view.history_output_extent = owned_view.state.output_extent;
+    impl_->initialized = true;
     return Result::Success();
 }
 
@@ -1241,12 +1331,10 @@ RendererTextureStreamingStatus D3D12Renderer::GetTextureStreamingStatus() const
     status.physical_bytes = impl_->texture_streaming.PhysicalBytes();
     status.ready = status.texture_count != 0 && !impl_->frame_submission_faulted;
     status.native_asset_io = impl_->asset_io.NativeEnabled();
-    for (const auto id : impl_->material_texture_stream_ids)
-    {
+    status.sampler_feedback = std::ranges::any_of(impl_->material_texture_stream_ids, [&](TextureStreamId id) {
         const auto view = impl_->texture_streaming.View(id);
-        status.sampler_feedback = status.sampler_feedback ||
-            (impl_->config.selected_texture_feedback && view.reserved && view.feedback_supported);
-    }
+        return view.reserved && view.feedback_supported;
+    });
     if (impl_->frame_submission_faulted) status.reason = "Partial frame submission requires a reliable drain and reinitialization.";
     else if (!impl_->texture_streaming_capabilities.tiled_resources)
         status.reason = "Native tiled resources are unavailable; environment textures use real reduced mip resources. Hero textures remain pinned.";
@@ -1311,10 +1399,6 @@ RendererLightingStatus D3D12Renderer::GetLightingStatus() const
     return status;
 }
 
-std::uint64_t D3D12Renderer::MaterialParameterRevision() const noexcept
-{
-    return impl_->material_parameter_revision;
-}
 std::vector<RendererCharacterAnimationClip> D3D12Renderer::GetCharacterAnimationClips() const
 {
     std::vector<RendererCharacterAnimationClip> clips;
@@ -1348,29 +1432,21 @@ std::vector<RendererLegacyCharacterAnimationClip> D3D12Renderer::GetLegacyCharac
 }
 #endif
 
+#if defined(HS_DEVELOPMENT_TOOLS)
 RendererStartupTimings D3D12Renderer::GetStartupTimings() const noexcept
 {
     return impl_ ? impl_->startup_timings : RendererStartupTimings{};
 }
+#endif
 
+#if defined(HS_DEVELOPMENT_TOOLS)
 RendererPsoCacheStats D3D12Renderer::GetPipelineCacheStats() const
 {
     if (!impl_) return {};
-    const auto stats = impl_->pipeline_cache.Stats();
-    return {stats.hits, stats.misses, stats.native_creates, stats.stores, stats.store_failures, stats.load_failures,
-        stats.io_failures, stats.discarded_files, stats.unsupported_libraries, stats.uncached_mesh_creates,
-        stats.root_registrations, stats.key_failures, stats.loaded_bytes, stats.serialized_bytes,
-        stats.initialized, stats.library_supported, stats.mesh_library_supported, stats.persistence_enabled,
-        stats.last_cache_hresult, stats.last_io_error,
-        stats.key_build_ns, stats.key_build_max_ns, stats.library_load_ns, stats.library_load_max_ns,
-        stats.native_create_ns, stats.native_create_max_ns, stats.library_store_ns, stats.library_store_max_ns,
-        stats.serialize_ns, stats.cache_write_ns, stats.mutex_wait_ns, stats.mutex_wait_max_ns, stats.capture_timings};
+    return impl_->pipeline_cache.Stats();
 }
+#endif
 
-std::uint64_t D3D12Renderer::PipelineRevision() const noexcept
-{
-    return impl_->pipeline_revision;
-}
 
 Result D3D12Renderer::Shutdown()
 {
@@ -1400,8 +1476,6 @@ Result D3D12Renderer::Shutdown()
     impl_->material_parameter_upload_pending = false;
     if (!result) return result;
     if (auto released = impl_->graph_queue_executor.ReleaseRecordersAfterCompletion(); !released) return released;
-    impl_->material_parameter_slots.clear();
-    impl_->material_parameter_candidate_slots.clear();
     impl_->resident_utility_submissions.clear();
     impl_->graph.Reset();
     impl_->texture_upload_graph.Reset();
@@ -1411,12 +1485,12 @@ Result D3D12Renderer::Shutdown()
         RendererTextureFeedback retired_feedback;
         RendererTextureStreaming retired_textures;
         RendererAssetIo retired_io;
-        impl_->texture_feedback.SwapState(retired_feedback);
+        std::swap(impl_->texture_feedback, retired_feedback);
         impl_->texture_streaming.SwapState(retired_textures);
         impl_->asset_io.SwapState(retired_io);
     }
     impl_->environment_texture_stream_ids = {};
-    impl_->environment_material_texture_stream_ids.clear();
+    impl_->shadow_opacity_textures.clear();
     impl_->material_texture_stream_ids = {};
     for (auto &[id, view] : impl_->owned_views)
     {
@@ -1439,14 +1513,13 @@ Result D3D12Renderer::Shutdown()
     if (auto cleared = impl_->presentation_guides.ResetAfterCompletion(
             impl_->graph_queue_executor.Completed()); !cleared) return cleared;
     impl_->native_input_phase = 0;
-    if (!result) return result;
     if (impl_->fsr_session)
         if (auto closed = impl_->fsr_session->ShutdownAfterCompletion(true); !closed) return closed;
     if (impl_->streamline_session)
         if (auto closed = impl_->streamline_session->ShutdownAfterCompletion(); !closed) return closed;
     if (auto cleared = impl_->lighting_probe.ResetAfterCompletion(
             impl_->graph_queue_executor.Completed()); !cleared && result) result = cleared;
-    impl_->volumetric_media.clear();
+    impl_->volumetric_media.reset();
     impl_->archer_named_animations = {};
     impl_->archer_compiled_animation = nullptr;
     impl_->archer_packed_transforms = {}; impl_->archer_named_packed_transforms = {};
@@ -1477,12 +1550,10 @@ Result D3D12Renderer::Shutdown()
     impl_->material_parameter_candidate.Reset();
     impl_->material_parameters.Reset();
     impl_->material_parameter_slot_count = 0;
-    impl_->material_parameter_layouts = {};
-    impl_->decal_material_programs = {}; impl_->decal_material_candidate_programs = {};
-    impl_->decal_material_policies = {}; impl_->decal_material_candidate_policies = {};
-    impl_->decal_parameter_bases = {}; impl_->decal_parameter_candidate_bases = {};
-    impl_->decal_parameter_counts = {}; impl_->decal_parameter_candidate_counts = {};
-    impl_->decal_parameter_layouts = {}; impl_->decal_parameter_candidate_layouts = {};
+    impl_->decal_material_programs = {};
+    impl_->decal_material_policies = {};
+    impl_->decal_parameter_bases = {};
+    impl_->decal_parameter_counts = {};
     impl_->environment_brdf_init_pending = false;
     impl_->environment_brdf_init_upload.Reset();
     impl_->environment_brdf_init_device.Reset();
@@ -1490,7 +1561,7 @@ Result D3D12Renderer::Shutdown()
     impl_->ResetEnvironmentStreaming();
     if (impl_->device)
         (void)impl_->CountValidationErrors();
-#if defined(HS_DEVELOPMENT_TOOLS)
+#if defined(HS_DEVELOPMENT_TOOLS) && !defined(HS_OFFLINE_PROBE_BAKER)
     if (impl_->imgui_initialized)
     {
         ImGui_ImplDX12_Shutdown();
@@ -1534,7 +1605,6 @@ Result D3D12Renderer::Shutdown()
         frame.texture_upload_timing = {};
 #endif
         frame.timestamp_passes.clear();
-        frame.timestamp_frequencies.clear();
         frame.completion = {};
         frame.skin_cache_use_completion = {};
         frame.upload.Reset();
@@ -1622,7 +1692,6 @@ Result D3D12Renderer::Shutdown()
     impl_->indirect_arguments.Reset();
     impl_->material_sidecar_layout = {};
     impl_->material_surface_layouts = {};
-    impl_->material_headers = {};
     for (auto &visibility : impl_->visibility_frames) visibility.Reset();
     impl_->visibility_pipeline.Reset();
     impl_->surface_resolve_pipeline.Reset();
@@ -1637,7 +1706,7 @@ Result D3D12Renderer::Shutdown()
     impl_->pending_terrain_pages.reset();
     impl_->terrain_descriptor_banks = {};
     impl_->terrain_plane_stream_ids.clear();
-    impl_->terrain_plane_needed.clear();
+    impl_->terrain_plane_needed.reset();
     impl_->terrain_tiles.clear();
     for (auto &mips : impl_->terrain_frame_mips) mips.Reset();
     for (auto &sections : impl_->terrain_frame_sections) sections.Reset();
@@ -1645,22 +1714,10 @@ Result D3D12Renderer::Shutdown()
     impl_->terrain_frame_has_meadow.fill(false);
     impl_->terrain_frame_meadow_upper.fill(std::numeric_limits<float>::lowest());
     impl_->static_terrain_source_indices.clear();
-    impl_->dynamic_terrain_indices.clear();
-    impl_->terrain_archive_digest.clear();
-    impl_->terrain_planes_archive_digest.clear();
     impl_->terrain_static_pages_current = false;
-    impl_->terrain_generation_parameters_valid = false;
-    impl_->generation_material_parameters_valid = false;
-    impl_->material_parameters_match_generation = true;
-    impl_->terrain_parameters_match = true;
-    impl_->terrain_parameters_changed = false;
-#if defined(HS_DEVELOPMENT_TOOLS)
-    impl_->terrain_archive_reads = 0;
-#endif
     impl_->terrain_retry_budget_bytes = 0;
     impl_->terrain_slot_static_sections_valid.fill(false);
     impl_->static_terrain_sections.clear();
-    impl_->terrain_gpu_sections_scratch.clear();
     impl_->terrain_scene.reset();
     for (auto &texture : impl_->environment_textures) texture.Reset();
 #if defined(HS_OFFLINE_PROBE_BAKER)
@@ -1671,9 +1728,6 @@ Result D3D12Renderer::Shutdown()
     for (auto &mesh : impl_->environment_meshes) mesh.Reset();
     impl_->static_gpu_scene.reset();
     impl_->retired_static_gpu_scenes.clear();
-#if defined(HS_DEVELOPMENT_TOOLS)
-    impl_->dynamic_instance_upload_log.close();
-#endif
     impl_->dynamic_scene_slots.Clear();
     impl_->sampler_heap.Reset();
     impl_->geometry_page_descriptor_banks = {};
@@ -1687,10 +1741,6 @@ Result D3D12Renderer::Shutdown()
     impl_->ui_dwrite_factory.Reset();
     impl_->ui_draw_pipeline.Reset();
     impl_->ui_draw_root.Reset();
-    for (auto &buffer : impl_->back_buffers)
-    {
-        buffer.Reset();
-    }
     if (impl_->allocator)
     {
         impl_->allocator->Release();
@@ -1886,8 +1936,7 @@ Result D3D12Renderer::DrainGpuPassTimings(std::vector<GpuPassTimings> &output)
         auto timings = impl_->ReadFrameGpuTimings(frame);
         if (!timings.valid) continue;
 #if defined(HS_DEVELOPMENT_TOOLS)
-        if (!impl_->diagnostics.HasCompleted(timings.completed_frame_id, timings.view_id))
-            impl_->diagnostics.RecordCompleted(timings);
+        impl_->diagnostics.RecordCompleted(timings);
 #endif
         if (timings.view_id == impl_->active_view_id.value)
         {
@@ -1919,8 +1968,7 @@ RendererQueueStats D3D12Renderer::LastQueueStats() const noexcept
 #if defined(HS_DEVELOPMENT_TOOLS)
     const auto &stats = impl_->last_frame_graph_stats;
     return {stats.direct_batches, stats.compute_batches, stats.copy_batches,
-            stats.cross_queue_waits, stats.record_jobs, stats.transient_resource_count,
-            stats.transient_block_count, stats.alias_activation_count,
+            stats.cross_queue_waits, stats.record_jobs,
             stats.transient_bytes_without_aliasing, stats.transient_backing_bytes};
 #else
     return {};
@@ -1989,13 +2037,4 @@ RendererTextureProductStatus D3D12Renderer::GetTextureStreamingStatus(std::strin
         status.requests, status.uploads, status.publications, status.reclaims, status.revision,
         status.actual_resident_mip, status.effective_desired_mip, status.target_mip};
 }
-#if defined(HS_OFFLINE_PROBE_BAKER)
-RendererSceneProbeBakeStatus D3D12Renderer::GetSceneProbeBakeStatus() const noexcept
-{
-    const auto status=impl_->local_probes.BakeStatus(impl_->graph_queue_executor.Completed());
-    return {status.sources_ready,status.capture_complete};
-}
-#endif
-
-
 } // namespace hs

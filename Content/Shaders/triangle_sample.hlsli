@@ -18,10 +18,8 @@ float HsTriangleClipAbsMax(float4 clip)
                max(abs(clip.z), abs(clip.w)));
 }
 
-// This is the float shader counterpart of SampleTriangleAtNdc in
-// hs/render_data/triangle_sample.hpp.  The homogeneous rows retain original
-// clip-space w, including zero or negative values from a near-clipped source
-// triangle; no per-vertex divide or small-w clamp is used.
+// The homogeneous rows retain the original clip-space w, including zero or
+// negative values from a near-clipped source triangle.
 HsTriangleSample HsSampleTriangle(float4 clip0, float4 clip1, float4 clip2,
                                   float2 sampleNdc, float2 viewportExtent)
 {

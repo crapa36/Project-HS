@@ -159,7 +159,6 @@ class LocalProbeSystem
         render_data::SceneProbeRevisions, const CompletionSet &completed) const noexcept;
     [[nodiscard]] LocalProbeBakeStatus BakeStatus(const CompletionSet &) const noexcept;
     [[nodiscard]] Result BeginOfflineIteration(const CompletionSet &,bool reflections_only);
-    [[nodiscard]] bool CaptureIdentityPending(const CompletionSet &) const noexcept;
 #endif
     // Submission success records completion requirements; it does not publish
     // new cubes. Register publishes only after those requirements are completed,

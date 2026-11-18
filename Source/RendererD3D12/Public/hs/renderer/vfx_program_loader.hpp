@@ -34,5 +34,6 @@ struct VfxProgramData
 
 };
 
+// Input bytes are verified by the selected content owner.
 bool LoadVfxProgram(std::span<const std::byte> bytes, VfxProgramData& output, std::string& error);
 }

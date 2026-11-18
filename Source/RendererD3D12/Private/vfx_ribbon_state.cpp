@@ -33,7 +33,7 @@ bool ValidateRibbonSources(std::span<const VfxRibbonSourceInput> sources, std::s
             (source.analytic && (!Finite(source.control) || source.segments < 1 || source.segments >= kRibbonHistorySamples ||
                 !std::isfinite(source.normalized_age) || source.normalized_age < 0 || source.normalized_age > 1)) ||
             !std::isfinite(source.start_alpha) || source.start_alpha < 0.0f || source.start_alpha > 1.0f ||
-            !source.OutputStorageConsistent(frame_outputs.size()) || source.OutputCount() == 0)
+            !source.OutputStorageConsistent(frame_outputs.size()) || source.frame_output_count == 0)
             return reject("Ribbon source has invalid identity, transform, history, alpha, or outputs");
         for (const auto &output : source.OutputSpan(frame_outputs))
         {
@@ -108,8 +108,8 @@ bool VfxRibbonState::OutputsMayExceed(std::span<const VfxRibbonSourceInput> sour
     for (const auto &source : sources)
     {
         if (!source.OutputStorageConsistent(frame_outputs.size())) return finish(true);
-        if (source.OutputCount() > output_capacity) return finish(true);
-        output_capacity -= source.OutputCount();
+        if (source.frame_output_count > output_capacity) return finish(true);
+        output_capacity -= source.frame_output_count;
         if (const auto found = slot_by_key_.find(SourceKey(source)); found != slot_by_key_.end())
             source_scratch_[found->second / word_bits] |= std::size_t{1} << (found->second % word_bits);
     }
@@ -121,25 +121,6 @@ bool VfxRibbonState::OutputsMayExceed(std::span<const VfxRibbonSourceInput> sour
         }
     return finish(false);
 }
-bool VfxRibbonState::Update(std::span<const VfxRibbonSourceInput> sources,
-                            Tick tick, std::uint64_t session,
-                            std::uint64_t catalog_generation,
-                            std::uint32_t point_budget, float interpolation,
-                            Float3 previous_eye, std::string &error,
-                            std::span<const VfxRibbonOutputInput> frame_outputs)
-{
-    if (!ValidateFrameSources(sources, error, frame_outputs)) return false;
-    return UpdateValidated(sources, tick, session, catalog_generation, point_budget, interpolation, previous_eye, error,
-        frame_outputs);
-}
-
-bool VfxRibbonState::ValidateSources(std::span<const VfxRibbonSourceInput> sources, std::string &error,
-                                     std::span<const VfxRibbonOutputInput> frame_outputs)
-{
-    std::vector<std::size_t> source_order;
-    return ValidateRibbonSources(sources, error, source_order, frame_outputs);
-}
-
 bool VfxRibbonState::ValidateFrameSources(std::span<const VfxRibbonSourceInput> sources,
                                          std::string &error,
                                          std::span<const VfxRibbonOutputInput> frame_outputs)
@@ -149,7 +130,6 @@ bool VfxRibbonState::ValidateFrameSources(std::span<const VfxRibbonSourceInput> 
 
 bool VfxRibbonState::UpdateValidated(std::span<const VfxRibbonSourceInput> sources,
                             Tick tick, std::uint64_t session,
-                            std::uint64_t catalog_generation,
                             std::uint32_t point_budget, float interpolation,
                             Float3 previous_eye, std::string &error,
                             std::span<const VfxRibbonOutputInput> frame_outputs)
@@ -166,7 +146,7 @@ bool VfxRibbonState::UpdateValidated(std::span<const VfxRibbonSourceInput> sourc
     }
 
     const auto capacity = point_budget / kRibbonHistorySamples;
-    if (!initialized_ || session != session_ || catalog_generation != catalog_generation_ || capacity != capacity_ || tick < last_tick_)
+    if (!initialized_ || session != session_ || capacity != capacity_ || tick < last_tick_)
     {
         slots_.clear();
         slot_by_key_.clear();
@@ -174,7 +154,6 @@ bool VfxRibbonState::UpdateValidated(std::span<const VfxRibbonSourceInput> sourc
         outputs_.clear();
         capacity_ = capacity;
         session_ = session;
-        catalog_generation_ = catalog_generation;
         initialized_ = true;
     }
 

@@ -35,10 +35,6 @@ class SkinCache
     void Abort() noexcept;
     void Clear() noexcept;
     [[nodiscard]] std::size_t ActiveCount() const noexcept { return active_count_; }
-    [[nodiscard]] std::size_t HistoryValidCount() const noexcept
-    {
-        return history_valid_count_;
-    }
 
   private:
     using KeyHash = RenderSceneInstanceKeyHash;
@@ -55,7 +51,6 @@ class SkinCache
     bool preparing_{};
     bool reset_history_{};
     std::size_t active_count_{};
-    std::size_t history_valid_count_{};
 };
 
 } // namespace hs

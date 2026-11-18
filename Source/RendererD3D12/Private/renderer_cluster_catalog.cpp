@@ -52,8 +52,7 @@ Result EnvironmentClusterCatalog::Load(const RendererConfig &config,
         const auto source_id = "environment/environment_" + std::string(stem) + ".meshbin";
         Require(std::ranges::find(main_package.dependencies, source_id) != main_package.dependencies.end(), "cluster catalog omits original mesh dependency");
         RendererAssetSource hierarchy_path;
-        if (auto resolved = ResolveRendererAsset(config, logical_id, hierarchy_path); !resolved) return resolved;
-        if (auto bound = hierarchy_path.BindExpectedDigest(RendererProductDigest(config, logical_id)); !bound) return bound;
+        if (auto resolved = ResolveRendererGeometrySource(config, logical_id, hierarchy_path); !resolved) return resolved;
         std::vector<std::byte> bytes;
         if (auto loaded = hierarchy_path.Read(bytes); !loaded) return loaded;
         EnvironmentClusterCatalog prepared;
@@ -77,8 +76,7 @@ Result EnvironmentClusterCatalog::Load(const RendererConfig &config,
             Require(page.logical_id.starts_with(page_prefix), "hierarchy page belongs to another catalog");
             ClusterCatalogPage directory;
             directory.logical_id = page.logical_id;
-            if (auto resolved = ResolveRendererAsset(config, page.logical_id, directory.source); !resolved) return resolved;
-            if (auto bound = directory.source.BindExpectedDigest(RendererProductDigest(config, page.logical_id)); !bound) return bound;
+            if (auto resolved = ResolveRendererGeometrySource(config, page.logical_id, directory.source); !resolved) return resolved;
             directory.pinned = (page.flags & rd::kGeometryHierarchyPagePinned) != 0;
             const auto local_index = static_cast<std::uint32_t>(index);
             Require(prepared.page_indices_.emplace(page.logical_id, local_index).second, "duplicate cluster page ID");

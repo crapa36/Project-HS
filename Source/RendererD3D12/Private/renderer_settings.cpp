@@ -247,7 +247,6 @@ CapabilityAdmission Either(CapabilityAdmission a, CapabilityAdmission b)
 
 GraphicsSettings ActualAppliedGraphics(const GraphicsSettings &requested,
                                        const RendererConfig &config,
-                                       bool effective_dynamic_resolution,
                                        const DisplayState &display,
                                        const RendererLightingStatus &lighting,
                                        const RendererReconstructionStatus &reconstruction,
@@ -259,7 +258,7 @@ GraphicsSettings ActualAppliedGraphics(const GraphicsSettings &requested,
     actual.hdr_mode = display.hdr_active ? GraphicsHdrMode::On : GraphicsHdrMode::Off;
     actual.hdr_paper_white_nits = display.paper_white_nits;
     actual.hdr_peak_nits = display.peak_nits;
-    actual.dynamic_resolution = effective_dynamic_resolution;
+    actual.dynamic_resolution = config.dynamic_resolution;
     actual.target_render_fps = config.target_render_fps;
     actual.dynamic_min_percent = config.dynamic_min_percent;
     actual.dynamic_max_percent = config.dynamic_max_percent;
@@ -347,9 +346,7 @@ Result D3D12Renderer::InitializeGraphicsSettings(const GraphicsSettings &request
         const auto reconstruction = GetReconstructionStatus();
         const auto presentation = GetPresentationStatus();
         const auto lighting = GetLightingStatus();
-        const auto feature_plan = impl_->ResolveFeatures(impl_->config);
         const auto actual = ActualAppliedGraphics(requested, impl_->config,
-            EffectiveDynamicResolution(impl_->config.dynamic_resolution, feature_plan),
             main_view.display_state, lighting, reconstruction, presentation);
         SettingsApplyResult status;
         status.generation = 0;
@@ -483,9 +480,7 @@ SettingsApplyResult D3D12Renderer::GetGraphicsSettingsStatus() const
         const auto reconstruction = GetReconstructionStatus();
         const auto presentation = GetPresentationStatus();
         const auto lighting = GetLightingStatus();
-        const auto feature_plan = impl_->ResolveFeatures(impl_->config);
         status.actual_applied = ActualAppliedGraphics(requested, impl_->config,
-            EffectiveDynamicResolution(impl_->config.dynamic_resolution, feature_plan),
             found->second->display_state, lighting, reconstruction, presentation);
         status.actual_applied_available = true;
         status.resolution = ResolveSummary(requested, reconstruction, presentation);

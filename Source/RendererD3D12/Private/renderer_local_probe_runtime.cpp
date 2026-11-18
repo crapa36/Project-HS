@@ -53,75 +53,6 @@ Result D3D12Renderer::Impl::CreateStaticShadowBakeGeometry()
     return SubmitResidentUtilityUpload(command_list.Get(), frame.allocator.Get(), uploads);
 }
 
-void D3D12Renderer::Impl::PrepareLocalProbeCaptureInputs(LocalProbeRuntimeFrameInputs &inputs,
-    std::array<LocalProbeCapturePage, kEnvironmentMaterialNames.size() + 1> &pages,
-    std::vector<LocalProbeSceneRead> &reads, bool restored_graph,
-    std::span<const GeometryPageGpu *const> bucket_pages,
-    ResourceVersion static_instances_version,
-    ResourceVersion material_parameter_version, ResourceVersion hero_binding_version,
-    const LightingProbeOutputs &probe_outputs, const LightListOutputs &light_outputs,
-    const VirtualShadowOutputs &virtual_shadow_outputs,
-    const LocalShadowOutputs &local_shadow_outputs,
-    const std::function<ResourceHandle(AllocationResource &, Access, std::string_view)> &import_buffer,
-    const std::function<ResourceHandle(AllocationResource &, Access, std::string_view)> &import_texture)
-{
-    inputs.static_instances = static_gpu_scene->instances.resource;
-    inputs.static_allocation = static_gpu_scene->instances.allocation;
-    if (!restored_graph) inputs.static_version = static_instances_version;
-    inputs.binding_owners.push_back(static_gpu_scene);
-    struct CaptureNativeLease { Microsoft::WRL::ComPtr<D3D12MA::Allocation> allocation; Microsoft::WRL::ComPtr<ID3D12Resource> resource; };
-    const auto capture_read = [&](AllocationResource &resource, bool texture, std::string_view name,
-                                  ResourceVersion produced = {}) {
-        if (!resource.resource) return;
-        const auto version = produced.resource ? produced : graph.Version(texture
-            ? import_texture(resource, Access::AllShaderRead, name)
-            : import_buffer(resource, Access::AllShaderRead, name));
-        if (!restored_graph && std::ranges::none_of(reads, [&](const auto &read) {
-                return read.version.resource.value == version.resource.value &&
-                       read.version.resource.kind == version.resource.kind;
-            }))
-            reads.push_back({version, Access::AllShaderRead});
-        inputs.binding_owners.push_back(std::make_shared<CaptureNativeLease>(CaptureNativeLease{resource.allocation, resource.resource}));
-    };
-    for (std::size_t material = 0; material < pages.size(); ++material)
-    {
-        const auto &page = material == kEnvironmentMaterialNames.size() ? procedural_geometry : *bucket_pages[material * 3];
-        auto &capture = pages[material];
-        capture.vertices = page.storage.resource; capture.indices = page.storage.resource;
-        capture.vertex_allocation = page.storage.allocation; capture.index_allocation = page.storage.allocation;
-        if (!restored_graph)
-            capture.vertex_version = graph.Version(import_buffer(
-                const_cast<AllocationResource &>(page.storage), Access::VertexShaderRead, "ProbeCompleteGeometry"));
-        capture.index_version = capture.vertex_version;
-        capture.vertex_view = page.vertex_view; capture.index_view = page.index_view;
-        capture.index_count = page.index_count; capture.generation = page.generation; capture.page_slot = page.page_slot;
-        capture.source_digest = page.source_digest;
-        capture.bounds = page.metadata.bounds;
-        capture.complete = page.storage.resource && page.index_count != 0;
-    }
-    capture_read(material_parameters, false, "ProbeMaterialParameters", material_parameter_version);
-    capture_read(mesh_material_bindings_gpu, false, "ProbeHeroBindings", hero_binding_version);
-    capture_read(environment_brdf_lut, true, "ProbeBrdfLut");
-    if (!restored_graph)
-    {
-    for (const auto version : {probe_outputs.radiance, probe_outputs.prefiltered, probe_outputs.irradiance,
-            light_outputs.lights, light_outputs.grid}) reads.push_back({version, Access::AllShaderRead});
-    if (virtual_shadow_outputs.resources[0])
-        for (const auto version : {virtual_shadow_outputs.metadata, virtual_shadow_outputs.page_table,
-                virtual_shadow_outputs.static_bank, virtual_shadow_outputs.dynamic_bank, virtual_shadow_outputs.draw_records})
-            reads.push_back({version, Access::AllShaderRead});
-    if(virtual_shadow_outputs.root_static.resource)
-        reads.push_back({virtual_shadow_outputs.root_static,Access::AllShaderRead});
-    if(virtual_shadow_outputs.root_dynamic.resource)
-        reads.push_back({virtual_shadow_outputs.root_dynamic,Access::AllShaderRead});
-    if (local_shadow_outputs.resources[0])
-        for (const auto version : {local_shadow_outputs.metadata, local_shadow_outputs.records,
-                local_shadow_outputs.static_bank, local_shadow_outputs.dynamic_bank, local_shadow_outputs.draw_records})
-            reads.push_back({version, Access::AllShaderRead});
-    }
-    inputs.pages = pages;
-    inputs.scene_reads = reads;
-}
 
 #endif
 namespace
@@ -187,6 +118,7 @@ class Identity
     { Integer(value.size()); hash_.Add(std::as_bytes(std::span(value.data(),value.size()))); }
     void Bytes(std::span<const std::byte> value)
     { Integer(value.size()); hash_.Add(value); }
+    void AppendEncoded(std::span<const std::byte> bytes) { hash_.Add(bytes); }
     std::string Finish() { return "sha256:" + Hex(hash_.Finish()); }
   private:
     hs::Sha256Stream hash_;
@@ -257,6 +189,52 @@ std::uint32_t MaterialOrdinal(const RenderInstance &instance)
     case RenderMesh::Ground: case RenderMesh::DirtPatch: return rd::kTerrainMaterialOrdinal;
     default: throw std::runtime_error("Dynamic/unsupported mesh in immutable local-probe static scene");
     }
+}
+void AppendStaticLayoutInstances(Identity &layout,std::span<const RenderInstance> instances)
+{
+    using EncodedInstance=std::array<std::uint32_t,23>;
+    static_assert(sizeof(EncodedInstance)==92 && std::endian::native==std::endian::little);
+    // Batch canonical 92-byte records instead of updating the hash for every scalar.
+    std::array<EncodedInstance,32> batch;
+    std::size_t count=0;
+    for(const auto &instance:instances)
+    {
+        (void)MaterialOrdinal(instance);
+        Require(std::isfinite(instance.position.x) && std::isfinite(instance.position.y) &&
+            std::isfinite(instance.position.z) && std::isfinite(instance.scale.x) &&
+            std::isfinite(instance.scale.y) && std::isfinite(instance.scale.z) &&
+            std::isfinite(instance.yaw),"Nonfinite actual native capture input");
+        batch[count++]={
+            static_cast<std::uint32_t>(instance.stable_id),
+            static_cast<std::uint32_t>(instance.stable_id>>32u),
+            static_cast<std::uint32_t>(instance.mesh),
+            std::bit_cast<std::uint32_t>(instance.position.x),
+            std::bit_cast<std::uint32_t>(instance.position.y),
+            std::bit_cast<std::uint32_t>(instance.position.z),
+            std::bit_cast<std::uint32_t>(instance.scale.x),
+            std::bit_cast<std::uint32_t>(instance.scale.y),
+            std::bit_cast<std::uint32_t>(instance.scale.z),
+            std::bit_cast<std::uint32_t>(instance.yaw),
+            static_cast<std::uint32_t>(instance.color_rgba),
+            static_cast<std::uint32_t>(instance.environment_seed),
+            static_cast<std::uint32_t>(instance.environment_variant),
+            static_cast<std::uint32_t>(instance.asset_id.value),
+            static_cast<std::uint32_t>(instance.asset_id.value>>32u),
+            static_cast<std::uint32_t>(instance.material_id.value),
+            static_cast<std::uint32_t>(instance.material_id.value>>32u),
+            static_cast<std::uint32_t>(instance.revisions.transform),
+            static_cast<std::uint32_t>(instance.revisions.transform>>32u),
+            static_cast<std::uint32_t>(instance.revisions.material),
+            static_cast<std::uint32_t>(instance.revisions.material>>32u),
+            static_cast<std::uint32_t>(instance.revisions.content),
+            static_cast<std::uint32_t>(instance.revisions.content>>32u)};
+        if(count==batch.size())
+        {
+            layout.AppendEncoded(std::as_bytes(std::span(batch)));
+            count=0;
+        }
+    }
+    if(count) layout.AppendEncoded(std::as_bytes(std::span(batch).first(count)));
 }
 #if defined(HS_OFFLINE_PROBE_BAKER)
 std::uint32_t PageOrdinal(const RenderInstance &instance)
@@ -419,7 +397,6 @@ struct LocalProbeCaptureState
 #endif
     rd::SceneProbeRevisions baseline;
     rd::SceneProbePayload payload;
-    std::vector<rd::SceneProbeRecord> probes;
     std::string scene_generation,input_identity;
     Identities environment,material_products;
     std::shared_ptr<const StaticRenderScene> revision_scene;
@@ -440,7 +417,6 @@ struct LocalProbeCaptureState
     rd::SceneProbeRevisions derived_revisions;
     rd::SceneProbeRevisions compatibility_revisions;
     std::vector<LocalProbePageRevision> revision_pages;
-    std::uint64_t revision_material_parameter{}, revision_pipeline{};
     std::array<std::uint32_t,3> revision_material_quality{};
     bool material_revision_facts_valid{};
 };
@@ -643,8 +619,6 @@ std::span<const std::uint32_t> LocalProbeRuntime::CachedCaptureMaterialOrdinals(
     return impl_->material_scene.lock()==scene&&impl_->material_foliage_density_bits==std::bit_cast<std::uint32_t>(foliage_density)
         ?std::span<const std::uint32_t>(impl_->material_ordinals):std::span<const std::uint32_t>{};
 }
-bool LocalProbeRuntime::CaptureIdentityPending(const CompletionSet &completed) const noexcept
-{ return impl_->service.CaptureIdentityPending(completed); }
 
 namespace
 {
@@ -687,7 +661,7 @@ Result PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &ca
     const bool needs_sky=color&&!capture->native->sky;
     if(!needs_material&&!needs_shadow&&!needs_sky)return Result::Success();
     const auto vertex=needs_material||needs_shadow
-        ?ReadProduct(config,"render/shader/local_probe_capture_source_base_vs.dxil"):std::vector<std::byte>{};
+        ?ReadProduct(config,"lighting/producer/local_probe_capture_source_base_vs.dxil"):std::vector<std::byte>{};
     constexpr D3D12_INPUT_ELEMENT_DESC layout[]{
         {"POSITION",0,DXGI_FORMAT_R32G32B32_FLOAT,0,0,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
         {"NORMAL",0,DXGI_FORMAT_R32G32B32_FLOAT,0,12,D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA,0},
@@ -737,7 +711,7 @@ Result PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &ca
         {
             try
             {
-                const auto pixel=ReadProduct(config,"render/shader/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_capture.dxil");
+                const auto pixel=ReadProduct(config,"lighting/producer/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_capture.dxil");
                 material.PS={pixel.data(),pixel.size()};
                 material.RasterizerState.CullMode=D3D12_CULL_MODE_NONE;
                 const auto result=pipeline_cache->CreateGraphics(&material,IID_PPV_ARGS(&capture->native->materials[i]));
@@ -750,7 +724,7 @@ Result PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &ca
         {
             try
             {
-                const auto shadow_pixel=ReadProduct(config,"render/shader/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_shadow.dxil");
+                const auto shadow_pixel=ReadProduct(config,"lighting/producer/"+std::string(rd::kAuthoredMaterialNames[i])+"_probe_shadow.dxil");
                 auto depth=material; depth.RasterizerState.CullMode=Masked(i)?D3D12_CULL_MODE_NONE:D3D12_CULL_MODE_BACK; depth.PS={shadow_pixel.data(),shadow_pixel.size()}; depth.NumRenderTargets=0;
                 for(auto &format:depth.RTVFormats) format=DXGI_FORMAT_UNKNOWN;
                 // Virtual pages use zero constant bias; probes retain their directional bias.
@@ -821,7 +795,7 @@ Result PrepareCapturePipelines(const std::shared_ptr<LocalProbeCaptureState> &ca
         try
         {
             const auto fullscreen=ReadProduct(config,"render/shader/fullscreen_vs.dxil");
-            const auto sky=ReadProduct(config,"render/shader/local_probe_capture_sky_ps.dxil");
+            const auto sky=ReadProduct(config,"lighting/producer/local_probe_capture_sky_ps.dxil");
             p.VS={fullscreen.data(),fullscreen.size()}; p.PS={sky.data(),sky.size()}; p.InputLayout={};
             p.RasterizerState.CullMode=D3D12_CULL_MODE_NONE; p.DepthStencilState.DepthEnable=FALSE;
             p.DepthStencilState.DepthWriteMask=D3D12_DEPTH_WRITE_MASK_ZERO;
@@ -931,34 +905,33 @@ Result D3D12Renderer::Impl::PrepareSceneProbeBakeSources(SceneProbeBakeSources &
             "bark_surface", "bark_normal", "bark_detail", "grass_basecolor", "grass_normal", "grass_roughness",
             "leaf_basecolor", "leaf_normal", "leaf_roughness", "terrain_histogram"};
         static_assert(legacy_names.size() == kEnvironmentTextureCount);
-        for (UINT frame = 0; frame < kFrameCount; ++frame)
+        for (UINT material = 0; material < environment_material_bindings.size(); ++material)
         {
-            for (UINT material = 0; material < environment_material_bindings.size(); ++material)
-                for (UINT slot = 0; slot < rd::kMaterialTextureSlots; ++slot)
-                {
-                    const auto &id = environment_material_bindings[material].product_ids[slot];
-                    const auto found = textures.find(id);
-                    WriteEnvironmentMaterialTextureDescriptor(frame, material, slot,
-                        found == textures.end() ? nullptr : sources.textures[found->second].resource.resource.Get());
-                }
-            for (UINT index = 0; index < legacy_names.size(); ++index)
+            for (UINT slot = 0; slot < rd::kMaterialTextureSlots; ++slot)
             {
-                const auto id = std::string("render/texture/environment_") + legacy_names[index] + ".rpkg";
+                const auto &id = environment_material_bindings[material].product_ids[slot];
                 const auto found = textures.find(id);
-                Require(found != textures.end(), "Scene-probe legacy environment texture is missing: " + id);
-                auto *resource = sources.textures[found->second].resource.resource.Get();
-                const auto desc = resource->GetDesc();
-                WriteEnvironmentTextureDescriptor(frame, index, resource, desc.Format, desc.MipLevels, desc.DepthOrArraySize);
+                WriteEnvironmentMaterialTextureDescriptor(0, material, slot,
+                    found == textures.end() ? nullptr : sources.textures[found->second].resource.resource.Get());
             }
-            D3D12_SHADER_RESOURCE_VIEW_DESC metadata{};
-            metadata.Format = DXGI_FORMAT_UNKNOWN; metadata.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-            metadata.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            metadata.Buffer.NumElements = kTextureFeedbackBindingCount;
-            metadata.Buffer.StructureByteStride = sizeof(UINT) * 4;
-            auto handle = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-            handle.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + kTextureFeedbackDescriptorOffset) * srv_stride;
-            device->CreateShaderResourceView(nullptr, &metadata, handle);
         }
+        for (UINT index = 0; index < legacy_names.size(); ++index)
+        {
+            const auto id = std::string("render/texture/environment_") + legacy_names[index] + ".rpkg";
+            const auto found = textures.find(id);
+            Require(found != textures.end(), "Scene-probe legacy environment texture is missing: " + id);
+            auto *resource = sources.textures[found->second].resource.resource.Get();
+            const auto desc = resource->GetDesc();
+            WriteEnvironmentTextureDescriptor(0, index, resource, desc.Format, desc.MipLevels, desc.DepthOrArraySize);
+        }
+        D3D12_SHADER_RESOURCE_VIEW_DESC metadata{};
+        metadata.Format = DXGI_FORMAT_UNKNOWN; metadata.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
+        metadata.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        metadata.Buffer.NumElements = kTextureFeedbackBindingCount;
+        metadata.Buffer.StructureByteStride = sizeof(UINT) * 4;
+        auto handle = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
+        handle.ptr += static_cast<SIZE_T>(kTextureFeedbackDescriptorOffset) * srv_stride;
+        device->CreateShaderResourceView(nullptr, &metadata, handle);
         if (auto brdf = CreateEnvironmentBrdfLut(config, environment_brdf_lut); !brdf) return brdf;
         WriteEnvironmentBrdfLutDescriptors();
         LightingProbeCandidate probe;
@@ -997,7 +970,7 @@ Result LocalProbeRuntime::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
 #else
         Require(package.payload==rd::SceneProbePayload::Baked,"Runtime requires baked scene lighting; cook the selected generation.");
 #endif
-        capture->baseline=package.description.revisions; capture->payload=package.payload; capture->probes=package.probes;
+        capture->baseline=package.description.revisions; capture->payload=package.payload;
         capture->scene_generation=scene_generation;
         Require(package.dependencies[package.description.environment_dependency]==kEnvironment,"Local package references a different global environment");
         const auto environment=ReadProduct(config,kEnvironment);
@@ -1118,14 +1091,7 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
             Identity layout; layout.Text("local-probe.static-scene-compatibility.v1");
             layout.Integer(in.scene->layout_abi,4);
             layout.Integer(in.scene->instances.size());
-            for(const auto &instance:in.scene->instances)
-            {
-                (void)MaterialOrdinal(instance); layout.Integer(instance.stable_id); layout.Integer(static_cast<std::uint32_t>(instance.mesh),4);
-                layout.Vector(instance.position); layout.Vector(instance.scale); layout.Float(instance.yaw);
-                layout.Integer(instance.color_rgba,4); layout.Integer(instance.environment_seed,4); layout.Integer(instance.environment_variant,4);
-                layout.Integer(instance.asset_id.value); layout.Integer(instance.material_id.value);
-                layout.Integer(instance.revisions.transform); layout.Integer(instance.revisions.material); layout.Integer(instance.revisions.content);
-            }
+            AppendStaticLayoutInstances(layout,in.scene->instances);
             auto capture_layout=layout;
             capture_layout.Float(in.foliage_density);
             capture->layout_identity=capture_layout.Finish();
@@ -1138,16 +1104,13 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
         const std::array material_quality{std::bit_cast<std::uint32_t>(quality.x),
             std::bit_cast<std::uint32_t>(quality.y),std::bit_cast<std::uint32_t>(quality.z)};
         const bool material_inputs_changed=!capture->material_revision_facts_valid||
-            capture->revision_material_parameter!=in.material_parameter_revision||
-            capture->revision_pipeline!=in.pipeline_revision||capture->revision_material_quality!=material_quality||
+            capture->revision_material_quality!=material_quality||
             !SamePageRevisions(capture->revision_pages,page_facts);
         if(material_inputs_changed)
         {
             Identity material; material.Text("local-probe.material-compatibility.v2");
-            // pipeline_revision is a renderer-wide refresh trigger. Keep it in
-            // material_inputs_changed above, but let the scoped product digests
-            // below determine whether probe capture semantics actually changed.
-            material.Integer(in.material_parameter_revision);
+            // Preserve the fixed zero slot in the baked v2 identity.
+            material.Integer(std::uint64_t{});
             for(const auto &page:page_facts)
             {
                 Require(page.generation&&page.index_count,"Capture geometry is not an actual complete page");
@@ -1170,8 +1133,6 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
             capture->material_revision_identity=capture_material.Finish();
             capture->compatibility_material_identity=material.Finish();
             capture->revision_pages.assign(page_facts.begin(),page_facts.end());
-            capture->revision_material_parameter=in.material_parameter_revision;
-            capture->revision_pipeline=in.pipeline_revision;
             capture->revision_material_quality=material_quality;
             capture->material_revision_facts_valid=true;
         }
@@ -1278,14 +1239,14 @@ Result LocalProbeRuntime::CurrentRevisions(const LocalProbeRuntimeFrameInputs &i
     }
     catch(const std::exception &error) { return Failure(error.what()); }
 }
-Result LocalProbeRuntime::PrepareFrameDecisionData(const LocalProbeRuntimeFrameInputs &in,
-    LocalProbeRuntimeFramePlan &plan) const
+Result LocalProbeRuntime::PrepareFrameRecordData(const LocalProbeRuntimeFrameInputs &in,
+    LocalProbeRuntimeFramePlan &plan)
 {
+    if(impl_->pending_graph)return Failure("Local-probe runtime already has pending graph work");
     plan={};plan.source=&in;plan.scene=in.scene;
     plan.static_instance_generation=in.static_instance_generation;
-    plan.material_parameter_revision=in.material_parameter_revision;
-    plan.pipeline_revision=in.pipeline_revision;
 #if defined(HS_OFFLINE_PROBE_BAKER)
+    std::erase_if(impl_->retired_frames,[&](const auto &frame){return frame->completion.IsSatisfiedBy(in.completed);});
     plan.light_count=in.lights.size();plan.page_count=in.pages.size();
     plan.scene_read_count=in.scene_reads.size();plan.max_cube_views=in.max_cube_views;
     plan.capture_identity_valid=in.texture_facts_valid;
@@ -1304,16 +1265,6 @@ Result LocalProbeRuntime::PrepareFrameDecisionData(const LocalProbeRuntimeFrameI
     plan.shadow=impl_->capture->revision_shadow.enabled;
     plan.capture=in.max_cube_views&&impl_->service.NativeCaptureRequired(in.scene,plan.revisions,in.completed)&&
         (!in.texture_facts_valid||plan.capture_sources_ready);
-#endif
-    return Result::Success();
-}
-Result LocalProbeRuntime::PrepareFrameRecordData(const LocalProbeRuntimeFrameInputs &in,
-    LocalProbeRuntimeFramePlan &plan)
-{
-    if(impl_->pending_graph)return Failure("Local-probe runtime already has pending graph work");
-#if defined(HS_OFFLINE_PROBE_BAKER)
-    std::erase_if(impl_->retired_frames,[&](const auto &frame){return frame->completion.IsSatisfiedBy(in.completed);});
-    if(auto decided=PrepareFrameDecisionData(in,plan);!decided)return decided;
     if(!plan.capture)return Result::Success();
     try
     {
@@ -1336,23 +1287,8 @@ Result LocalProbeRuntime::PrepareFrameRecordData(const LocalProbeRuntimeFrameInp
     }
     catch(const std::exception &error){return Failure(error.what());}
 #else
-    return PrepareFrameDecisionData(in,plan);
+    return Result::Success();
 #endif
-}
-bool LocalProbeRuntimeLayout::HasCaptureBindings() const noexcept
-{
-#if defined(HS_OFFLINE_PROBE_BAKER)
-    return capture && (capture->capture || !capture->scene_reads.empty());
-#else
-    return false;
-#endif
-}
-
-Result LocalProbeRuntime::Register(RenderGraphBuilder &graph,const LocalProbeRuntimeFrameInputs &in,LocalProbeOutputs &out)
-{
-    LocalProbeRuntimeFramePlan plan;
-    if(auto prepared=PrepareFrameRecordData(in,plan);!prepared)return prepared;
-    return RegisterImpl(graph,in,plan,out,nullptr,nullptr);
 }
 Result LocalProbeRuntime::Register(RenderGraphBuilder &graph,const LocalProbeRuntimeFrameInputs &in,
     const LocalProbeRuntimeFramePlan &plan,LocalProbeOutputs &out,LocalProbeRuntimeLayout *layout)
@@ -1367,8 +1303,7 @@ bool LocalProbeRuntime::MatchesLayout(const LocalProbeRuntimeFrameInputs &in,
     if(!layout.capture||plan.source!=&in||plan.scene!=in.scene||plan.active!=layout.active||
         plan.capture!=layout.capture->capture||plan.shadow!=layout.capture->shadow||
         plan.static_instance_generation!=in.static_instance_generation||
-        plan.material_parameter_revision!=in.material_parameter_revision||
-        plan.pipeline_revision!=in.pipeline_revision||plan.light_count!=in.lights.size()||
+        plan.light_count!=in.lights.size()||
         plan.page_count!=in.pages.size()||plan.scene_read_count!=in.scene_reads.size()||
         plan.capture_identity_valid!=in.texture_facts_valid||
         (plan.capture_identity_valid&&(plan.capture_identity!=CaptureBindingIdentity(in.texture_facts,in.page_revisions,in.pages)||
@@ -1419,8 +1354,7 @@ Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProb
 #if defined(HS_OFFLINE_PROBE_BAKER)
     out={};if(!plan.source||plan.source!=&in||plan.scene!=in.scene||
         plan.static_instance_generation!=in.static_instance_generation||
-        plan.material_parameter_revision!=in.material_parameter_revision||
-        plan.pipeline_revision!=in.pipeline_revision||plan.light_count!=in.lights.size()||
+        plan.light_count!=in.lights.size()||
         plan.page_count!=in.pages.size()||plan.scene_read_count!=in.scene_reads.size()||
         plan.capture_identity_valid!=in.texture_facts_valid||
         (plan.capture_identity_valid&&(plan.capture_identity!=CaptureBindingIdentity(in.texture_facts,in.page_revisions,in.pages)||
@@ -1620,8 +1554,7 @@ Result LocalProbeRuntime::RegisterImpl(RenderGraphBuilder &graph,const LocalProb
     catch(const std::exception &error) { return Failure(error.what()); }
 #else
     out={};
-    if(plan.source!=&in || plan.scene!=in.scene || plan.static_instance_generation!=in.static_instance_generation ||
-        plan.material_parameter_revision!=in.material_parameter_revision || plan.pipeline_revision!=in.pipeline_revision)
+    if(plan.source!=&in || plan.scene!=in.scene || plan.static_instance_generation!=in.static_instance_generation)
         return Failure("Baked lighting publication inputs changed before recording.");
     if(layout){*layout={};layout->active=plan.active;}
     if(!plan.active)return Result::Success();
@@ -1688,8 +1621,6 @@ Result LocalProbeRuntime::ExportBakedPackage(RenderGraphQueueExecutor &executor,
         &expected,&compatibility);
 }
 #endif
-std::span<const rd::SceneProbeRecord> LocalProbeRuntime::Probes() const noexcept
-{ return impl_->capture?std::span<const rd::SceneProbeRecord>(impl_->capture->probes):std::span<const rd::SceneProbeRecord>{}; }
 rd::SceneProbeRevisions LocalProbeRuntime::BaselineRevisions() const noexcept
 { return impl_->capture?impl_->capture->baseline:rd::SceneProbeRevisions{}; }
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -1702,7 +1633,6 @@ LocalProbeRevisionDiagnostics LocalProbeRuntime::RevisionDiagnostics() const
         result.compatibility=capture->compatibility_revisions;
         result.compatibility.environment=capture->baseline.environment;
         result.compatibility.light=capture->baseline.light;
-        result.material_parameter_revision=capture->revision_material_parameter;
     }
     return result;
 }
@@ -1728,7 +1658,7 @@ std::uint64_t LocalProbeRuntime::AllocatedBytes() const noexcept
 #if defined(HS_OFFLINE_PROBE_BAKER)
 Result D3D12Renderer::Impl::PrepareWorldTransportInstances(
     const std::shared_ptr<const StaticRenderScene> &scene, AllocationResource &instances,
-    std::uint32_t &generation, bool terrain_sections)
+    std::uint32_t &generation, std::vector<GpuTerrainSection> *terrain_rows)
 {
     generation = 0;
     if (!scene || scene->instances.empty() || scene->instances.size() > kLocalProbeSourceCapacity)
@@ -1742,7 +1672,6 @@ Result D3D12Renderer::Impl::PrepareWorldTransportInstances(
     std::byte *mapped{}; D3D12_RANGE no_read{};
     const auto result = instances.resource->Map(0, &no_read, reinterpret_cast<void **>(&mapped));
     if (FAILED(result)) return HResultFailure("Map world transport static scene", result);
-    std::memset(mapped, 0, static_cast<std::size_t>(layout.total_bytes));
     std::memcpy(mapped, &layout.header, sizeof(layout.header));
     constexpr std::uint32_t instance_generation = 1;
     for (std::size_t index = 0; index < scene->instances.size(); ++index)
@@ -1751,9 +1680,18 @@ Result D3D12Renderer::Impl::PrepareWorldTransportInstances(
         const bool environment = rd::IsEnvironmentMesh(source.mesh);
         const auto mesh = static_cast<UINT>(source.mesh) | (environment ? kEnvironmentMeshFlag : 0u) |
             (source.mesh == RenderMesh::GroundDetail ? source.environment_variant << 8u : 0u);
-        const auto seed = source.mesh == RenderMesh::Ground || source.mesh == RenderMesh::DirtPatch ||
-            source.mesh == RenderMesh::MeadowSurface ? std::bit_cast<float>(terrain_sections
-                ? static_cast<UINT>(index) : source.environment_seed) : 0.0f;
+        const bool has_terrain_seed = source.mesh == RenderMesh::Ground ||
+            source.mesh == RenderMesh::DirtPatch || source.mesh == RenderMesh::MeadowSurface;
+        const auto seed = has_terrain_seed
+            ? std::bit_cast<float>(terrain_rows ? static_cast<UINT>(terrain_rows->size()) : source.environment_seed)
+            : 0.0f;
+        if (terrain_rows && has_terrain_seed)
+        {
+            if (const auto section = TerrainSectionFrom(source))
+                terrain_rows->push_back(GpuTerrainSection::From(*section, source));
+            else
+                terrain_rows->push_back({.seed = source.environment_seed, .pageSlice = UINT_MAX});
+        }
         const GpuInstance instance{{source.position.x, source.position.y + (environment ? 0 : source.scale.y * .5f), source.position.z, 0},
             {source.scale.x, source.scale.y, source.scale.z, 1}, source.color_rgba, mesh, source.yaw, seed};
         const auto slot = SerializeGpuSceneSlot(static_cast<UINT>(index), instance,
@@ -1781,20 +1719,6 @@ struct StaticShadowBakeFrame
     ComPtr<ID3D12CommandAllocator> allocator;
     ComPtr<ID3D12GraphicsCommandList> list;
 };
-
-Result D3D12Renderer::BakeStaticShadowPages(const std::shared_ptr<const StaticRenderScene> &scene,
-    const LightView &light,
-    const std::function<Result(const rd::StaticShadowArchiveDescription &)> &begin,
-    const std::function<Result(std::uint32_t,std::int32_t,std::int32_t,std::span<const float>)> &page_sink)
-{
-    if (!impl_->initialized)
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-            "Static shadow bake requires an initialized healthy renderer.");
-    if (!scene || scene->instances.empty() || !begin || !page_sink)
-        return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
-            "Static shadow bake requires a nonempty scene and both archive callbacks.");
-    return BakeStaticShadowPagesPrepared(scene, light, begin, page_sink);
-}
 
 Result D3D12Renderer::BakeStaticShadowPagesPrepared(
     const std::shared_ptr<const StaticRenderScene> &scene, const LightView &light,
@@ -1910,7 +1834,7 @@ Result D3D12Renderer::BakeStaticShadowPagesPrepared(
             const auto page=PageOrdinal(source); Require(frame->pages[page].complete,"Bake caster lacks complete source geometry");
             frame->draws.push_back({static_cast<UINT>(index),MaterialOrdinal(source),{},page});
         }
-        if (auto prepared=impl_->PrepareWorldTransportInstances(scene,owner->instances,frame->generation,false);!prepared)
+        if (auto prepared=impl_->PrepareWorldTransportInstances(scene,owner->instances,frame->generation);!prepared)
             return prepared;
         D3D12_RANGE no_read{};
         frame->static_instances=owner->instances.resource;
@@ -2110,7 +2034,7 @@ Result D3D12Renderer::BakeStaticShadowPagesPrepared(
     }
     catch(const std::exception &error) { return Failure(error.what()); }
 }
-Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
+Result D3D12Renderer::BakeSceneProbePackage(RendererConfig configuration,
     const std::shared_ptr<const StaticRenderScene> &scene, const LightView &sun,
     std::vector<std::byte> &package_bytes, std::uint32_t maximum_cube_views_per_graph, SceneProbeBakePolicy policy)
 {
@@ -2136,75 +2060,40 @@ Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
     const auto run = [&]() -> Result {
         if (!scene || sun.type != LightType::Directional)
             return Failure("Scene-probe baking requires the actual static scene and directional sun.");
-        if (auto initialized = owner.InitializeWorldTransportBake(configuration, WorldTransportBakeKind::SceneProbe); !initialized)
+        if (auto initialized = owner.InitializeWorldTransportBake(std::move(configuration), WorldTransportBakeKind::SceneProbe); !initialized)
             return initialized;
         auto &renderer = *owner.impl_;
         if (auto prepared = renderer.PrepareSceneProbeBakeSources(*sources); !prepared) return prepared;
         auto &view = *renderer.owned_views.at(kMainRenderViewId.value);
         auto &pool = view.targets.transient_pools[0];
         std::uint32_t generation{};
+        std::vector<Impl::GpuTerrainSection> terrain_rows;
         if (auto prepared = renderer.PrepareWorldTransportInstances(scene,
-                sources->instances, generation, true); !prepared) return prepared;
+                sources->instances, generation, &terrain_rows); !prepared) return prepared;
 
-        const auto terrain_bytes = scene->instances.size() * sizeof(Impl::GpuTerrainSection);
-        D3D12MA::ALLOCATION_DESC terrain_allocation{};
-        terrain_allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
-        if (auto created = renderer.CreateAllocation(*terrain_source, terrain_allocation,
-                BufferDescription(terrain_bytes), D3D12_RESOURCE_STATE_GENERIC_READ); !created) return created;
-        Impl::GpuTerrainSection *terrain_records{};
-        D3D12_RANGE no_terrain_read{};
-        Native(terrain_source->resource->Map(0, &no_terrain_read,
-            reinterpret_cast<void **>(&terrain_records)), "Map source-only probe terrain sections");
-        for (std::size_t index = 0; index < scene->instances.size(); ++index)
+        if (!terrain_rows.empty())
         {
-            terrain_records[index] = {};
-            const auto &source=scene->instances[index];
-            auto &record=terrain_records[index];
-            record.seed=source.environment_seed; record.pageSlice=UINT_MAX;
-            if(const auto section=Impl::TerrainSectionFrom(source))
-            {
-                record.center={section->x,section->z}; record.span={section->span_x,section->span_z};
-                record.rotation={section->cosine,section->sine}; record.mesh=section->mesh;
-                record.heightTransform={source.position.y,source.scale.y};
-            }
-        }
-        terrain_source->resource->Unmap(0, nullptr);
-        terrain_source->graph_access = Access::AllShaderRead;
-        terrain_source->graph_queue = QueueHint::Direct;
-        for (UINT frame = 0; frame < kFrameCount; ++frame)
-        {
-            renderer.terrain_descriptor_banks[frame].descriptors_initialized = false;
+            const auto terrain_bytes = terrain_rows.size() * sizeof(Impl::GpuTerrainSection);
+            D3D12MA::ALLOCATION_DESC terrain_allocation{};
+            terrain_allocation.HeapType = D3D12_HEAP_TYPE_UPLOAD;
+            if (auto created = renderer.CreateAllocation(*terrain_source, terrain_allocation,
+                    BufferDescription(terrain_bytes), D3D12_RESOURCE_STATE_GENERIC_READ); !created) return created;
+            Impl::GpuTerrainSection *terrain_records{};
+            D3D12_RANGE no_terrain_read{};
+            Native(terrain_source->resource->Map(0, &no_terrain_read,
+                reinterpret_cast<void **>(&terrain_records)), "Map source-only probe terrain sections");
+            std::memcpy(terrain_records, terrain_rows.data(), terrain_bytes);
+            terrain_source->resource->Unmap(0, nullptr);
+            terrain_source->graph_access = Access::AllShaderRead;
+            terrain_source->graph_queue = QueueHint::Direct;
             auto handle = renderer.srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-            handle.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + kTerrainPageDescriptorOffset) * renderer.srv_stride;
-            const auto terrain_base = handle.ptr;
-            handle.ptr = terrain_base + SIZE_T(HS_TERRAIN_SECTION_SRV) * renderer.srv_stride;
+            handle.ptr += static_cast<SIZE_T>(kTerrainPageDescriptorOffset + HS_TERRAIN_SECTION_SRV) * renderer.srv_stride;
             D3D12_SHADER_RESOURCE_VIEW_DESC srv{};
             srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             srv.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
-            srv.Buffer.NumElements = static_cast<UINT>(scene->instances.size());
+            srv.Buffer.NumElements = static_cast<UINT>(terrain_rows.size());
             srv.Buffer.StructureByteStride = sizeof(Impl::GpuTerrainSection);
             renderer.device->CreateShaderResourceView(terrain_source->resource.Get(), &srv, handle);
-            handle.ptr = terrain_base + SIZE_T(HS_TERRAIN_MIP_SRV) * renderer.srv_stride;
-            srv.Buffer.NumElements = 1;
-            srv.Buffer.StructureByteStride = sizeof(Impl::GpuTerrainPlaneMip);
-            renderer.device->CreateShaderResourceView(nullptr, &srv, handle);
-            handle.ptr = terrain_base + SIZE_T(HS_TERRAIN_PLANE_SRV) * renderer.srv_stride;
-            srv = {};
-            srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            srv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-            srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-            srv.Texture2D.MipLevels = 1;
-            for (UINT index = 0; index < kTerrainPagePlaneCapacity; ++index)
-            {
-                renderer.device->CreateShaderResourceView(nullptr, &srv, handle);
-                handle.ptr += renderer.srv_stride;
-            }
-            handle.ptr = terrain_base + SIZE_T(HS_TERRAIN_REQUEST_DESCRIPTOR) * renderer.srv_stride;
-            D3D12_UNORDERED_ACCESS_VIEW_DESC requests{};
-            requests.Format = DXGI_FORMAT_R32_UINT;
-            requests.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-            requests.Buffer.NumElements = HS_TERRAIN_PAGE_TILE_CAPACITY;
-            renderer.device->CreateUnorderedAccessView(nullptr, nullptr, &requests, handle);
         }
 
         LightListCandidate lights;
@@ -2357,7 +2246,8 @@ Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
                 reads.push_back({grid_version,Access::AllShaderRead});
             }
             read(renderer.environment_brdf_lut, true, Access::AllShaderRead, "ProbeBrdfLut");
-            read(*terrain_source, false, Access::AllShaderRead, "ProbeSourceTerrainSections");
+            if (terrain_source->resource)
+                read(*terrain_source, false, Access::AllShaderRead, "ProbeSourceTerrainSections");
             for (auto &texture : sources->textures)
                 read(texture.resource, true, Access::AllShaderRead, texture.id);
 
@@ -2365,8 +2255,6 @@ Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
             input.max_cube_views = maximum_cube_views_per_graph;
             input.config = &renderer.config; input.pipeline_cache = &renderer.pipeline_cache;
             input.scene = scene; input.lights = std::span(&sun, 1); input.static_instance_generation = generation;
-            input.material_parameter_revision = renderer.MaterialOverrideRevision();
-            input.pipeline_revision = renderer.pipeline_revision;
             input.foliage_density = foliage; input.frame_constants = &constants; input.page_revisions = revisions;
             input.texture_facts = texture_facts; input.texture_facts_valid = true; input.pages = pages;
             input.static_instances = sources->instances.resource;
@@ -2430,7 +2318,6 @@ Result D3D12Renderer::BakeSceneProbePackage(const RendererConfig &configuration,
             for (const auto version : {probe.radiance, probe.prefiltered, probe.irradiance,
                     light_outputs.lights, light_outputs.grid}) reads.push_back({version, Access::AllShaderRead});
             input.scene_reads = reads;
-            if (auto prepared = renderer.local_probes.PrepareFrameDecisionData(input, plan); !prepared) return prepared;
             if (auto prepared = renderer.local_probes.PrepareFrameRecordData(input, plan); !prepared) return prepared;
             LocalProbeOutputs output;
             if (auto registered = renderer.local_probes.Register(renderer.graph, input, plan, output, nullptr); !registered) return registered;

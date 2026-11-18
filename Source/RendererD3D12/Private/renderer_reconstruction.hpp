@@ -8,7 +8,7 @@
 namespace hs
 {
 template<class Options>
-Result ResolveNativeReconstruction(const Options &options, ViewExtent output,
+Result ResolveNativeReconstruction(const Options &options, bool dynamic_resolution, ViewExtent output,
                                   ReconstructionPlan &plan, ViewExtent &capacity)
 {
     ReconstructionRequest request;
@@ -30,7 +30,7 @@ Result ResolveNativeReconstruction(const Options &options, ViewExtent output,
     }
     if (auto resolved = ResolveInternalReconstruction(request, output, plan); !resolved) return resolved;
     capacity = plan.render_active;
-    if (!options.dynamic_resolution) return Result::Success();
+    if (!dynamic_resolution) return Result::Success();
     ViewExtent minimum;
     if (options.dynamic_min_percent > options.dynamic_max_percent ||
         !ResolveDynamicResolutionExtent(output, options.dynamic_min_percent, minimum) ||

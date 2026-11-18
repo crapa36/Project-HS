@@ -16,17 +16,8 @@ namespace hs::renderer_detail
 class VfxRibbonState
 {
 public:
-    [[nodiscard]] static bool ValidateSources(std::span<const VfxRibbonSourceInput> sources, std::string &error,
-        std::span<const VfxRibbonOutputInput> frame_outputs = {});
     [[nodiscard]] bool ValidateFrameSources(std::span<const VfxRibbonSourceInput> sources, std::string &error,
         std::span<const VfxRibbonOutputInput> frame_outputs = {});
-    [[nodiscard]] bool Update(std::span<const VfxRibbonSourceInput> sources,
-                               Tick tick, std::uint64_t session,
-                               std::uint64_t catalog_generation,
-                               std::uint32_t point_budget, float interpolation,
-                               Float3 previous_eye, std::string &error,
-                               std::span<const VfxRibbonOutputInput> frame_outputs = {});
-
     [[nodiscard]] std::span<const GpuRibbonSourceUpdate> Updates() const noexcept { return updates_; }
     [[nodiscard]] std::span<const GpuRibbonOutput> Outputs() const noexcept { return outputs_; }
     [[nodiscard]] std::uint32_t DroppedSources() const noexcept { return dropped_sources_; }
@@ -38,7 +29,6 @@ private:
     friend class hs::D3D12Renderer;
     [[nodiscard]] bool UpdateValidated(std::span<const VfxRibbonSourceInput> sources,
                                        Tick tick, std::uint64_t session,
-                                       std::uint64_t catalog_generation,
                                        std::uint32_t point_budget, float interpolation,
                                        Float3 previous_eye, std::string &error,
                                        std::span<const VfxRibbonOutputInput> frame_outputs = {});
@@ -70,7 +60,6 @@ private:
     std::vector<std::size_t> source_scratch_;
     std::vector<GpuRibbonOutput> grouped_outputs_;
     std::uint64_t session_{};
-    std::uint64_t catalog_generation_{};
     Tick last_tick_{};
     std::uint32_t capacity_{};
     std::uint32_t dropped_sources_{};

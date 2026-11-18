@@ -41,14 +41,13 @@ struct DecalSurfaceInputs
     CompletionSet completed;
     // CPU suffix base is the service's 19-descriptor range. GPU base is the
     // complete existing main descriptor table, not the suffix start.
-    D3D12_CPU_DESCRIPTOR_HANDLE descriptor_suffix_cpu{};
     D3D12_GPU_DESCRIPTOR_HANDLE main_table_gpu{};
     ID3D12DescriptorHeap *main_heap{};
 };
 struct DecalSurfaceOutputs
 {
     DecalSurfaceGuide base, normal, material, emission;
-    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, kDecalSurfaceExportCount> export_srvs{};
+    D3D12_CPU_DESCRIPTOR_HANDLE descriptors{};
     bool active{};
 };
 struct DecalSurfaceLayout

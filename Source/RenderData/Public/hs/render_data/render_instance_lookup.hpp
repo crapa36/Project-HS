@@ -3,7 +3,6 @@
 #include <hs/render_data/render_snapshot_values.hpp>
 #include <algorithm>
 #include <array>
-#include <limits>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -59,20 +58,6 @@ class RenderInstanceLookup
         if (!valid_) return nullptr;
         const auto entry = entries_.find(id);
         return entry == entries_.end() ? nullptr : &sources_[entry->second.index];
-    }
-
-    [[nodiscard]] std::size_t RetainedCapacityBytes() const noexcept
-    {
-        const auto max = std::numeric_limits<std::size_t>::max();
-        const auto multiply = [max](std::size_t a, std::size_t b) {
-            return a && b > max / a ? max : a * b;
-        };
-        const auto add = [max](std::size_t a, std::size_t b) {
-            return b > max - a ? max : a + b;
-        };
-        return add(multiply(previous_ids_.capacity(), sizeof(std::uint64_t)),
-            add(multiply(entries_.bucket_count(), 2 * sizeof(void *)),
-                multiply(add(entries_.size(), 1), sizeof(decltype(entries_)::value_type) + 3 * sizeof(void *))));
     }
 
   private:

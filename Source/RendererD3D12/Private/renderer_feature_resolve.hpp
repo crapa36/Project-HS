@@ -59,12 +59,6 @@ struct RendererFeaturePlan
     RendererFeatureFallbackReason shadow_reason{RendererFeatureFallbackReason::None};
 };
 
-[[nodiscard]] constexpr bool EffectiveDynamicResolution(bool requested,
-    const RendererFeaturePlan &) noexcept
-{
-    return requested;
-}
-
 [[nodiscard]] constexpr std::array<bool, 2> LightingAuxiliaryTargets(
     const RendererFeaturePlan &plan, bool have_subsurface) noexcept
 {

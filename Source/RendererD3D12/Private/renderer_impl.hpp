@@ -88,17 +88,11 @@
 #include <wrl/client.h>
 
 #include <DirectXMath.h>
-
-#if defined(HS_DEVELOPMENT_TOOLS)
-#include <imgui.h>
-#include <imgui_impl_dx12.h>
-#include <imgui_impl_win32.h>
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM,
-                                                             LPARAM);
-#endif
+#include <DirectXCollision.h>
 
 #include <algorithm>
 #include <array>
+#include <bitset>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -149,7 +143,7 @@ constexpr std::uint32_t kEnvironmentDescriptorCount = 22;
 constexpr std::array<DXGI_FORMAT, kPostTextureDescriptorCount> kPostTextureSrvFormats{
     DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R16G16_SNORM, DXGI_FORMAT_R32_UINT,
     DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT,
-    DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R16_FLOAT,
+    DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R16G16_FLOAT,
     DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_R16G16B16A16_FLOAT,
     DXGI_FORMAT_B8G8R8A8_UNORM};
 constexpr std::array<D3D12_SRV_DIMENSION, kCharacterDescriptorCount> kCharacterSrvDimensions{
@@ -422,9 +416,6 @@ struct GeometryPageDescriptorCache
 
 struct GeometryPageDescriptorBank
 {
-    ComPtr<ID3D12DescriptorHeap> heap_owner;
-    SIZE_T heap_start{};
-    UINT stride{};
     std::array<GeometryPageDescriptorCache, kGeometryPageCapacity> pages{};
 };
 
@@ -874,7 +865,7 @@ struct FrameGraphLayout
         GraphicsShadowMode shadow_mode{};
         std::uint32_t geometry_upload_count{};
         std::array<std::uint64_t, (kGpuVisibilityBucketCount * 2 + 63) / 64> translucency_diagnostics_sources{};
-        std::array<std::uint64_t, (kTerrainPagePlaneCapacity + 63) / 64> terrain_sampling{};
+        std::bitset<kTerrainPagePlaneCapacity> terrain_sampling;
         [[nodiscard]] bool operator==(const EarlyKey &) const noexcept = default;
     } early;
     RenderGraphBuilder::PlanHandle handle{};
@@ -973,7 +964,9 @@ struct D3D12Renderer::Impl
         DWORD last_error{};
         bool valid{}, last_attempt_succeeded{};
     };
+#if defined(HS_DEVELOPMENT_TOOLS)
     RendererStartupTimings startup_timings;
+#endif
     struct ShadowCasterKeyHash
     {
         std::size_t operator()(const std::tuple<bool, std::uint64_t, std::uint32_t> &key) const noexcept
@@ -1005,7 +998,7 @@ struct D3D12Renderer::Impl
     };
     struct OptionTargets
     {
-        AllocationResource depth, shadow;
+        AllocationResource depth;
         AllocationResource gbuffer_base, gbuffer_normal, gbuffer_metadata, gbuffer_material,
             gbuffer_motion, gbuffer_surface_history;
         std::array<AllocationResource, 2> material_sidecars;
@@ -1074,6 +1067,8 @@ struct D3D12Renderer::Impl
         ViewId view_id{kMainRenderViewId};
         RenderViewRole role{RenderViewRole::Main};
         OptionTargets targets;
+        AllocationResource shadow_atlas;
+        ComPtr<ID3D12DescriptorHeap> depth_heap;
         UiResources ui;
         std::vector<ParticleSpawnCommand> particle_spawn_scratch;
         std::array<ComPtr<ID3D12Resource>, kFrameCount> outputs;
@@ -1163,8 +1158,6 @@ struct D3D12Renderer::Impl
         bool previous_submission_valid{};
         std::uint64_t frame_number{}, configuration_revision{}, history_generation{1};
         std::uint32_t native_viewport_id{};
-        std::string content_generation;
-        std::uint64_t pipeline_revision{};
         ViewExtent history_output_extent;
         bool ready{};
     };
@@ -1256,7 +1249,7 @@ struct D3D12Renderer::Impl
         std::string source_id;
         std::string content_generation;
         StreamingRequestId request;
-        std::vector<std::byte> decoded_storage;
+        AssetReadBuffer decoded_storage;
         std::shared_ptr<PreparedGeometryUpload> preparation;
         ResidencyTicket decoded_residency;
         ResidencyTicket decode_reservation;
@@ -1289,7 +1282,7 @@ struct D3D12Renderer::Impl
             source_id.clear();
             content_generation.clear();
             request = {};
-            std::vector<std::byte>{}.swap(decoded_storage);
+            decoded_storage.Reset();
             preparation.reset();
             decoded_residency = {};
             candidate.Reset();
@@ -1312,7 +1305,7 @@ struct D3D12Renderer::Impl
             retiring = false;
         }
     };
-    [[nodiscard]] Result CreateDevice(const RendererConfig &configuration, OwnedView &view);
+    [[nodiscard]] Result CreateDevice(RendererConfig &&configuration, OwnedView &view);
     [[nodiscard]] Result CreateRootSignature();
     [[nodiscard]] Result CreateStaticShadowBakeGeometry();
 #if defined(HS_OFFLINE_PROBE_BAKER)
@@ -1327,23 +1320,11 @@ struct D3D12Renderer::Impl
         AllocationResource instances;
     };
     [[nodiscard]] Result PrepareSceneProbeBakeSources(SceneProbeBakeSources &sources);
-    [[nodiscard]] Result PrepareWorldTransportInstances(
-        const std::shared_ptr<const StaticRenderScene> &scene, AllocationResource &instances,
-        std::uint32_t &generation, bool terrain_sections);
-    void PrepareLocalProbeCaptureInputs(LocalProbeRuntimeFrameInputs &inputs,
-        std::array<LocalProbeCapturePage, kEnvironmentMaterialNames.size() + 1> &pages,
-        std::vector<LocalProbeSceneRead> &reads, bool restored_graph,
-        std::span<const GeometryPageGpu *const> bucket_pages,
-        ResourceVersion static_instances_version,
-        ResourceVersion material_parameter_version, ResourceVersion hero_binding_version,
-        const LightingProbeOutputs &probe_outputs, const LightListOutputs &light_outputs,
-        const VirtualShadowOutputs &virtual_shadow_outputs,
-        const LocalShadowOutputs &local_shadow_outputs,
-        const std::function<ResourceHandle(AllocationResource &, Access, std::string_view)> &import_buffer,
-        const std::function<ResourceHandle(AllocationResource &, Access, std::string_view)> &import_texture);
 #endif
     [[nodiscard]] Result CreateSwapChainAndTargets(OwnedView &view);
-    [[nodiscard]] Result CreateDepthAndShadow(OwnedView &view);
+    [[nodiscard]] Result PrepareDepthTexture(AllocationResource &, std::uint32_t width, std::uint32_t height);
+    [[nodiscard]] Result CreateViewDepthHeap(OwnedView &);
+    void WriteDepthViews(OwnedView &) noexcept;
     [[nodiscard]] Result CreatePostProcessTargets(OwnedView &view);
     [[nodiscard]] std::array<bool, 2> RequiredLightingAuxiliaries(const RendererConfig &) const noexcept;
     [[nodiscard]] Result PrepareLightingAuxiliaries(std::array<AllocationResource *, 2>,
@@ -1351,7 +1332,6 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result PrepareOptionTargets(OptionTargets &targets,
                                               std::uint32_t target_width,
                                               std::uint32_t target_height,
-                                              std::uint32_t shadow_resolution,
                                               bool bloom, std::uint32_t output_width,
                                               std::uint32_t output_height,
                                               bool native_resolve,
@@ -1364,8 +1344,7 @@ struct D3D12Renderer::Impl
         std::uint32_t capacity_height, std::uint32_t output_width, std::uint32_t output_height,
         bool native_resolve);
     [[nodiscard]] Result PrepareExposureResources(OwnedView &view);
-    void WriteViewDescriptors(OwnedView &owner, std::uint32_t frame, std::uint32_t history_read,
-        std::uint32_t history_write) noexcept;
+    void WriteViewDescriptors(OwnedView &owner, std::uint32_t frame, std::uint32_t history_read) noexcept;
     void CommitOptionTargets(OwnedView &owner, OptionTargets &targets) noexcept;
     [[nodiscard]] Result PrepareLodStateBuffer(GpuLodStateBuffer &buffer, std::size_t capacity);
     void CommitLodStateBuffer(GpuLodStateBuffer &buffer);
@@ -1376,7 +1355,8 @@ struct D3D12Renderer::Impl
     void InitializeCanonicalDescriptors(ID3D12DescriptorHeap *) const noexcept;
     [[nodiscard]] Result CreateSharedDescriptorHeaps();
     void InitializeFrameSamplerDescriptors(std::uint32_t frame) noexcept;
-    void PublishFrameDescriptors(std::uint32_t frame_slot) const noexcept;
+    void PublishFrameDescriptors(std::uint32_t frame_slot, D3D12_CPU_DESCRIPTOR_HANDLE decals = {},
+        D3D12_CPU_DESCRIPTOR_HANDLE translucency = {}) const noexcept;
     [[nodiscard]] Result CreateClusterPipelines(const RendererConfig &pipeline_config);
     [[nodiscard]] Result PrepareReconstructionProvider(const RendererReconstructionRequest *,
         bool dynamic_resolution, float minimum_percent, float maximum_percent, ViewExtent output,
@@ -1398,37 +1378,21 @@ struct D3D12Renderer::Impl
         DisplayState &, std::optional<bool> cadence_suppression = std::nullopt);
     [[nodiscard]] Result PreparePresentationGuides(const RendererConfig &, ViewExtent output, ViewExtent capacity,
         const DisplayState &, SdkPresentationOwner, PresentationGuidesCandidate &) const;
-#if defined(HS_DEVELOPMENT_TOOLS)
-    [[nodiscard]] Result InitializeResidentAssetContext(const RendererConfig &, std::unique_ptr<Impl> &);
-    [[nodiscard]] Result PrepareResidentAssetData(Impl &candidate);
-    [[nodiscard]] Result PrepareResidentPublication(Impl &candidate);
-    void PublishResidentAssetDescriptors(const Impl &candidate) noexcept;
-#endif
     [[nodiscard]] Result SubmitResidentUtilityUpload(ID3D12GraphicsCommandList *, ID3D12CommandAllocator *,
                                                     std::vector<AllocationResource> &);
     void CollectResidentUtilityUploads() noexcept;
     [[nodiscard]] bool HasUnresolvedResidentUtilityUploads() const noexcept;
-#if defined(HS_DEVELOPMENT_TOOLS)
-    [[nodiscard]] Result AdmitResidentAllocation(const D3D12_RESOURCE_DESC &,
-        const D3D12MA::ALLOCATION_DESC &);
-    void RecordResidentAllocation(const AllocationResource &, D3D12_HEAP_TYPE) noexcept;
-#endif
     [[nodiscard]] Result CreateGpuData();
     [[nodiscard]] Result CreateCharacterTextures();
     [[nodiscard]] Result UploadVfxNoiseVolume(std::vector<AllocationResource> &uploads);
     [[nodiscard]] Result CreateEnvironmentTextures();
     enum class MaterialPreparationScope : std::uint8_t { Resident, StaticEnvironment };
     [[nodiscard]] Result PrepareMaterialParameters(const RendererConfig &candidate,
-        bool require_compatible_layout, MaterialPreparationScope scope = MaterialPreparationScope::Resident);
+        MaterialPreparationScope scope = MaterialPreparationScope::Resident);
     void CommitMaterialParameters() noexcept;
-    [[nodiscard]] std::uint64_t MaterialOverrideRevision() const noexcept
-    {
-        return material_parameters_match_generation ? 0 : material_parameter_revision;
-    }
     void FillMaterialFrameConstants(renderer_detail::FrameConstants &constants) const;
-    [[nodiscard]] Result PrepareDecalMaterialParameters(const RendererConfig &, bool require_compatible_layout,
+    [[nodiscard]] Result PrepareDecalMaterialParameters(const RendererConfig &,
         std::vector<render_data::MaterialParameterSlot> &slots);
-    void CommitDecalMaterialParameters() noexcept;
     [[nodiscard]] Result LoadMaterialSurfaceProfile(const RendererConfig &candidate,
         MaterialPreparationScope scope = MaterialPreparationScope::Resident);
     [[nodiscard]] Result PrepareMaterialSidecars(std::array<AllocationResource, 2> &targets,
@@ -1462,9 +1426,7 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result PrepareScreenOverlay(const RendererConfig &, ViewExtent,
         ScreenOverlayCandidate &) const;
     [[nodiscard]] Result PrepareVirtualShadows(const OwnedView &, const RendererConfig &, ViewExtent, VirtualShadowCandidate &) const;
-    struct AdditionalShadowPrepared { LocalShadowCandidate local; };
-    [[nodiscard]] Result PrepareAdditionalShadows(const OwnedView &, const RendererConfig &, ViewExtent, AdditionalShadowPrepared &) const;
-    [[nodiscard]] Result CommitAdditionalShadows(OwnedView &owner, AdditionalShadowPrepared &&);
+    [[nodiscard]] Result PrepareLocalShadows(const OwnedView &, const RendererConfig &, LocalShadowCandidate &) const;
     [[nodiscard]] Result PrepareLocalProbes(const RendererConfig &, LocalProbeRuntimeCandidate &) const;
     [[nodiscard]] Result AppendHlodPages(ClusterRuntimeState &);
     [[nodiscard]] Result BeginHlodViewPackage(const RenderPackage &, std::span<const RenderViewSample>);
@@ -1489,11 +1451,15 @@ struct D3D12Renderer::Impl
     [[nodiscard]] Result CommitHlodFrameGraph(std::uint32_t, HlodFrameGraph &, const CompletionSet &);
     [[nodiscard]] Result PumpHlodDemand();
     void ResetHlodResources() noexcept;
+    struct VolumetricMediaData
+    {
+        std::vector<VolumetricVolume> volumes;
+        std::uint64_t revision{};
+    };
     struct VolumetricPrepared
     {
         VolumetricCandidate service;
-        std::vector<VolumetricVolume> media;
-        std::uint64_t revision{};
+        std::shared_ptr<const VolumetricMediaData> media;
     };
     [[nodiscard]] Result PrepareVolumetrics(const OwnedView &, const RendererConfig &, ViewExtent, VolumetricPrepared &) const;
     [[nodiscard]] Result CommitVolumetrics(OwnedView &owner, VolumetricPrepared &&);
@@ -1509,7 +1475,6 @@ struct D3D12Renderer::Impl
         DecalSurfaceCandidate decals;
         LightListCandidate lights;
         VirtualShadowCandidate shadows;
-        AdditionalShadowPrepared additional;
         VolumetricPrepared volume;
     };
     [[nodiscard]] Result PrepareViewFeatures(const OwnedView &, const RendererConfig &, ViewExtent capacity,
@@ -1522,8 +1487,6 @@ struct D3D12Renderer::Impl
         std::vector<AllocationResource> &uploads);
     [[nodiscard]] ClusterFrameRecordData PrepareClusterFrameRecordData(std::uint32_t frame_slot,
         bool visibility) const;
-    [[nodiscard]] bool MatchesClusterGraphLayout(const ClusterFrameRecordData &,
-        const ClusterGraphLayout &) const noexcept;
     [[nodiscard]] Result AddClusterFramePasses(std::uint32_t frame_slot,
         ResourceVersion &geometry_records, ResourceVersion *raster_records,
         ResourceVersion static_scene, ClusterFrameGraph &state,
@@ -1565,7 +1528,6 @@ struct D3D12Renderer::Impl
         PreparedGeometryUpload *preparation = nullptr);
     [[nodiscard]] Result CreateProceduralGeometry(
         ID3D12GraphicsCommandList *list, std::vector<AllocationResource> &uploads);
-    [[nodiscard]] Result CreateVisibilityTargets(OwnedView &view);
     [[nodiscard]] Result PrepareVisibilityTargets(OptionTargets &targets,
         std::uint32_t target_width, std::uint32_t target_height);
     [[nodiscard]] Result WriteVisibilityDescriptors(OwnedView &, std::uint32_t frame_slot,
@@ -1618,7 +1580,7 @@ struct D3D12Renderer::Impl
         std::uint64_t nonlocal_bytes, std::uint32_t priority, bool need_cluster_slot = false,
         bool for_hlod_admission = false);
     [[nodiscard]] Result PrepareEnvironmentStreaming();
-    [[nodiscard]] Result PrepareHardwareTextureStreaming(const RendererAssetIo *live_transport = nullptr);
+    [[nodiscard]] Result PrepareHardwareTextureStreaming();
     [[nodiscard]] Result PrepareEnvironmentGeometryStreaming();
     [[nodiscard]] Result DemandEnvironmentGeometry(std::uint32_t ordinal,
                                                    std::uint32_t priority);
@@ -1675,7 +1637,6 @@ struct D3D12Renderer::Impl
     ComPtr<IDXGISwapChain4> swap_chain;
     UINT swap_chain_flags{};
     ComPtr<ID3D12DescriptorHeap> rtv_heap;
-    ComPtr<ID3D12DescriptorHeap> dsv_heap;
     ComPtr<ID3D12DescriptorHeap> srv_heap;
     // Original/copy-source descriptors live here. srv_heap is GPU destination
     // only; publish a complete waited frame bank once before graph recording.
@@ -1691,14 +1652,7 @@ struct D3D12Renderer::Impl
     HANDLE fence_event{};
     std::uint64_t next_fence{1};
     D3D12MA::Allocator *allocator{};
-#if defined(HS_DEVELOPMENT_TOOLS)
-    ComPtr<D3D12MA::Allocator> resident_allocator_lease;
-    std::shared_ptr<void> resident_fence_event_owner;
-#endif
     std::vector<ResidentUtilitySubmission> resident_utility_submissions;
-#if defined(HS_DEVELOPMENT_TOOLS)
-    ResidentPreparationAccounting resident_preparation_accounting;
-#endif
     std::array<FrameContext, kFrameCount> frames;
     std::array<VisibilityFrameBuffers, kFrameCount> visibility_frames;
     ResidencyManager residency;
@@ -1715,7 +1669,12 @@ struct D3D12Renderer::Impl
     std::vector<AdaptiveShadingMaterialPolicy> adaptive_material_policies;
     TextureStreamingCapabilities texture_streaming_capabilities;
     std::array<TextureStreamId, kEnvironmentTextureCount> environment_texture_stream_ids;
-    std::vector<TextureStreamId> environment_material_texture_stream_ids;
+    struct ShadowOpacityTexture
+    {
+        TextureStreamId id;
+        std::bitset<kAuthoredMaterialNames.size()> materials;
+    };
+    std::vector<ShadowOpacityTexture> shadow_opacity_textures;
     std::array<TextureStreamId, kTextureFeedbackBindingCount> material_texture_stream_ids;
     // Material membership is accumulated for the current immutable arena;
     // the referenced stream IDs are rebuilt only when membership changes.
@@ -1734,9 +1693,6 @@ struct D3D12Renderer::Impl
     std::uint64_t static_scene_upload_count{};
     std::array<float, kEnvironmentMaterialNames.size()> environment_variant_radii{};
     PersistentGpuSceneSlots dynamic_scene_slots;
-#if defined(HS_DEVELOPMENT_TOOLS)
-    std::ofstream dynamic_instance_upload_log;
-#endif
     std::array<ComPtr<ID3D12Resource>, kFrameCount> back_buffers;
     // DXGI owns these swapchain surfaces independently of application placed heaps.
     // Identities are borrowed from the matching back_buffers entry and rebuilt on acquisition.
@@ -1784,12 +1740,6 @@ struct D3D12Renderer::Impl
     AllocationResource indirect_arguments;
     std::array<render_data::MaterialSurfaceLayout, kResidentMaterialCount> material_surface_layouts;
     render_data::MaterialSidecarLayout material_sidecar_layout;
-    struct MaterialHeader
-    {
-        std::vector<std::byte> bytes;
-        render_data::PackageView view;
-    };
-    std::array<MaterialHeader, kResidentMaterialCount> material_headers;
     std::array<AllocationResource, kEnvironmentTextureCount> environment_textures;
     AllocationResource environment_brdf_lut;
     AllocationResource material_parameters;
@@ -1798,30 +1748,12 @@ struct D3D12Renderer::Impl
     ComPtr<ID3D12Device5> material_parameter_upload_device;
     bool material_parameter_upload_pending{};
     std::uint32_t material_parameter_slot_count{};
-    std::uint64_t material_parameter_revision{};
-    std::array<std::byte, 32> generation_material_parameters{};
-    bool generation_material_parameters_valid{};
-    bool material_parameters_match_generation{true};
-    std::uint64_t baked_generation_pipeline_revision{};
     mutable std::shared_ptr<const VirtualShadowBakeData> baked_shadow_source;
-    std::uint64_t pipeline_revision{};
-    std::uint32_t material_parameter_candidate_slot_count{};
-    std::array<std::byte, 32> material_parameter_candidate_generation_digest{},
-        material_parameter_candidate_terrain_digest{};
-    std::array<bool, kResidentMaterialCount> material_parameter_candidate_changed{};
     std::array<std::uint32_t, kResidentMaterialCount> material_parameter_bases{};
-    std::array<std::uint32_t, kResidentMaterialCount> material_parameter_candidate_bases{};
-    std::array<std::uint32_t, kResidentMaterialCount> material_parameter_counts{},
-        material_parameter_candidate_counts{};
-    std::array<std::uint64_t, kResidentMaterialCount> material_parameter_revisions{};
-    std::array<std::string, kResidentMaterialCount> material_parameter_layouts{};
-    std::array<std::string, kResidentMaterialCount> material_parameter_candidate_layouts{};
-    std::vector<render_data::MaterialParameterSlot> material_parameter_slots, material_parameter_candidate_slots;
-    std::array<render_data::DecalMaterialPackageData, 2> decal_material_programs{}, decal_material_candidate_programs{};
-    std::array<render_data::DecalReceiverPolicy, 2> decal_material_policies{}, decal_material_candidate_policies{};
-    std::array<std::uint32_t, 2> decal_parameter_bases{}, decal_parameter_candidate_bases{},
-        decal_parameter_counts{}, decal_parameter_candidate_counts{};
-    std::array<std::string, 2> decal_parameter_layouts{}, decal_parameter_candidate_layouts{};
+    std::array<std::uint32_t, kResidentMaterialCount> material_parameter_counts{};
+    std::array<render_data::DecalMaterialPackageData, 2> decal_material_programs{};
+    std::array<render_data::DecalReceiverPolicy, 2> decal_material_policies{};
+    std::array<std::uint32_t, 2> decal_parameter_bases{}, decal_parameter_counts{};
     AllocationResource mesh_material_bindings_gpu;
     struct GeometryMaterialDomains { bool opaque{true}, translucent{}; std::uint32_t binding_set{}; };
     std::array<GeometryMaterialDomains, kGpuVisibilityBucketCount> geometry_material_domains{};
@@ -1849,6 +1781,7 @@ struct D3D12Renderer::Impl
     static_assert(sizeof(TerrainSection)==32);
     struct GpuTerrainSection
     {
+        static GpuTerrainSection From(const TerrainSection &, const RenderInstance &);
 #define HS_TERRAIN_F2(name) DirectX::XMFLOAT2 name{};
 #define HS_TERRAIN_U1(name) UINT name{};
 #define HS_TERRAIN_U2(name) std::array<UINT,2> name{};
@@ -1858,6 +1791,11 @@ struct D3D12Renderer::Impl
 #undef HS_TERRAIN_U2
     };
     static_assert(sizeof(GpuTerrainSection)==56);
+#if defined(HS_OFFLINE_PROBE_BAKER)
+    [[nodiscard]] Result PrepareWorldTransportInstances(
+        const std::shared_ptr<const StaticRenderScene> &scene, AllocationResource &instances,
+        std::uint32_t &generation, std::vector<GpuTerrainSection> *terrain_rows = nullptr);
+#endif
     struct GpuTerrainPlaneMip
     {
 #define HS_TERRAIN_U1(name) UINT name{};
@@ -1877,8 +1815,13 @@ struct D3D12Renderer::Impl
 #endif
     std::vector<TerrainSection> static_terrain_sections;
     std::vector<TextureStreamId> terrain_plane_stream_ids;
-    std::vector<std::uint8_t> terrain_plane_needed;
-    std::vector<render_data::TerrainSurfaceTile> terrain_tiles;
+    std::bitset<kTerrainPagePlaneCapacity> terrain_plane_needed;
+    struct ResidentTerrainTile
+    {
+        TerrainSection section;
+        DirectX::BoundingBox bounds;
+    };
+    std::vector<ResidentTerrainTile> terrain_tiles;
     std::array<AllocationResource, kFrameCount> terrain_frame_mips;
     struct TerrainDescriptorBank
     {
@@ -1887,36 +1830,25 @@ struct D3D12Renderer::Impl
             ComPtr<ID3D12Resource> resource;
             GpuTerrainPlaneMip metadata{};
         };
-        ComPtr<ID3D12DescriptorHeap> heap;
-        ComPtr<ID3D12Resource> metadata_resource;
         ComPtr<ID3D12Resource> section_resource;
         UINT section_count{};
-        D3D12_CPU_DESCRIPTOR_HANDLE first{};
-        UINT stride{};
         UINT published_count{};
-        bool metadata_initialized{}, descriptors_initialized{};
+        bool descriptors_initialized{};
         std::vector<Entry> entries;
     };
     mutable std::array<TerrainDescriptorBank,kFrameCount> terrain_descriptor_banks;
     std::vector<std::array<UINT,2>> terrain_tile_counts;
     std::shared_ptr<const StaticRenderScene> terrain_scene;
-    std::vector<GpuTerrainSection> terrain_gpu_sections_scratch;
     std::array<AllocationResource, kFrameCount> terrain_frame_sections;
     std::array<bool, kFrameCount> terrain_slot_static_sections_valid{};
     std::array<UINT, kFrameCount> terrain_frame_section_counts{};
     std::array<bool, kFrameCount> terrain_frame_has_meadow{};
     std::array<float, kFrameCount> terrain_frame_meadow_upper{};
-    std::vector<UINT> static_terrain_source_indices, dynamic_terrain_indices;
-    std::string terrain_archive_digest, terrain_planes_archive_digest;
+    std::vector<UINT> static_terrain_source_indices;
     bool terrain_static_pages_current{};
     UINT64 terrain_retry_budget_bytes{};
-    std::array<std::byte, 32> terrain_generation_parameters{};
-    bool terrain_generation_parameters_valid{}, terrain_parameters_match{true}, terrain_parameters_changed{};
-#if defined(HS_DEVELOPMENT_TOOLS)
-    std::uint64_t terrain_archive_reads{};
-#endif
-    [[nodiscard]] Result PrepareTerrainPages(const std::shared_ptr<const StaticRenderScene> &,
-        std::span<const RenderInstance>, UINT frame_slot);
+    [[nodiscard]] Result AppendDynamicTerrainSection(std::size_t source_index, const RenderInstance &);
+    [[nodiscard]] Result PrepareTerrainPages(const std::shared_ptr<const StaticRenderScene> &, UINT frame_slot);
     void DemandTerrainPages(std::span<const RenderViewSample>, std::uint64_t frame_number);
     [[nodiscard]] Result PublishTerrainStreaming(UINT frame_slot);
     struct EnvironmentMaterialBindingsGpu
@@ -1935,9 +1867,6 @@ struct D3D12Renderer::Impl
             ComPtr<ID3D12Resource> resource;
             bool written{};
         };
-        ComPtr<ID3D12DescriptorHeap> heap;
-        D3D12_CPU_DESCRIPTOR_HANDLE first{};
-        UINT stride{};
         std::array<Entry, kAuthoredMaterialNames.size() * render_data::kMaterialTextureSlots> entries;
     };
     mutable std::array<EnvironmentDescriptorBank, kFrameCount> environment_descriptor_banks;
@@ -1952,8 +1881,7 @@ struct D3D12Renderer::Impl
     LightingProbeSystem lighting_probe;
     LocalProbeRuntime local_probes;
     std::unique_ptr<HlodRuntime> hlod_runtime;
-    std::vector<VolumetricVolume> volumetric_media;
-    std::uint64_t volumetric_revision{};
+    std::shared_ptr<const VolumetricMediaData> volumetric_media;
     std::unique_ptr<StreamlineSession> streamline_session;
     NativeGraphicsCapabilitySnapshot native_graphics_capabilities;
     std::unique_ptr<FsrSession> fsr_session;
@@ -1983,6 +1911,12 @@ struct D3D12Renderer::Impl
     struct PreparedScenePackage
     {
         std::vector<RenderInstance> instances;
+        struct DynamicTerrainSection
+        {
+            std::size_t source_index;
+            GpuTerrainSection row;
+        };
+        std::vector<DynamicTerrainSection> dynamic_terrain;
         std::size_t additive_flash_count{};
         std::vector<RenderInstance> ordered_instances;
         // Bound to owned ordered_instances, refreshed after packet ordering.
@@ -2203,7 +2137,6 @@ struct D3D12Renderer::Impl
     bool enhanced{};
     bool mesh_shader_supported{};
     bool mesh_shader_enabled{};
-    bool dred_enabled{};
     bool particles_initialized{};
     bool particle_input_is_a{true};
     bool initialized{};

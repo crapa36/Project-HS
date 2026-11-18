@@ -1,23 +1,31 @@
 #ifndef HS_LIGHT_LIST_HLSLI
 #define HS_LIGHT_LIST_HLSLI
 
+#include "light_list_abi.hlsli"
+
 // 96-byte record ABI from renderer_light_list.hpp. CPU converts authored units
 // to radiometric quantities; prepared radiometric Point inputs pass through.
+#define HS_LIGHT_LIST_SHADER_TYPE_Float4 float4
+#define HS_LIGHT_LIST_SHADER_TYPE_Uint4 uint4
+#define HS_LIGHT_LIST_SHADER_TYPE_Matrix float4x4
+#define HS_LIGHT_LIST_DECLARE_RECORD(kind,native,shader,offset) HS_LIGHT_LIST_SHADER_TYPE_##kind shader;
 struct HsGpuLightRecord
 {
-    float4 position_range;
-    float4 direction_cos_outer;
-    float4 color_intensity;
-    float4 shape_cone;
-    uint4 identity;
-    uint4 metadata;
+    HS_LIGHT_LIST_RECORD_FIELDS(HS_LIGHT_LIST_DECLARE_RECORD)
 };
+#undef HS_LIGHT_LIST_DECLARE_RECORD
+#define HS_LIGHT_LIST_DECLARE_OFFSET(kind,native,shader,offset) static const uint HsLightOffset_##native=offset;
+HS_LIGHT_LIST_CONSTANT_FIELDS(HS_LIGHT_LIST_DECLARE_OFFSET)
+#undef HS_LIGHT_LIST_DECLARE_OFFSET
+#undef HS_LIGHT_LIST_SHADER_TYPE_Matrix
+#undef HS_LIGHT_LIST_SHADER_TYPE_Uint4
+#undef HS_LIGHT_LIST_SHADER_TYPE_Float4
 StructuredBuffer<HsGpuLightRecord> HsLightRecords : register(t0, space19);
 static const uint HsLightDirectionalMask = 1u;
 static const uint HsLightLocalMask = 6u;
 static const uint HsLightAllMask = 7u;
-static const uint HsLightHeaderBytes = 256u;
-static const uint HsLightMaskWords = 4u; // The CPU rejects more than128 authoritative lights.
+static const uint HsLightHeaderBytes = HS_LIGHT_LIST_HEADER_BYTES;
+static const uint HsLightMaskWords = HS_LIGHT_LIST_MASK_WORDS; // The CPU rejects more than128 authoritative lights.
 
 #ifndef HS_LIGHT_LIST_BUILD
 #include "local_shadow.hlsli"
@@ -49,12 +57,16 @@ HsLightGrid HsLoadLightGrid(uint4 dimensions, uint4 limits)
     HsLightGrid grid;
     // CPU stores transposed DirectX matrices for column-major CBVs. A raw SRV
     // has no matrix layout, so reconstruct the same logical matrices explicitly.
-    grid.world_to_view = transpose(float4x4(asfloat(HsLightGridBuffer.Load4(0u)),
-        asfloat(HsLightGridBuffer.Load4(16u)), asfloat(HsLightGridBuffer.Load4(32u)), asfloat(HsLightGridBuffer.Load4(48u))));
-    grid.projection = transpose(float4x4(asfloat(HsLightGridBuffer.Load4(64u)),
-        asfloat(HsLightGridBuffer.Load4(80u)), asfloat(HsLightGridBuffer.Load4(96u)), asfloat(HsLightGridBuffer.Load4(112u))));
-    grid.camera_origin_near = asfloat(HsLightGridBuffer.Load4(192u));
-    grid.extent_far_log = asfloat(HsLightGridBuffer.Load4(208u));
+    grid.world_to_view = transpose(float4x4(asfloat(HsLightGridBuffer.Load4(HsLightOffset_world_to_view)),
+        asfloat(HsLightGridBuffer.Load4(HsLightOffset_world_to_view+16u)),
+        asfloat(HsLightGridBuffer.Load4(HsLightOffset_world_to_view+32u)),
+        asfloat(HsLightGridBuffer.Load4(HsLightOffset_world_to_view+48u))));
+    grid.projection = transpose(float4x4(asfloat(HsLightGridBuffer.Load4(HsLightOffset_projection)),
+        asfloat(HsLightGridBuffer.Load4(HsLightOffset_projection+16u)),
+        asfloat(HsLightGridBuffer.Load4(HsLightOffset_projection+32u)),
+        asfloat(HsLightGridBuffer.Load4(HsLightOffset_projection+48u))));
+    grid.camera_origin_near = asfloat(HsLightGridBuffer.Load4(HsLightOffset_camera_origin_near));
+    grid.extent_far_log = asfloat(HsLightGridBuffer.Load4(HsLightOffset_extent_far_log));
     grid.grid = dimensions;
     grid.limits = limits;
     return grid;
@@ -80,11 +92,11 @@ HsLightQuery HsBeginLightQuery(float3 world, uint type_mask, bool force_world_qu
     // loading local-grid dimensions and total-light limits on that path.
     if ((type_mask & HsLightLocalMask) == 0u)
     {
-        query.directional_count = HsLightGridBuffer.Load(236u);
+        query.directional_count = HsLightGridBuffer.Load(HsLightOffset_grid+12u);
         return query;
     }
-    const uint4 dimensions = HsLightGridBuffer.Load4(224u);
-    const uint4 limits = HsLightGridBuffer.Load4(240u);
+    const uint4 dimensions = HsLightGridBuffer.Load4(HsLightOffset_grid);
+    const uint4 limits = HsLightGridBuffer.Load4(HsLightOffset_limits);
     query.directional_count = dimensions.w;
     query.light_count = limits.x;
     if (query.world_query)
@@ -107,11 +119,11 @@ HsLightQuery HsBeginLightQuery(float3 world, uint type_mask, bool force_world_qu
     if (any(uv < 0.0) || any(uv >= 1.0)) query.world_query = true;
     if (!query.world_query)
     {
-        const uint2 tile = min((uint2)(uv * grid.extent_far_log.xy) / 16u, grid.grid.xy - 1u);
+        const uint2 tile = min((uint2)(uv * grid.extent_far_log.xy) / HS_LIGHT_LIST_TILE_PIXELS, grid.grid.xy - 1u);
         const uint slice = min((uint)(log2(view.z / grid.camera_origin_near.w) * float(grid.grid.z) /
             grid.extent_far_log.w), grid.grid.z - 1u);
         const uint cell = (slice * grid.grid.y + tile.y) * grid.grid.x + tile.x;
-        query.local_mask = HsLightGridBuffer.Load4(HsLightHeaderBytes + cell * 16u);
+        query.local_mask = HsLightGridBuffer.Load4(HsLightHeaderBytes + cell * HS_LIGHT_LIST_MASK_BYTES);
     }
     // Invalid cell bounds retain all local bits; off-frustum queries scan all locals.
     query.local_cursor = query.world_query ? query.directional_count : 0u;
@@ -191,7 +203,7 @@ bool HsLightIncident(uint index, float3 world, out float3 direction, out float3 
 // is evaluated by HsLightListEvaluateComponents below, not by this accessor.
 bool HsPrimaryDirectional(out float3 toward_light, out float3 incident)
 {
-    const uint count = HsLightGridBuffer.Load(236u);
+    const uint count = HsLightGridBuffer.Load(HsLightOffset_grid+12u);
     toward_light = float3(0.0, 1.0, 0.0); incident = 0.0;
     if (count == 0u) return false;
     uint owner = 0u;

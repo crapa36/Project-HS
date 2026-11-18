@@ -1,4 +1,5 @@
 #include <hs/render_data/material_ir.hpp>
+#include <hs/render_data/material_noise.hpp>
 
 #include <algorithm>
 #include <array>
@@ -142,46 +143,6 @@ bool FoldableFloat(float value)
     return std::isfinite(value) && std::fpclassify(value) != FP_SUBNORMAL;
 }
 
-std::uint32_t SeededNoiseHash(std::uint32_t value)
-{
-    value ^= value >> 16;
-    value *= 0x7feb352du;
-    value ^= value >> 15;
-    value *= 0x846ca68bu;
-    return value ^ (value >> 16);
-}
-
-float SeededNoiseRandom(std::uint32_t value)
-{
-    return static_cast<float>(SeededNoiseHash(value) & 0xffffffu) / 16777216.0f;
-}
-
-float SeededNoiseValue(const std::array<float, 4> &position, std::uint32_t seed)
-{
-    const float ix = std::floor(position[0]);
-    const float iy = std::floor(position[1]);
-    const float fx = position[0] - ix;
-    const float fy = position[1] - iy;
-    const float ux = fx * fx * fx * (fx * (fx * 6.0f - 15.0f) + 10.0f);
-    const float uy = fy * fy * fy * (fy * (fy * 6.0f - 15.0f) + 10.0f);
-    const auto cell = [&](std::int32_t x, std::int32_t y) {
-        const auto ux = static_cast<std::uint32_t>(x);
-        const auto uy = static_cast<std::uint32_t>(y);
-        return SeededNoiseHash(ux ^ SeededNoiseHash(uy) ^ seed);
-    };
-    const float x0y0 = SeededNoiseRandom(cell(static_cast<std::int32_t>(ix),
-                                               static_cast<std::int32_t>(iy)));
-    const float x1y0 = SeededNoiseRandom(cell(static_cast<std::int32_t>(ix + 1.0f),
-                                               static_cast<std::int32_t>(iy)));
-    const float x0y1 = SeededNoiseRandom(cell(static_cast<std::int32_t>(ix),
-                                               static_cast<std::int32_t>(iy + 1.0f)));
-    const float x1y1 = SeededNoiseRandom(cell(static_cast<std::int32_t>(ix + 1.0f),
-                                               static_cast<std::int32_t>(iy + 1.0f)));
-    const float x0 = x0y0 + (x1y0 - x0y0) * ux;
-    const float x1 = x0y1 + (x1y1 - x0y1) * ux;
-    return (x0 + (x1 - x0) * uy) * 2.0f - 1.0f;
-}
-
 std::optional<Value> Fold(const MaterialNode &node,
                         const std::vector<std::optional<Value>> &values)
 {
@@ -208,7 +169,7 @@ std::optional<Value> Fold(const MaterialNode &node,
         };
         if (!cell_coordinate_representable(a.floats[0]) ||
             !cell_coordinate_representable(a.floats[1])) return std::nullopt;
-        const auto value = SeededNoiseValue(a.floats, b.integer);
+        const auto value = SeededNoiseValue(a.floats[0], a.floats[1], b.integer);
         if (!FoldableFloat(value)) return std::nullopt;
         result.floats[0] = value;
         return result;
@@ -524,7 +485,7 @@ void ValidateNode(const MaterialGraph &graph, std::size_t index,
         break;
     }
     case MaterialOp::MetallicRoughnessClosure:
-        Require((graph.kind == MaterialGraphKind::Rock0 || graph.kind == MaterialGraphKind::Opaque ||
+        Require((graph.kind == MaterialGraphKind::Opaque ||
                  graph.kind == MaterialGraphKind::Masked || graph.kind == MaterialGraphKind::Terrain ||
                  graph.kind == MaterialGraphKind::Translucent || graph.kind == MaterialGraphKind::HeroRefractive) &&
                 node.type == MaterialType::SurfaceClosure &&
@@ -538,8 +499,7 @@ void ValidateNode(const MaterialGraph &graph, std::size_t index,
     case MaterialOp::EmissionClosure: case MaterialOp::UnlitClosure:
     case MaterialOp::SubsurfaceClosure: case MaterialOp::SolidTransmissionClosure:
     {
-        Require(graph.kind != MaterialGraphKind::Leaf0 &&
-                node.type == MaterialType::SurfaceClosure,
+        Require(node.type == MaterialType::SurfaceClosure,
                 "layer closure requires a surface graph and surface closure result");
         if (node.op == MaterialOp::UnlitClosure)
             Require(type(0) == MaterialType::Float3 && type(1) == MaterialType::Float,
@@ -624,9 +584,9 @@ void ValidateNode(const MaterialGraph &graph, std::size_t index,
     }
 }
 
-std::vector<bool> Reachable(const std::vector<MaterialNode> &nodes, std::size_t output)
+void MarkReachable(const std::vector<MaterialNode> &nodes, std::size_t output,
+                   std::vector<bool> &reachable)
 {
-    std::vector<bool> reachable(nodes.size());
     const auto visit = [&](const auto &self, std::size_t index) -> void {
         if (reachable[index]) return;
         reachable[index] = true;
@@ -635,6 +595,12 @@ std::vector<bool> Reachable(const std::vector<MaterialNode> &nodes, std::size_t 
             self(self, node.inputs[slot]);
     };
     visit(visit, output);
+}
+
+std::vector<bool> Reachable(const std::vector<MaterialNode> &nodes, std::size_t output)
+{
+    std::vector<bool> reachable(nodes.size());
+    MarkReachable(nodes, output, reachable);
     return reachable;
 }
 
@@ -832,36 +798,13 @@ float3 HsMaterialTangentToWorld(float3 normal, float3 shading_normal, float4 tan
 )hlsl";
 }
 
-enum class OutputKind { BaseColor, Roughness, Opacity, Closure };
-
-void ValidateOutputSources(const MaterialGraph &graph, std::size_t output, OutputKind kind)
-{
-    const auto reachable = Reachable(graph.nodes, output);
-    for (std::size_t i = 0; i < graph.nodes.size(); ++i)
-    {
-        if (!reachable[i]) continue;
-        switch (graph.nodes[i].op)
-        {
-        case MaterialOp::SampledBaseColor:
-            Require(kind == OutputKind::BaseColor || kind == OutputKind::Closure,
-                    "base color input unavailable to this output"); break;
-        case MaterialOp::SampledRoughness: case MaterialOp::RoughnessScale:
-            Require(kind == OutputKind::Roughness || kind == OutputKind::Closure,
-                    "roughness input unavailable to this output"); break;
-        case MaterialOp::SampledAlpha:
-            Require(kind == OutputKind::Opacity || kind == OutputKind::Closure,
-                    "alpha input unavailable to this output"); break;
-        default: break;
-        }
-    }
-}
-
 std::vector<bool> UniformNodes(const std::vector<MaterialNode> &nodes,
     const std::vector<std::optional<Value>> *values = nullptr);
 
 void ValidateEnvironmentDomain(const MaterialGraph &graph)
 {
-    Require(graph.kind == MaterialGraphKind::Opaque || graph.kind == MaterialGraphKind::Masked,
+    Require(graph.kind == MaterialGraphKind::Opaque || graph.kind == MaterialGraphKind::Masked ||
+            graph.kind == MaterialGraphKind::Terrain,
             "expected generic material graph");
 }
 
@@ -876,10 +819,8 @@ void ValidateHeroDomain(const MaterialGraph &graph)
             graph.normal_space == MaterialNormalSpace::World, "invalid hero normal output space");
 }
 
-std::vector<std::optional<Value>> ValidateMaterialGraph(const MaterialGraph &graph,
-                                                       MaterialGraphKind expected)
+std::vector<std::optional<Value>> ValidateMaterialGraph(const MaterialGraph &graph)
 {
-    Require(graph.kind == expected, "unexpected graph kind");
     Require(!graph.nodes.empty() && graph.nodes.size() <= kMaxMaterialGraphNodes, "invalid graph shape");
     ValidateMaterialParameters(graph.parameters);
     if (graph.kind == MaterialGraphKind::Decal)
@@ -907,70 +848,20 @@ std::vector<std::optional<Value>> ValidateMaterialGraph(const MaterialGraph &gra
         ValidateNode(graph, i, values);
         values[i] = Fold(graph.nodes[i], values);
     }
-    const auto output = [&](std::size_t index, MaterialType type, OutputKind kind) {
-        Require(index < graph.nodes.size() && graph.nodes[index].type == type, "surface output type mismatch");
-        ValidateOutputSources(graph, index, kind);
-    };
-    switch (expected)
+    Require(graph.closure_output < graph.nodes.size() &&
+            graph.nodes[graph.closure_output].type == MaterialType::SurfaceClosure,
+            "surface closure output type mismatch");
+    switch (graph.kind)
     {
-    case MaterialGraphKind::Rock0: case MaterialGraphKind::Opaque:
-        if (graph.closure_output != kNoMaterialInput)
-        {
-            output(graph.closure_output, MaterialType::SurfaceClosure, OutputKind::Closure);
-            if (graph.base_color_output != kNoMaterialInput)
-            {
-                output(graph.base_color_output, MaterialType::Float3, OutputKind::BaseColor);
-                output(graph.roughness_output, MaterialType::Float, OutputKind::Roughness);
-            }
-        }
-        else
-        {
-            output(graph.base_color_output, MaterialType::Float3, OutputKind::BaseColor);
-            output(graph.roughness_output, MaterialType::Float, OutputKind::Roughness);
-        }
-        break;
-    case MaterialGraphKind::Masked: case MaterialGraphKind::Translucent:
-    case MaterialGraphKind::HeroRefractive:
-        if (graph.closure_output != kNoMaterialInput)
-        {
-            output(graph.closure_output, MaterialType::SurfaceClosure, OutputKind::Closure);
-            if (graph.base_color_output != kNoMaterialInput)
-            {
-                output(graph.base_color_output, MaterialType::Float3, OutputKind::BaseColor);
-                output(graph.roughness_output, MaterialType::Float, OutputKind::Roughness);
-                output(graph.opacity_output, MaterialType::Float, OutputKind::Opacity);
-            }
-        }
-        else
-        {
-            output(graph.base_color_output, MaterialType::Float3, OutputKind::BaseColor);
-            output(graph.roughness_output, MaterialType::Float, OutputKind::Roughness);
-            output(graph.opacity_output, MaterialType::Float, OutputKind::Opacity);
-        }
+    case MaterialGraphKind::Opaque: case MaterialGraphKind::Masked:
+    case MaterialGraphKind::Translucent: case MaterialGraphKind::HeroRefractive:
         break;
     case MaterialGraphKind::Terrain:
-        if (graph.closure_output != kNoMaterialInput)
-        {
-            output(graph.closure_output, MaterialType::SurfaceClosure, OutputKind::Closure);
-            if (graph.base_color_output != kNoMaterialInput)
-            {
-                output(graph.base_color_output, MaterialType::Float3, OutputKind::BaseColor);
-                output(graph.roughness_output, MaterialType::Float, OutputKind::Roughness);
-            }
-        }
-        else
-        {
-            output(graph.base_color_output, MaterialType::Float3, OutputKind::BaseColor);
-            output(graph.roughness_output, MaterialType::Float, OutputKind::Roughness);
-        }
         Require(graph.terrain_output < graph.nodes.size() &&
                 graph.nodes[graph.terrain_output].type == MaterialType::TerrainResult,
                 "terrain aggregate output type mismatch");
         break;
-    case MaterialGraphKind::Leaf0:
-        output(graph.opacity_output, MaterialType::Float, OutputKind::Opacity); break;
     case MaterialGraphKind::Decal:
-        output(graph.closure_output, MaterialType::SurfaceClosure, OutputKind::Closure);
         Require(graph.normal_space == MaterialNormalSpace::World,
                 "decal result normal must be world space");
         Require(graph.textures.size() == 1 && graph.samplers.size() == 1,
@@ -982,15 +873,7 @@ std::vector<std::optional<Value>> ValidateMaterialGraph(const MaterialGraph &gra
         break;
     default: Require(false, "unknown graph kind");
     }
-    if (graph.normal_output != kNoMaterialInput)
-        Require(graph.normal_output < graph.nodes.size() &&
-                graph.nodes[graph.normal_output].type == MaterialType::Float3,
-                "normal output type mismatch");
-    if (graph.ao_output != kNoMaterialInput)
-        Require(graph.ao_output < graph.nodes.size() &&
-                graph.nodes[graph.ao_output].type == MaterialType::Float,
-                "AO output type mismatch");
-    if (graph.closure_output != kNoMaterialInput && graph.kind != MaterialGraphKind::Decal)
+    if (graph.kind != MaterialGraphKind::Decal)
     {
         const auto chain = ClosureChain(graph.nodes, graph.closure_output);
         const auto uniform = UniformNodes(graph.nodes, &values);
@@ -1413,10 +1296,8 @@ struct PreparedMaterial::Impl
     std::vector<bool> uniform;
     ClosureReflection reflection;
     std::vector<std::size_t> closure_chain;
-    std::vector<bool> closure_live;
+    std::vector<bool> surface_live, opacity_live;
     std::size_t closure_opacity{kNoMaterialInput};
-    std::vector<bool> closure_opacity_live;
-    std::array<std::vector<bool>, 7> output_live;
     MaterialContextDemand context_demand;
 };
 
@@ -1430,9 +1311,8 @@ PreparedMaterial PrepareMaterial(MaterialGraph graph, MaterialPreparationDomain 
 {
     switch (domain)
     {
-    case MaterialPreparationDomain::Generic: break;
     case MaterialPreparationDomain::Environment:
-        if (graph.kind != MaterialGraphKind::Terrain) ValidateEnvironmentDomain(graph);
+        ValidateEnvironmentDomain(graph);
         break;
     case MaterialPreparationDomain::Hero: ValidateHeroDomain(graph); break;
     case MaterialPreparationDomain::Decal:
@@ -1440,38 +1320,33 @@ PreparedMaterial PrepareMaterial(MaterialGraph graph, MaterialPreparationDomain 
         break;
     default: Require(false, "invalid material preparation domain");
     }
-    auto values = ValidateMaterialGraph(graph, graph.kind);
+    auto values = ValidateMaterialGraph(graph);
     auto impl = std::make_unique<PreparedMaterial::Impl>();
     impl->graph = std::move(graph);
     impl->optimized = Optimize(impl->graph, std::move(values));
     impl->uniform = UniformNodes(impl->optimized);
-    const std::array outputs{impl->graph.base_color_output, impl->graph.roughness_output,
-        impl->graph.opacity_output, impl->graph.normal_output, impl->graph.ao_output,
-        impl->graph.terrain_output, impl->graph.closure_output};
-    for (std::size_t i = 0; i < outputs.size(); ++i)
-        if (outputs[i] != kNoMaterialInput)
-            impl->output_live[i] = Reachable(impl->optimized.nodes,
-                impl->optimized.representative[outputs[i]]);
+    impl->surface_live.resize(impl->optimized.nodes.size());
     if (impl->graph.kind == MaterialGraphKind::Decal)
     {
         impl->reflection = {static_cast<std::uint32_t>(MaterialClosureCapability::Basic) |
                             static_cast<std::uint32_t>(MaterialClosureCapability::Emission),
                             static_cast<std::uint32_t>(MaterialClosureVarying::Emission)};
-        impl->closure_live = Reachable(impl->optimized.nodes,
-            impl->optimized.representative[impl->graph.closure_output]);
+        MarkReachable(impl->optimized.nodes,
+            impl->optimized.representative[impl->graph.closure_output], impl->surface_live);
     }
     else
     {
-        impl->closure_chain = impl->graph.closure_output == kNoMaterialInput ? std::vector<std::size_t>{} :
-            ClosureChain(impl->optimized, impl->optimized.representative[impl->graph.closure_output]);
+        impl->closure_chain = ClosureChain(impl->optimized,
+            impl->optimized.representative[impl->graph.closure_output]);
         impl->reflection = ReflectClosure(impl->optimized, impl->closure_chain, impl->uniform,
                                           impl->graph.normal_space);
         if (!impl->closure_chain.empty())
         {
             const auto closure = impl->optimized.representative[impl->graph.closure_output];
-            impl->closure_live = Reachable(impl->optimized.nodes, closure);
+            MarkReachable(impl->optimized.nodes, closure, impl->surface_live);
             impl->closure_opacity = ClosureOpacity(impl->optimized.nodes, closure);
-            impl->closure_opacity_live = Reachable(impl->optimized.nodes, impl->closure_opacity);
+            impl->opacity_live.resize(impl->optimized.nodes.size());
+            MarkReachable(impl->optimized.nodes, impl->closure_opacity, impl->opacity_live);
         }
     }
     const auto demand = [&](const std::vector<bool> &live) {
@@ -1493,39 +1368,21 @@ PreparedMaterial PrepareMaterial(MaterialGraph graph, MaterialPreparationDomain 
         }
         return mask;
     };
-    if (impl->graph.closure_output != kNoMaterialInput)
-        impl->context_demand.surface_mask = demand(impl->closure_live);
-    else
-    {
-        for (const auto slot : {0u, 1u, 3u, 4u})
-            impl->context_demand.surface_mask |= demand(impl->output_live[slot]);
-        impl->context_demand.surface_mask |= MaterialContextInputMask(MaterialContextInput::Metallic);
-        if (impl->graph.normal_output == kNoMaterialInput)
-            impl->context_demand.surface_mask |= MaterialContextInputMask(MaterialContextInput::Normal);
-        if (impl->graph.ao_output == kNoMaterialInput)
-            impl->context_demand.surface_mask |= MaterialContextInputMask(MaterialContextInput::SampledAo);
-    }
+    impl->context_demand.surface_mask = demand(impl->surface_live);
     if (impl->graph.kind == MaterialGraphKind::Masked || domain == MaterialPreparationDomain::Hero)
     {
-        impl->context_demand.opacity_mask = demand(impl->graph.closure_output != kNoMaterialInput
-            ? impl->closure_opacity_live : impl->output_live[2]);
+        impl->context_demand.opacity_mask = demand(impl->opacity_live);
         if (impl->graph.kind == MaterialGraphKind::Masked)
             impl->context_demand.surface_mask |= impl->context_demand.opacity_mask;
     }
     return PreparedMaterial(std::move(impl));
 }
 
-ClosureReflection AnalyzeClosure(const MaterialGraph &graph)
-{
-    return AnalyzeClosure(PrepareMaterial(graph, graph.kind == MaterialGraphKind::Decal
-        ? MaterialPreparationDomain::Decal : MaterialPreparationDomain::Generic));
-}
-
 ClosureReflection AnalyzeClosure(const PreparedMaterial &material) { return material.impl_->reflection; }
-std::optional<std::array<std::uint32_t, 4>>
-SolidTransmissionProfileBits(const MaterialGraph &graph)
+static std::optional<std::array<std::uint32_t, 4>>
+SolidTransmissionProfileBitsForGraph(const MaterialGraph &graph)
 {
-    if (graph.closure_output == kNoMaterialInput || graph.closure_output >= graph.nodes.size())
+    if (graph.closure_output >= graph.nodes.size())
         return std::nullopt;
     auto node_index = graph.closure_output;
     while (node_index != kNoMaterialInput && node_index < graph.nodes.size())
@@ -1557,7 +1414,7 @@ SolidTransmissionProfileBits(const MaterialGraph &graph)
 std::optional<std::array<std::uint32_t, 4>>
 SolidTransmissionProfileBits(const PreparedMaterial &material)
 {
-    return SolidTransmissionProfileBits(material.Graph());
+    return SolidTransmissionProfileBitsForGraph(material.Graph());
 }
 MaterialContextDemand AnalyzeContextDemand(const PreparedMaterial &material) { return material.impl_->context_demand; }
 
@@ -1567,8 +1424,7 @@ std::uint32_t AnalyzeOpacityTextureMask(const PreparedMaterial &material)
     const auto &graph = impl.graph;
     if (graph.kind != MaterialGraphKind::Masked) return 0;
 
-    const auto &live = graph.closure_output != kNoMaterialInput
-        ? impl.closure_opacity_live : impl.output_live[2];
+    const auto &live = impl.opacity_live;
     const auto all_declared = (1u << graph.textures.size()) - 1u;
     std::uint32_t mask{};
     for (std::size_t index = 0; index < live.size(); ++index)
@@ -1583,21 +1439,6 @@ std::uint32_t AnalyzeOpacityTextureMask(const PreparedMaterial &material)
             mask |= 1u << node.declaration_index;
     }
     return mask;
-}
-
-std::string EmitUniformClosureHlsl(const MaterialGraph &graph, std::string_view function_name)
-{
-    Require(graph.kind != MaterialGraphKind::Decal,
-            "decal domain must be evaluated in the common Surface pass before lighting");
-    // The identifier shares the authored ID rules except for generated uppercase names.
-    Require(!function_name.empty() && function_name.size() <= 128, "invalid uniform closure function name");
-    for (std::size_t i = 0; i < function_name.size(); ++i)
-    {
-        const auto c = function_name[i];
-        Require((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
-                (i != 0 && c >= '0' && c <= '9'), "invalid uniform closure function name");
-    }
-    return EmitUniformClosureHlsl(PrepareMaterial(graph), function_name);
 }
 
 std::string EmitUniformClosureHlsl(const PreparedMaterial &material, std::string_view function_name)
@@ -1676,47 +1517,6 @@ std::string EmitUniformClosureHlsl(const PreparedMaterial &material, std::string
         result += ");\n";
     }
     return result + "    return base;\n}\n";
-}
-
-void ValidateRock0MaterialGraph(const MaterialGraph &graph)
-{
-    (void)ValidateMaterialGraph(graph, MaterialGraphKind::Rock0);
-}
-
-void ValidateLeaf0MaterialGraph(const MaterialGraph &graph)
-{
-    (void)ValidateMaterialGraph(graph, MaterialGraphKind::Leaf0);
-}
-
-void ValidateEnvironmentMaterialGraph(const MaterialGraph &graph)
-{
-    ValidateEnvironmentDomain(graph);
-    (void)ValidateMaterialGraph(graph, graph.kind);
-}
-
-void ValidateCharacterMaterialGraph(const MaterialGraph &graph)
-{
-    ValidateHeroDomain(graph);
-    (void)ValidateMaterialGraph(graph, graph.kind);
-}
-
-void ValidateTerrainMaterialGraph(const MaterialGraph &graph)
-{
-    Require(graph.kind == MaterialGraphKind::Terrain, "expected terrain material graph");
-    (void)ValidateMaterialGraph(graph, MaterialGraphKind::Terrain);
-}
-
-void ValidateDecalMaterialGraph(const MaterialGraph &graph)
-{
-    (void)ValidateMaterialGraph(graph, MaterialGraphKind::Decal);
-}
-
-void ValidateMaterialSampleLayers(const MaterialGraph &graph,
-    std::span<const std::uint32_t> texture_layer_counts, std::uint32_t max_context_layer)
-{
-    return ValidateMaterialSampleLayers(PrepareMaterial(graph,
-        graph.kind == MaterialGraphKind::Decal ? MaterialPreparationDomain::Decal :
-        MaterialPreparationDomain::Environment), texture_layer_counts, max_context_layer);
 }
 
 void ValidateMaterialSampleLayers(const PreparedMaterial &material,
@@ -1898,102 +1698,6 @@ void ValidateMaterialSampleLayers(const PreparedMaterial &material,
     }
 }
 
-std::string EmitRock0MaterialHlsl(const MaterialGraph &graph)
-{
-    Require(graph.kind == MaterialGraphKind::Rock0, "unexpected graph kind");
-    return EmitRock0MaterialHlsl(PrepareMaterial(graph));
-}
-
-std::string EmitRock0MaterialHlsl(const PreparedMaterial &material)
-{
-    const auto &graph = material.impl_->graph;
-    Require(graph.kind == MaterialGraphKind::Rock0, "unexpected graph kind");
-    const auto &optimized = material.impl_->optimized;
-    return "// Generated from validated rock_0 MaterialIR.\n" +
-        EmitLibraryHelpers(optimized, {graph.base_color_output, graph.roughness_output}) +
-        EmitFunction(optimized, graph.base_color_output, MaterialType::Float3,
-                     "HsRock0BaseColor(float3 sampled_base_color)", graph.parameters) +
-        EmitFunction(optimized, graph.roughness_output, MaterialType::Float,
-                     "HsRock0Roughness(float sampled_roughness, float roughness_scale)", graph.parameters);
-}
-
-std::string EmitLeaf0MaterialHlsl(const MaterialGraph &graph)
-{
-    Require(graph.kind == MaterialGraphKind::Leaf0, "unexpected graph kind");
-    return EmitLeaf0MaterialHlsl(PrepareMaterial(graph));
-}
-
-std::string EmitLeaf0MaterialHlsl(const PreparedMaterial &material)
-{
-    const auto &graph = material.impl_->graph;
-    Require(graph.kind == MaterialGraphKind::Leaf0, "unexpected graph kind");
-    const auto &optimized = material.impl_->optimized;
-    return "// Generated from validated leaf_0 MaterialIR.\n" +
-        EmitLibraryHelpers(optimized, {graph.opacity_output}) +
-        EmitFunction(optimized, graph.opacity_output, MaterialType::Float,
-                     "HsLeaf0Opacity(float sampled_alpha)", graph.parameters);
-}
-
-std::string EmitEnvironmentMaterialHlsl(const MaterialGraph &graph)
-{
-    if (graph.kind == MaterialGraphKind::Rock0)
-        return EmitRock0MaterialHlsl(graph) +
-            "float3 HsMaterialBaseColor(float3 sampled) { return HsRock0BaseColor(sampled); }\n"
-            "float HsMaterialRoughness(float sampled, float scale) { return HsRock0Roughness(sampled, scale); }\n"
-            "float HsMaterialOpacity(float sampled) { return sampled; }\n";
-    if (graph.kind == MaterialGraphKind::Leaf0)
-        return EmitLeaf0MaterialHlsl(graph) +
-            "float3 HsMaterialBaseColor(float3 sampled) { return sampled; }\n"
-            "float HsMaterialRoughness(float sampled, float scale) { return saturate(sampled * scale); }\n"
-            "float HsMaterialOpacity(float sampled) { return HsLeaf0Opacity(sampled); }\n";
-    ValidateEnvironmentDomain(graph);
-    Require(graph.closure_output == kNoMaterialInput,
-            "typed surface closure requires the context surface emitter");
-    return EmitEnvironmentMaterialHlsl(PrepareMaterial(graph, MaterialPreparationDomain::Environment));
-}
-
-std::string EmitEnvironmentMaterialHlsl(const PreparedMaterial &material)
-{
-    const auto &graph = material.impl_->graph;
-    if (graph.kind == MaterialGraphKind::Rock0) return EmitRock0MaterialHlsl(material) +
-        "float3 HsMaterialBaseColor(float3 sampled) { return HsRock0BaseColor(sampled); }\n"
-        "float HsMaterialRoughness(float sampled, float scale) { return HsRock0Roughness(sampled, scale); }\n"
-        "float HsMaterialOpacity(float sampled) { return sampled; }\n";
-    if (graph.kind == MaterialGraphKind::Leaf0) return EmitLeaf0MaterialHlsl(material) +
-        "float3 HsMaterialBaseColor(float3 sampled) { return sampled; }\n"
-        "float HsMaterialRoughness(float sampled, float scale) { return saturate(sampled * scale); }\n"
-        "float HsMaterialOpacity(float sampled) { return HsLeaf0Opacity(sampled); }\n";
-    ValidateEnvironmentDomain(graph);
-    Require(graph.closure_output == kNoMaterialInput,
-            "typed surface closure requires the context surface emitter");
-    const auto &optimized = material.impl_->optimized;
-    std::string result = "// Generated from validated environment MaterialIR.\n";
-    result += EmitLibraryHelpers(optimized, {graph.base_color_output, graph.roughness_output,
-                                             graph.kind == MaterialGraphKind::Masked
-                                                 ? graph.opacity_output : kNoMaterialInput});
-    result += EmitFunction(optimized, graph.base_color_output, MaterialType::Float3,
-                           "HsMaterialBaseColor(float3 sampled)", graph.parameters);
-    result += EmitFunction(optimized, graph.roughness_output, MaterialType::Float,
-                           "HsMaterialRoughness(float sampled, float scale)", graph.parameters);
-    if (graph.kind == MaterialGraphKind::Masked)
-        result += EmitFunction(optimized, graph.opacity_output, MaterialType::Float,
-                               "HsMaterialOpacity(float sampled)", graph.parameters);
-    else result += "float HsMaterialOpacity(float sampled) { return sampled; }\n";
-    return result;
-}
-
-std::string EmitEnvironmentMaterialContextHlsl(const MaterialGraph &graph,
-                                              std::size_t material_ordinal)
-{
-    Require(material_ordinal < kAuthoredMaterialNames.size(), "material ordinal out of range");
-    if (graph.kind != MaterialGraphKind::Terrain) ValidateEnvironmentDomain(graph);
-    Require(graph.normal_space == MaterialNormalSpace::Tangent ||
-            graph.normal_space == MaterialNormalSpace::World, "invalid normal output space");
-    return EmitEnvironmentMaterialContextHlsl(PrepareMaterial(graph,
-        graph.kind == MaterialGraphKind::Terrain ? MaterialPreparationDomain::Generic :
-        MaterialPreparationDomain::Environment), material_ordinal);
-}
-
 std::string EmitEnvironmentMaterialContextHlsl(const PreparedMaterial &material,
                                               std::size_t material_ordinal)
 {
@@ -2016,51 +1720,13 @@ std::string EmitEnvironmentMaterialContextHlsl(const PreparedMaterial &material,
     if (graph.kind == MaterialGraphKind::Terrain)
         result += "#include \"material_terrain.hlsli\"\n";
     result += EmitNormalHelpers();
-    if (graph.closure_output != kNoMaterialInput)
-        result += EmitLibraryHelpers(optimized, {graph.closure_output});
-    else
-        result += EmitLibraryHelpers(optimized, {graph.base_color_output, graph.roughness_output,
-                                                 graph.normal_output, graph.ao_output,
-                                                 graph.kind == MaterialGraphKind::Masked
-                                                     ? graph.opacity_output : kNoMaterialInput});
+    result += EmitLibraryHelpers(optimized, material.impl_->surface_live);
     const auto representative = [&](std::size_t index) { return optimized.representative[index]; };
     const auto value = [&](std::size_t index) { return "n" + std::to_string(representative(index)); };
-    std::vector<bool> surface_reachable(optimized.nodes.size());
-    const auto surface_output = graph.closure_output != kNoMaterialInput
-        ? graph.closure_output : graph.base_color_output;
-    if (graph.closure_output != kNoMaterialInput)
-    {
-        surface_reachable = material.impl_->closure_live;
-    }
-    else for (const auto output : {graph.base_color_output, graph.roughness_output,
-            graph.normal_output, graph.ao_output,
-            graph.kind == MaterialGraphKind::Masked ? graph.opacity_output : kNoMaterialInput})
-        if (output != kNoMaterialInput)
-        {
-            const auto slot = output == graph.base_color_output ? 0u :
-                output == graph.roughness_output ? 1u : output == graph.opacity_output ? 2u :
-                output == graph.normal_output ? 3u : 4u;
-            const auto &output_reachable = material.impl_->output_live[slot];
-            for (std::size_t i = 0; i < surface_reachable.size(); ++i)
-                surface_reachable[i] = surface_reachable[i] || output_reachable[i];
-        }
+    const auto &surface_live = material.impl_->surface_live;
     result += "HsMaterialSurface HsMaterialEvaluateSurface(HsMaterialContext ctx)\n{\n";
-    result += EmitContextNodes(optimized, graph, surface_reachable, material_ordinal * kMaterialTextureSlots);
-    std::string surface_result;
-    if (graph.closure_output != kNoMaterialInput)
-        surface_result = "    HsMaterialSurface result = " + value(graph.closure_output) +
-            ";\n    result.normal_is_world = " +
-            (graph.normal_space == MaterialNormalSpace::World ? "true" : "false") +
-            ";\n    return result;\n}\n";
-    else
-        surface_result = "    HsMaterialSurface result = (HsMaterialSurface)0;\n    result.base_color = " + value(graph.base_color_output) +
-            ";\n    result.roughness = " + value(graph.roughness_output) +
-            ";\n    result.metallic = ctx.metallic;\n    result.normal = " +
-            (graph.normal_output == kNoMaterialInput ? "ctx.normal" : value(graph.normal_output)) +
-            ";\n    result.ao = " +
-            (graph.ao_output == kNoMaterialInput ? "ctx.sampled_ao" : value(graph.ao_output)) +
-            ";\n    result.opacity = " +
-            (graph.kind == MaterialGraphKind::Masked ? value(graph.opacity_output) : "1.0") +
+    result += EmitContextNodes(optimized, graph, surface_live, material_ordinal * kMaterialTextureSlots);
+    std::string surface_result = "    HsMaterialSurface result = " + value(graph.closure_output) +
             ";\n    result.normal_is_world = " +
             (graph.normal_space == MaterialNormalSpace::World ? "true" : "false") +
             ";\n    return result;\n}\n";
@@ -2070,13 +1736,11 @@ std::string EmitEnvironmentMaterialContextHlsl(const PreparedMaterial &material,
     result += "HsMaterialSurface HsMaterialEvaluateCoveredSurface(HsMaterialContext ctx)\n{\n";
     if (graph.kind == MaterialGraphKind::Masked)
     {
-        const auto &opacity_live = graph.closure_output != kNoMaterialInput
-            ? material.impl_->closure_opacity_live : material.impl_->output_live[2];
-        const auto opacity = graph.closure_output != kNoMaterialInput
-            ? "n" + std::to_string(material.impl_->closure_opacity) : value(graph.opacity_output);
+        const auto &opacity_live = material.impl_->opacity_live;
+        const auto opacity = "n" + std::to_string(material.impl_->closure_opacity);
         result += EmitContextNodes(optimized, graph, opacity_live, material_ordinal * kMaterialTextureSlots);
         result += "    if (" + opacity + " < HsMaterialOpacityCutoff) discard;\n";
-        auto remaining = surface_reachable;
+        auto remaining = surface_live;
         for (std::size_t i = 0; i < remaining.size(); ++i)
             remaining[i] = remaining[i] && !opacity_live[i];
         result += EmitContextNodes(optimized, graph, remaining, material_ordinal * kMaterialTextureSlots);
@@ -2084,37 +1748,14 @@ std::string EmitEnvironmentMaterialContextHlsl(const PreparedMaterial &material,
     }
     else result += "    return HsMaterialEvaluateSurface(ctx);\n}\n";
     result += "float HsMaterialEvaluateOpacity(HsMaterialContext ctx)\n{\n";
-    if (graph.closure_output != kNoMaterialInput && graph.kind == MaterialGraphKind::Masked)
+    if (graph.kind == MaterialGraphKind::Masked)
     {
         const auto opacity = material.impl_->closure_opacity;
-        result += EmitContextNodes(optimized, graph, material.impl_->closure_opacity_live, material_ordinal * kMaterialTextureSlots) +
+        result += EmitContextNodes(optimized, graph, material.impl_->opacity_live, material_ordinal * kMaterialTextureSlots) +
             "    return n" + std::to_string(opacity) + ";\n";
     }
-    else if (graph.kind == MaterialGraphKind::Masked)
-        result += EmitContextNodes(optimized, graph,
-            material.impl_->output_live[2], material_ordinal * kMaterialTextureSlots) +
-            "    return " + value(graph.opacity_output) + ";\n";
     else result += "    return 1.0;\n";
     return result + "}\n";
-}
-
-std::string EmitCharacterMaterialContextHlsl(const MaterialGraph &graph,
-    std::string_view surface_function, std::string_view opacity_function)
-{
-    ValidateHeroDomain(graph);
-    for (const auto name : {surface_function, opacity_function})
-    {
-        Require(!name.empty() && name.size() <= 128, "invalid hero material function name");
-        for (std::size_t i = 0; i < name.size(); ++i)
-        {
-            const auto c = name[i];
-            Require((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
-                    (i != 0 && c >= '0' && c <= '9'), "invalid hero material function name");
-        }
-    }
-    Require(surface_function != opacity_function, "hero material function names must differ");
-    return EmitCharacterMaterialContextHlsl(PrepareMaterial(graph, MaterialPreparationDomain::Hero),
-                                      surface_function, opacity_function);
 }
 
 std::string EmitCharacterMaterialContextHlsl(const PreparedMaterial &material,
@@ -2136,7 +1777,7 @@ std::string EmitCharacterMaterialContextHlsl(const PreparedMaterial &material,
     const auto &optimized = material.impl_->optimized;
     const auto closure = optimized.representative[graph.closure_output];
     const auto opacity = material.impl_->closure_opacity;
-    const auto &surface_live = material.impl_->closure_live;
+    const auto &surface_live = material.impl_->surface_live;
     std::string result = ContextDemandConstants() + "#include \"material_surface.hlsli\"\n";
     result += EmitLibraryHelpers(optimized, surface_live) + EmitNormalHelpers();
     result += "HsSurfaceClosure " + std::string(surface_function) + "(HsMaterialContext ctx)\n{\n";
@@ -2145,23 +1786,8 @@ std::string EmitCharacterMaterialContextHlsl(const PreparedMaterial &material,
     result += "    result.normal_is_world = " +
         std::string(graph.normal_space == MaterialNormalSpace::World ? "true" : "false") + ";\n";
     result += "    return result;\n}\nfloat " + std::string(opacity_function) + "(HsMaterialContext ctx)\n{\n";
-    result += EmitContextNodes(optimized, graph, material.impl_->closure_opacity_live);
+    result += EmitContextNodes(optimized, graph, material.impl_->opacity_live);
     return result + "    return n" + std::to_string(opacity) + ";\n}\n";
-}
-
-std::string EmitDecalMaterialContextHlsl(const MaterialGraph &graph,
-    std::string_view function_name, std::uint32_t texture_register)
-{
-    Require(!function_name.empty() && function_name.size() <= 128, "invalid decal function name");
-    for (std::size_t i = 0; i < function_name.size(); ++i)
-    {
-        const char c = function_name[i];
-        Require((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' ||
-                (i != 0 && c >= '0' && c <= '9'), "invalid decal function name");
-    }
-    Require(graph.kind == MaterialGraphKind::Decal, "unexpected graph kind");
-    return EmitDecalMaterialContextHlsl(PrepareMaterial(graph, MaterialPreparationDomain::Decal),
-                                        function_name, texture_register);
 }
 
 std::string EmitDecalMaterialContextHlsl(const PreparedMaterial &material,
@@ -2183,9 +1809,9 @@ std::string EmitDecalMaterialContextHlsl(const PreparedMaterial &material,
     // geometry material or texture ABI.
     std::string result = "Texture2DArray<float4> HsMaterialTexture0 : register(t" +
         std::to_string(texture_register) + ", HS_DECAL_JOIN(space,HS_DECAL_SPACE));\n";
-    result += EmitLibraryHelpers(optimized, material.impl_->closure_live) + EmitNormalHelpers();
+    result += EmitLibraryHelpers(optimized, material.impl_->surface_live) + EmitNormalHelpers();
     result += "HsSurfaceClosure " + std::string(function_name) + "(HsDecalContext ctx)\n{\n";
-    result += EmitContextNodes(optimized, graph, material.impl_->closure_live);
+    result += EmitContextNodes(optimized, graph, material.impl_->surface_live);
     result += "    HsSurfaceClosure result = n" + std::to_string(closure) + ";\n";
     return result + "    result.normal_is_world = true;\n    return result;\n}\n";
 }

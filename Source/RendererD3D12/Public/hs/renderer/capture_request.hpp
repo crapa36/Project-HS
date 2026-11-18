@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <iosfwd>
 
 namespace hs
 {
@@ -17,8 +18,7 @@ enum class CaptureKind : std::uint8_t
     // Reconstructed scene-linear HDR before post processing/display encoding;
     // the published source includes transparent and VFX composition.
     HdrColor,
-    // Completed native SPB1 radiance, filtered radiance, SH9 and first-hit payloads.
-    SceneProbePackage,
+    ParticleCount,
 };
 
 struct CaptureRequest
@@ -26,6 +26,8 @@ struct CaptureRequest
     ViewId view_id{kMainRenderViewId};
     std::filesystem::path path;
     CaptureKind kind{CaptureKind::Color};
+    // Return the surface summary directly when the caller only needs readback values.
+    std::ostream *surface_summary{};
 };
 
 } // namespace hs

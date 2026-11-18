@@ -96,7 +96,6 @@ struct LocalShadowStorage
     struct CachedLight
     {
         LightView light;std::uint32_t valid_faces{},face_count{};bool occupied{},selected{};
-        std::uint64_t pipeline_revision{};
         std::array<UINT,kLocalShadowMaximumFaces> face_tiles{};
     };
     struct Frame
@@ -105,7 +104,7 @@ struct LocalShadowStorage
         std::byte *mapped{};CompletionSet completion;
         std::vector<std::byte> prepared_upload;
         std::uint64_t record_generation{};
-        std::vector<VirtualShadowDrawBatch> batches;
+        std::array<std::vector<VirtualShadowDrawBatch>,2> batches;
         std::array<std::vector<D3D12_RECT>,2> clears;
         std::vector<std::shared_ptr<const void>> owners;
         ~Frame(){if(mapped&&upload.resource)upload.resource->Unmap(0,nullptr);}
@@ -136,7 +135,7 @@ struct LocalShadowFramePlanData
     struct Scratch
     {
         std::byte *mapped{};
-        std::vector<VirtualShadowDrawBatch> batches;
+        std::array<std::vector<VirtualShadowDrawBatch>,2> batches;
         std::array<std::vector<D3D12_RECT>,2> clears;
     } frame;
     const LocalShadowInputs *source{};
@@ -150,14 +149,13 @@ struct LocalShadowFramePlanData
     const VirtualShadowDrawGroup *groups{};
     std::size_t light_count{}, stable_count{}, dynamic_count{}, group_count{};
     DirectX::XMFLOAT3 camera_position{};
-    std::uint64_t rendered_frame_id{}, stable_caster_revision{}, pipeline_revision{};
+    std::uint64_t rendered_frame_id{}, stable_caster_revision{};
     std::uint32_t frame_slot{};
     std::uint64_t record_generation{};
     bool reset_cache{};
     std::vector<LocalShadowStorage::CachedLight> cache;
     LocalShadowStatus status;
     std::vector<LocalShadowLightReference> light_records;
-    std::array<bool,2> has_batches{};
     std::uint32_t draw_count{},batch_count{};
     bool consumed{};
 };
@@ -178,7 +176,6 @@ bool PreparedInputsMatch(const LocalShadowFramePlanData &data,
         data.dynamic_count==in.casters.dynamic.size()&&
         data.groups==in.draw_groups.data()&&data.group_count==in.draw_groups.size()&&
         data.rendered_frame_id==in.rendered_frame_id&&data.frame_slot==in.frame_slot&&
-        data.pipeline_revision==in.pipeline_revision&&
         data.reset_cache==in.reset_cache&&
         std::memcmp(&data.camera_position,&in.camera_position,sizeof(in.camera_position))==0;
 }
@@ -250,7 +247,7 @@ std::array<UINT,2> DirtyFaces(const LocalShadowStorage &s,const LocalShadowInput
         all:all&~cached->valid_faces;
     std::array<UINT,2> dirty{initial, initial};
     if(opacity_changed) dirty={all,all};
-    if(!cached || !in.pipeline_revision || cached->pipeline_revision!=in.pipeline_revision) dirty[1]=all;
+    if(!cached) dirty[1]=all;
     for(UINT layer=0;layer<2;++layer)
       for(UINT face=0;face<record.revision.w;++face)
         if((dirty[layer]&(1u<<face))==0)for(const auto &entry:layer?changed_dynamic:changed_static)
@@ -315,11 +312,9 @@ std::uint64_t LocalShadowCandidate::AllocatedBytes()const noexcept{return storag
 std::uint64_t LocalShadowSystem::AllocatedBytes()const noexcept{return impl_->storage?impl_->storage->allocated:0;}
 LocalShadowStatus LocalShadowSystem::Status()const{return impl_->status;}
 Result LocalShadowSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *allocator,const LocalShadowProfile &profile,
-    const ShaderReader &,LocalShadowCandidate &candidate,RendererPipelineCache *)const
+    LocalShadowCandidate &candidate)const
 {
     candidate={};
-    if(!profile.enabled){candidate.prepared_=true;return Result::Success();}
-    if(!profile.filter_samples||profile.filter_samples>16)return Failure(ErrorCode::InvalidArgument,"Invalid local shadow filter sample count.");
     if(!device||!allocator||!profile.byte_budget||!profile.maximum_lights||profile.maximum_lights>64||
         profile.face_resolution<16||profile.face_resolution>4096||!profile.max_casters||!profile.max_draw_groups||
         !profile.command_capacity||profile.command_capacity>=kLocalShadowPassBit||!profile.frame_slots||profile.frame_slots>16||
@@ -378,25 +373,25 @@ Result LocalShadowSystem::Prepare(ID3D12Device *device,D3D12MA::Allocator *alloc
         device->CreateShaderResourceView(s->dynamic_bank.resource.Get(),&texture,s->Srv(slot,LocalShadowSrvDynamicBank));
         StructuredSrv(*s,f.draws.resource.Get(),HS_LOCAL_SHADOW_DRAW_BYTES,s->Srv(slot,LocalShadowSrvDrawRecords));
     }
-    candidate.storage_=std::move(s);candidate.prepared_=true;return Result::Success();
+    candidate.storage_=std::move(s);return Result::Success();
 }
 Result LocalShadowSystem::Commit(LocalShadowCandidate &&candidate,const CompletionSet &completed)
 {
-    if(!candidate.prepared_||impl_->pending.graph||(impl_->storage&&!impl_->storage->completion.IsSatisfiedBy(completed)))
+    if(!candidate.storage_||impl_->pending.graph||(impl_->storage&&!impl_->storage->completion.IsSatisfiedBy(completed)))
         return Failure(ErrorCode::InvalidState,"Local shadow replacement requires a prepared candidate and all queue readers completed.");
-    if(candidate.storage_&&impl_->next_generation==UINT64_MAX)
+    if(impl_->next_generation==UINT64_MAX)
         return Failure(ErrorCode::InvalidState,"Local shadow storage generation is exhausted.");
-    if(candidate.storage_)candidate.storage_->generation=++impl_->next_generation;
-    impl_->storage=std::move(candidate.storage_);impl_->status={};impl_->status.enabled=bool(impl_->storage);
-    impl_->status.allocated_bytes=AllocatedBytes();candidate.prepared_=false;return Result::Success();
+    candidate.storage_->generation=++impl_->next_generation;
+    impl_->storage=std::move(candidate.storage_);impl_->status={};impl_->status.enabled=true;
+    impl_->status.allocated_bytes=AllocatedBytes();return Result::Success();
 }
 Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
     LocalShadowFramePlan &plan)
 {
     plan={};auto s=impl_->storage;if(!s)return Result::Success();
     if(!s->usable||impl_->pending.graph)return Failure(ErrorCode::InvalidState,"Local shadows require completion and reset after a failed graph.");
-    if(in.frame_slot>=s->frames.size()||!s->frames[in.frame_slot].completion.IsSatisfiedBy(in.completed)||!in.draw)
-        return Failure(ErrorCode::InvalidArgument,"Local shadow completed frame slot or draw callback is invalid.");
+    if(in.frame_slot>=s->frames.size()||!s->frames[in.frame_slot].completion.IsSatisfiedBy(in.completed))
+        return Failure(ErrorCode::InvalidArgument,"Local shadow completed frame slot is invalid.");
     LocalShadowStatus status;status.enabled=true;status.allocated_bytes=s->allocated;
     struct Ranked{const LightView *light;double priority;};std::vector<Ranked> ranked;
     for(const auto &light:in.lights)
@@ -504,7 +499,6 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
     data->groups=in.draw_groups.data();data->group_count=in.draw_groups.size();
     data->camera_position=in.camera_position;data->rendered_frame_id=in.rendered_frame_id;
     data->frame_slot=in.frame_slot;data->reset_cache=in.reset_cache;
-    data->pipeline_revision=in.pipeline_revision;
     data->frame.mapped=native_frame.prepared_upload.data();
     const float expanded=1.0f+2.0f*kLocalShadowGuard/s->profile.face_resolution;
     const bool opacity_changed=!in.opacity_owner||in.opacity_owner!=s->opacity_owner||
@@ -574,7 +568,7 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
     }
     std::vector<GpuLocalShadowRecord> records(cache.size());std::vector<GpuShadowDrawRecord> draws;
     std::vector<IndexedCommand> indexed;std::vector<MeshCommand> mesh;std::vector<UINT> counts;
-    auto &frame=data->frame;frame.batches.clear();for(auto &clears:frame.clears)clears.clear();
+    auto &frame=data->frame;for(auto &batches:frame.batches)batches.clear();for(auto &clears:frame.clears)clears.clear();
     for(const auto &choice:selected)
     {
         const auto slot=choice.slot;const auto &light=*choice.light;auto &cached=cache[slot];
@@ -604,14 +598,14 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
                 if(draws.size()!=begin)
                 {
                     const auto command_count=UINT(draws.size()-begin);const bool mesh_group=in.draw_groups[group].frontend==VirtualShadowFrontend::Mesh;
-                    frame.batches.push_back({in.draw_groups[group],group,layer,command_count,
+                    frame.batches[layer].push_back({in.draw_groups[group],group,layer,command_count,
                         UINT64(begin)*(mesh_group?sizeof(MeshCommand):sizeof(IndexedCommand)),UINT64(counts.size())*4});counts.push_back(command_count);
                 }
             }
         }
         if(draws.size()-first_draw!=choice.commands)
             return Failure(ErrorCode::InvalidState,"Local shadow command emission differs from its admitted face bundle.");
-        cached.light=light;cached.occupied=true;cached.pipeline_revision=in.pipeline_revision;
+        cached.light=light;cached.occupied=true;
         for(UINT face=0;face<record.revision.w;++face)
         {
             const auto tile=record.atlas_tiles[face];const D3D12_RECT rect{LONG(tile.x),LONG(tile.y),
@@ -642,8 +636,8 @@ Result LocalShadowSystem::PrepareFrameRecordData(const LocalShadowInputs &in,
     // Only batch-reachable prefixes are published; unused capacity has no reader.
     data->draw_count=static_cast<std::uint32_t>(draws.size());
     data->batch_count=static_cast<std::uint32_t>(counts.size());
-    for(const auto &batch:frame.batches)data->has_batches[batch.layer]=true;
-    plan.has_batches=data->has_batches;plan.data=std::move(data);
+    for(UINT layer=0;layer<2;++layer)plan.has_batches[layer]=!frame.batches[layer].empty();
+    plan.data=std::move(data);
     return Result::Success();
 }
 Result LocalShadowSystem::Register(RenderGraphBuilder &graph,const LocalShadowInputs &in,
@@ -662,21 +656,24 @@ Result LocalShadowSystem::BindRetained(RenderGraphBuilder &graph,const LocalShad
 bool LocalShadowSystem::MatchesLayout(const LocalShadowInputs &in,
     const LocalShadowFramePlan &plan,const LocalShadowLayout &layout) const noexcept
 {
-    const auto s=impl_->storage;
-    if(!s||!s->usable||!plan.data||!PreparedInputsMatch(*plan.data,in)||
-        plan.data->storage!=s||plan.data->consumed||
-        in.frame_slot>=s->frames.size()||
-        plan.data->record_generation!=s->frames[in.frame_slot].record_generation||
-        layout.storage_generation!=s->generation||
-        layout.initialized!=s->initialized||
-        layout.material_sampling!=bool(in.declare_material_sampling)||
+    if(!MatchesShape(plan,bool(in.declare_material_sampling),layout)||
         layout.native_reads.size()!=in.native_reads.size())return false;
     for(std::size_t index=0;index<in.native_reads.size();++index)
         if(layout.native_reads[index].version!=in.native_reads[index].version||
             layout.native_reads[index].access!=in.native_reads[index].access)return false;
+    return true;
+}
+bool LocalShadowSystem::MatchesShape(const LocalShadowFramePlan &plan,bool material_sampling,
+    const LocalShadowLayout &layout) const noexcept
+{
+    const auto &s=impl_->storage;
+    if(!s||!s->usable||!plan.data||
+        plan.data->storage!=s||plan.data->consumed||
+        layout.storage_generation!=s->generation||
+        layout.initialized!=s->initialized||
+        layout.material_sampling!=material_sampling)return false;
     for(UINT layer=0;layer<2;++layer)
-        if(layout.sampled_layers[layer]!=(plan.has_batches[layer]&&bool(in.draw)&&
-            bool(in.declare_material_sampling)))return false;
+        if(layout.sampled_layers[layer]!=(plan.has_batches[layer]&&material_sampling))return false;
     return true;
 }
 Result LocalShadowSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalShadowInputs &in,
@@ -684,6 +681,8 @@ Result LocalShadowSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalShad
     const LocalShadowLayout *retained)
 {
     out={};auto s=impl_->storage;if(!s)return Result::Success();
+    if(!in.draw)
+        return Failure(ErrorCode::InvalidArgument,"Local shadow draw callback is required.");
     auto data=plan.data;
     if(!data||!PreparedInputsMatch(*data,in)||data->storage!=s||data->consumed||
         in.frame_slot>=s->frames.size()||!s->frames[in.frame_slot].completion.IsSatisfiedBy(in.completed)||
@@ -694,9 +693,6 @@ Result LocalShadowSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalShad
     {
         if(!MatchesLayout(in,plan,*retained))
             return Failure(ErrorCode::InvalidState,"Local shadow retained topology changed.");
-        for(UINT index=0;index<4;++index)
-            if(!graph.BindPass(retained->pass_indices[index],220+index))
-                return Failure(ErrorCode::InvalidState,"Local shadow retained pass changed.");
         for(UINT index=0;index<retained->imports.size();++index)
             if(!retained->imports[index]||
                 retained->imports[index].value>graph.ResourceCount()||
@@ -720,6 +716,16 @@ Result LocalShadowSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalShad
             layout->sampled_layers[layer]=plan.has_batches[layer]&&bool(in.draw)&&
                 bool(in.declare_material_sampling);
     }
+    std::optional<std::uint32_t> next_pass;
+    if (retained) next_pass = retained->first_pass;
+    else if (layout) layout->first_pass = graph.PassCount();
+    auto copy_pass = graph.AddOrBindNextPass(next_pass, 220, "LocalShadow.UploadCommands", QueueHint::Copy);
+    std::array layer_passes{
+        graph.AddOrBindNextPass(next_pass, 221, "LocalShadow.StaticBank"),
+        graph.AddOrBindNextPass(next_pass, 222, "LocalShadow.DynamicBank")};
+    auto ready_pass = graph.AddOrBindNextPass(next_pass, 223, "LocalShadow.ShadowDataReady");
+    if (!copy_pass || !layer_passes[0] || !layer_passes[1] || !ready_pass)
+        return Failure(ErrorCode::InvalidState, "Local shadow retained pass changed.");
     auto &frame=s->frames[in.frame_slot];
     const auto draw_bytes=std::size_t(data->draw_count)*sizeof(GpuShadowDrawRecord);
     const auto indexed_bytes=std::size_t(data->draw_count)*sizeof(IndexedCommand);
@@ -759,9 +765,7 @@ Result LocalShadowSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalShad
         draw=import(frame.draws,"LocalShadow.DrawRecords"),index=import(frame.indexed,"LocalShadow.Indexed"),mesh_args=import(frame.mesh,"LocalShadow.Mesh"),
         count=import(frame.counts,"LocalShadow.Counts"),statics=import(s->static_bank,"LocalShadow.StaticBank",true),dynamics=import(s->dynamic_bank,"LocalShadow.DynamicBank",true);
     if(!imports_valid)return Failure(ErrorCode::InvalidState,"Local shadow retained resource binding changed.");
-    if(layout)layout->pass_indices[0]=graph.PassCount();
-    auto copy=retained?*graph.BindPass(retained->pass_indices[0],220):
-        graph.AddPass(220,"LocalShadow.UploadCommands",QueueHint::Copy);
+    auto &copy = *copy_pass;
     if(!retained)
     {
         copy.Read(upload,Access::CopySource);
@@ -797,9 +801,7 @@ Result LocalShadowSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalShad
     out.bank_extent=s->extent;out.descriptor_count=kLocalShadowDescriptorCount;
     for(UINT layer=0;layer<2;++layer)
     {
-        if(layout)layout->pass_indices[1+layer]=graph.PassCount();
-        auto pass=retained?*graph.BindPass(retained->pass_indices[1+layer],221+layer):
-            graph.AddPass(221+layer,layer?"LocalShadow.DynamicBank":"LocalShadow.StaticBank",QueueHint::Direct);
+        auto &pass = *layer_passes[layer];
         if(!retained)
         {
             for(auto version:{meta,record,draw})pass.Read(version,Access::ShaderRead);
@@ -817,7 +819,7 @@ Result LocalShadowSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalShad
             // Rectangle clears cannot initialize a new placed depth subresource.
             if(initialize)cmd->ClearDepthStencilView(outputs.depth_views[layer],D3D12_CLEAR_FLAG_DEPTH,0,0,0,nullptr);
             else for(const auto &rect:f.clears[layer])cmd->ClearDepthStencilView(outputs.depth_views[layer],D3D12_CLEAR_FLAG_DEPTH,0,0,1,&rect);
-            std::vector<VirtualShadowDrawBatch> batches;for(const auto &b:f.batches)if(b.layer==layer)batches.push_back(b);
+            const auto &batches=f.batches[layer];
             if(batches.empty())return Result::Success();
             const auto dsv=outputs.depth_views[layer];cmd->OMSetRenderTargets(0,nullptr,FALSE,&dsv);
             const D3D12_VIEWPORT viewport{0,0,float(s->extent.width),float(s->extent.height),0,1};
@@ -825,9 +827,7 @@ Result LocalShadowSystem::RegisterImpl(RenderGraphBuilder &graph,const LocalShad
             cmd->RSSetViewports(1,&viewport);cmd->RSSetScissorRects(1,&rect);return callback(context,outputs,batches);
         });
     }
-    if(layout)layout->pass_indices[3]=graph.PassCount();
-    auto ready=retained?*graph.BindPass(retained->pass_indices[3],223):
-        graph.AddPass(223,"LocalShadow.ShadowDataReady",QueueHint::Direct);
+    auto &ready = *ready_pass;
     if(!retained)for(auto version:{meta,record,statics,dynamics,draw})
         ready.Read(version,Access::AllShaderRead);
     ready.SetExecute([](RenderPassContext &){});out.static_bank=statics;out.dynamic_bank=dynamics;

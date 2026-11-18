@@ -83,10 +83,6 @@ ClusterFrameRecordData D3D12Renderer::Impl::PrepareClusterFrameRecordData(
     return record;
 }
 
-bool D3D12Renderer::Impl::MatchesClusterGraphLayout(
-    const ClusterFrameRecordData &current,const ClusterGraphLayout &layout) const noexcept
-{ return cluster_runtime && current==layout.record; }
-
 Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
     ResourceVersion &geometry_records, ResourceVersion *visibility_raster_records,
     ResourceVersion static_scene, ClusterFrameGraph &state,
@@ -96,8 +92,7 @@ Result D3D12Renderer::Impl::AddClusterFramePasses(std::uint32_t frame_slot,
     if (!cluster_runtime || frame_slot >= kClusterRuntimeFrames || state.prepared ||
         !geometry_records.resource || !cluster_root_signature ||
         (capture && retained) || record.frame_slot!=frame_slot ||
-        record.visibility!=(visibility_raster_records!=nullptr) ||
-        (retained && !MatchesClusterGraphLayout(record,*retained)))
+        record.visibility!=(visibility_raster_records!=nullptr))
         return GraphFailure("Cluster graph has an invalid runtime/frame/shared record input.");
     auto &runtime = *cluster_runtime;
     auto &native = runtime.frames[frame_slot];

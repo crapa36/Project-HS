@@ -6,6 +6,8 @@
 
 namespace hs
 {
+inline constexpr std::uint32_t kNativeJitterPhaseCount = 8;
+
 // Allocation capacity is independent of the active render rectangle. A change
 // within that capacity does not replace resources or advance the resize epoch.
 struct ViewState

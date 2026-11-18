@@ -489,16 +489,9 @@ void HsSurfaceResolveImpl(uint3 groupId, uint lane)
         (HsVisibilityOffsetBase + variant) * 4u);
     const uint linearPixel = HsClassifiedPixels.Load((offset + local) * 4u);
     const uint width = (uint)ScreenSize.x;
-    const uint height = (uint)ScreenSize.y;
-    if (width == 0u || height == 0u || linearPixel >= width * height)
-        return;
     const uint2 pixel = uint2(linearPixel % width, linearPixel / width);
     const uint2 visibility = HsVisibility[pixel];
-    if (!HsRasterIdValid(visibility.x) || visibility.y == HsVisibilityInvalid)
-        return;
     const HsRasterRecord record = HsLoadRasterRecord(HsRasterRecords, visibility.x);
-    if (!HsRasterRecordDomainValid(record))
-        return;
     const GeometryDrawRecord geometry =
         LoadGeometryDrawRecord(record.geometryRecordId);
     if (geometry.PageSlot >= HsGeometryPageCapacity || geometry.IndexCount == 0u ||

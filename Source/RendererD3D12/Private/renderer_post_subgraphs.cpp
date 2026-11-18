@@ -1,7 +1,6 @@
 #include "renderer_post_subgraphs.hpp"
 
 #include <cstddef>
-#include <optional>
 #include <utility>
 
 namespace hs
@@ -51,10 +50,6 @@ Result BuildPostSubgraphs(RenderGraphBuilder &graph,
                                    "Post subgraph requires an execution callback.");
     auto downstream_hdr = plan.outputs.temporal;
     bool pre_bloom_invoked = false;
-    const auto same = [](ResourceVersion left, ResourceVersion right) {
-        return left.resource.value == right.resource.value && left.resource.kind == right.resource.kind &&
-            left.ordinal == right.ordinal;
-    };
     for (auto pass : plan.passes)
     {
         if (pass.id > 9 && !pre_bloom_invoked)
@@ -71,7 +66,7 @@ Result BuildPostSubgraphs(RenderGraphBuilder &graph,
         }
         if (pass.id > 9)
             for (auto &read : pass.reads)
-                if (same(read.version, plan.outputs.temporal)) read.version = downstream_hdr;
+                if (SameVersion(read.version, plan.outputs.temporal)) read.version = downstream_hdr;
         if (pass.id == 14 && inputs.pre_tone_map)
         {
             const auto source = pass.reads.front().version;
@@ -80,7 +75,7 @@ Result BuildPostSubgraphs(RenderGraphBuilder &graph,
             if (!graded.resource || graded.resource.kind != ResourceKind::Texture)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_features", "HDR pre-tone-map hook returned an invalid texture.");
             for (auto &read : pass.reads)
-                if (same(read.version, source)) read.version = graded;
+                if (SameVersion(read.version, source)) read.version = graded;
         }
         if (pass.id == 17 && inputs.devtools_ui)
         {
@@ -161,19 +156,14 @@ Result BindRetainedPostSubgraphs(RenderGraphBuilder &graph,
     if (!MatchesPostSubgraphLayout(inputs, targets, layout))
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_features",
             "Post retained layout variant changed.");
-    std::array<std::optional<PassBuilder>, 9> passes;
     for (std::uint32_t index = 0; index < layout.pass_count; ++index)
     {
         const auto [ordinal, id] = layout.passes[index];
-        if (id < 9 || id > 17 || !callbacks[id - 9] || passes[id - 9] ||
-            !(passes[id - 9] = graph.BindPass(ordinal, id)))
+        auto pass = graph.BindPass(ordinal, id);
+        if (id < 9 || id > 17 || !callbacks[id - 9] || !pass)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_features",
                 "Post retained pass or callback changed.");
-    }
-    for (std::uint32_t index = 0; index < layout.pass_count; ++index)
-    {
-        const auto id = layout.passes[index].id;
-        passes[id - 9]->SetExecute(std::move(callbacks[id - 9]));
+        pass->SetExecute(std::move(callbacks[id - 9]));
     }
     outputs = layout.outputs;
     return Result::Success();

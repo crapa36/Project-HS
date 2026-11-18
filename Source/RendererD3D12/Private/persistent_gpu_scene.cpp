@@ -94,9 +94,6 @@ void PersistentGpuSceneSlots::BeginFrame(bool reset_scene)
     Abort();
     preparing_ = true;
     reset_scene_ = reset_scene;
-    active_count_ = 0;
-    anonymous_count_ = 0;
-    changes_ = {};
     content_changed_ = false;
     pending_content_revision_ = content_revision_;
     dirty_slots_.clear();
@@ -177,7 +174,6 @@ PersistentGpuSceneSlot PersistentGpuSceneSlots::Upsert(
         instances_[slot] = instance;
         metadata_[slot] = metadata;
         MarkDirty(slot);
-        ++changes_.created;
         next.revisions = {1, 1, 1, 1};
         content_changed_ = true;
     }
@@ -215,8 +211,6 @@ PersistentGpuSceneSlot PersistentGpuSceneSlots::Upsert(
         if (content_changed) advance(next.revisions.content);
         if (pose_changed) advance(next.revisions.pose);
         content_changed_ |= material_changed || content_changed;
-        if (payload_changed || next.canonical != canonical) ++changes_.updated;
-        else ++changes_.unchanged;
         // A pose-only edit changes the canonical scene without uploading
         // unchanged instance bytes. Deformation has its own physical backing.
         if (payload_changed)
@@ -256,33 +250,27 @@ PersistentGpuSceneSlot PersistentGpuSceneSlots::Upsert(
     if (pending_seen_.size() <= slot) pending_seen_.resize(std::size_t(slot) + 1);
     pending_active_slots_.push_back(slot);
     pending_seen_[slot] = 1;
-    ++active_count_;
-    if (key.stable_id == 0) ++anonymous_count_;
     return {slot, next.generation, false};
 }
 
 void PersistentGpuSceneSlots::EndFrame()
 {
-    changes_.destroyed = 0;
     pending_removed_slots_.clear();
     if (!reset_scene_)
     {
         pending_removed_slots_.reserve(entries_.size());
         for (std::size_t slot = 0; slot < entries_.size(); ++slot)
             if (entries_[slot].active && !pending_seen_[slot])
-            {
-                ++changes_.destroyed;
                 pending_removed_slots_.push_back(static_cast<std::uint32_t>(slot));
-            }
     }
     pending_content_revision_ = content_revision_;
-    if (content_changed_ || changes_.destroyed)
+    if (content_changed_ || !pending_removed_slots_.empty())
         if (++pending_content_revision_ == 0) ++pending_content_revision_;
     // Native submission commits these owners; any allocation must fail before it.
     entries_.reserve(instances_.size());
     payload_slot_revisions_.resize(instances_.size());
     pending_payload_channels_.resize(instances_.size());
-    free_slots_.reserve(free_slots_.size() + changes_.destroyed);
+    free_slots_.reserve(free_slots_.size() + pending_removed_slots_.size());
     if (!pending_new_slots_.empty())
         slots_.reserve(reset_scene_ ? pending_new_slots_.size() : slots_.size() + pending_new_slots_.size());
     // Destruction and free-slot reuse are published only after submission.
@@ -392,9 +380,6 @@ void PersistentGpuSceneSlots::Clear() noexcept
     dirty_slots_.clear();
     dirty_ranges_.clear();
     for (auto &ranges : dirty_channel_ranges_) ranges.clear();
-    active_count_ = 0;
-    anonymous_count_ = 0;
-    changes_ = {};
     content_revision_ = pending_content_revision_ = 0;
     content_changed_ = false;
     payload_change_pending_ = false;

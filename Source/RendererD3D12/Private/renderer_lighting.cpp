@@ -21,7 +21,7 @@ Result D3D12Renderer::Impl::PrepareVolumetrics(const OwnedView &owner, const Ren
     ViewExtent capacity, VolumetricPrepared &candidate) const
 {
     candidate = {};
-    if (candidate_config.volumetric_quality != GraphicsOptionalQuality::Off)
+    if (candidate_config.volumetric_quality != GraphicsOptionalQuality::Off && !volumetric_media)
     {
         constexpr std::string_view id = "render/lighting/volumetric_media.rpkg";
         RendererAssetSource path;
@@ -30,6 +30,7 @@ Result D3D12Renderer::Impl::PrepareVolumetrics(const OwnedView &owner, const Ren
         if (auto read = ReadBinary(path, bytes); !read) return read;
         try
         {
+            auto data = std::make_shared<VolumetricMediaData>();
             const auto package = render_data::ReadPackage(bytes, MakeAssetId(id));
             if (package.chunks.size() != 1 || package.chunks[0].type != render_data::ChunkType::VolumetricVolumes)
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Invalid volumetric medium package.");
@@ -43,10 +44,11 @@ Result D3D12Renderer::Impl::PrepareVolumetrics(const OwnedView &owner, const Ren
                 volume.density_extinction = {source.density_extinction[0], source.density_extinction[1], source.density_extinction[2], 0};
                 volume.scattering = {source.scattering[0], source.scattering[1], source.scattering[2], 0};
                 volume.identity = {std::uint32_t(source.stable_id), std::uint32_t(source.stable_id >> 32), source.generation, source.shape};
-                candidate.media.push_back(volume);
+                data->volumes.push_back(volume);
             }
-            candidate.revision = 14695981039346656037ull;
-            for (const auto byte : bytes) candidate.revision = (candidate.revision ^ std::uint8_t(byte)) * 1099511628211ull;
+            data->revision = 14695981039346656037ull;
+            for (const auto byte : bytes) data->revision = (data->revision ^ std::uint8_t(byte)) * 1099511628211ull;
+            candidate.media = std::move(data);
         }
         catch (const std::exception &error)
         { return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", error.what()); }
@@ -54,7 +56,7 @@ Result D3D12Renderer::Impl::PrepareVolumetrics(const OwnedView &owner, const Ren
     return owner.volumetrics.Prepare(device.Get(), allocator,
         candidate_config.volumetric_quality, QualityProfileFor(candidate_config.volumetric_quality == GraphicsOptionalQuality::Off
             ? GraphicsQuality::Low : static_cast<GraphicsQuality>(static_cast<unsigned>(candidate_config.volumetric_quality) - 1u)), capacity, kFrameCount, 256,
-        [candidate_config](std::string_view id, std::vector<std::byte> &bytes) {
+        [&candidate_config](std::string_view id, std::vector<std::byte> &bytes) {
             RendererAssetSource path;
             if (auto resolved = ResolveRendererAsset(candidate_config, id, path); !resolved) return resolved;
             return ReadBinary(path, bytes);
@@ -63,22 +65,14 @@ Result D3D12Renderer::Impl::PrepareVolumetrics(const OwnedView &owner, const Ren
 Result D3D12Renderer::Impl::CommitVolumetrics(OwnedView &owner, VolumetricPrepared &&candidate)
 {
     if (auto committed = owner.volumetrics.Commit(std::move(candidate.service), graph_queue_executor.Completed()); !committed) return committed;
-    volumetric_media = std::move(candidate.media);
-    volumetric_revision = candidate.revision;
+    if (candidate.media && !volumetric_media) volumetric_media = std::move(candidate.media);
     owner.previous_volumetric_camera = {};
     return Result::Success();
 }
 RendererFeaturePlan D3D12Renderer::Impl::ResolveFeatures(const RendererConfig &request) const noexcept
 {
-    auto available = feature_capabilities;
-    available.adaptive_raster_consumer = available.adaptive_raster_consumer &&
-        (request.product_paths.contains("render/shader/adaptive_shading_classify_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_shading_classify_cs.dxil")) &&
-        (request.product_paths.contains("render/shader/adaptive_shading_rate_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_shading_rate_cs.dxil"));
-    available.adaptive_compute_consumer = available.adaptive_compute_consumer &&
-        (request.product_paths.contains("render/shader/adaptive_shading_classify_cs.dxil") || FindRendererBulk(request, "render/shader/adaptive_shading_classify_cs.dxil")) &&
-        (request.product_paths.contains(kAoAdaptiveShaderProduct) || FindRendererBulk(request, kAoAdaptiveShaderProduct));
     return ResolveRendererFeatures({request.ao_mode,
-        request.gi_mode, request.reflection_mode, request.shadow_mode, request.adaptive_shading}, available);
+        request.gi_mode, request.reflection_mode, request.shadow_mode, request.adaptive_shading}, feature_capabilities);
 }
 std::array<bool, 2> D3D12Renderer::Impl::RequiredLightingAuxiliaries(const RendererConfig &request) const noexcept
 {
@@ -105,7 +99,8 @@ Result D3D12Renderer::Impl::PrepareVirtualShadows(const OwnedView &owner, const 
         "render/shader/virtual_shadow_feedback_cs.dxil", "render/shader/virtual_shadow_resident_cs.dxil",
         "render/shader/virtual_shadow_cull_cs.dxil", "render/shader/virtual_shadow_publish_cs.dxil",
         "render/shader/virtual_shadow_clear_vs.dxil", "render/shader/virtual_shadow_clear_ps.dxil",
-        "render/shader/virtual_shadow_seed_ps.dxil"};
+        "render/shader/virtual_shadow_seed_ps.dxil",
+        "render/shader/virtual_shadow_dynamic_seed_ps.dxil"};
     VirtualShadowProfile profile;
     profile.enabled = candidate_config.shadow_mode == GraphicsShadowMode::Raster &&
         std::ranges::all_of(products, [&](const auto id) { return (candidate_config.product_paths.contains(id) || FindRendererBulk(candidate_config, id)); });
@@ -167,18 +162,12 @@ Result D3D12Renderer::Impl::PrepareHdrPost(const OwnedView &owner, const Rendere
             return ReadBinary(path, bytes);
         }, candidate);
 }
-Result D3D12Renderer::Impl::PrepareAdditionalShadows(const OwnedView &owner, const RendererConfig &candidate_config,
-    ViewExtent capacity, AdditionalShadowPrepared &candidate) const
+Result D3D12Renderer::Impl::PrepareLocalShadows(const OwnedView &owner, const RendererConfig &candidate_config,
+    LocalShadowCandidate &candidate) const
 {
     candidate = {};
-    const auto shader_reader = [candidate_config](std::string_view id, std::vector<std::byte> &bytes) {
-        RendererAssetSource path;
-        if (auto resolved = ResolveRendererAsset(candidate_config, id, path); !resolved) return resolved;
-        return ReadBinary(path, bytes);
-    };
     constexpr std::uint64_t mib = 1024ull * 1024ull;
     LocalShadowProfile local;
-    local.enabled = true;
     const auto &quality = QualityProfileFor(candidate_config.shadow_quality);
     local.filter_samples = quality.shadow_filter_samples;
     local.maximum_lights = quality.local_shadow_max_lights;
@@ -186,15 +175,7 @@ Result D3D12Renderer::Impl::PrepareAdditionalShadows(const OwnedView &owner, con
     local.byte_budget = UINT64(quality.local_shadow_budget_mib) * mib;
     local.max_casters = 65536; local.max_draw_groups = 128; local.command_capacity = 65536;
     local.frame_slots = kFrameCount;
-    if (auto prepared = owner.local_shadows.Prepare(device.Get(), allocator, local, shader_reader,
-            candidate.local, &pipeline_cache); !prepared) return prepared;
-    return Result::Success();
-}
-Result D3D12Renderer::Impl::CommitAdditionalShadows(OwnedView &owner, AdditionalShadowPrepared &&candidate)
-{
-    const auto completed = graph_queue_executor.Completed();
-    if (auto result = owner.local_shadows.Commit(std::move(candidate.local), completed); !result) return result;
-    return Result::Success();
+    return owner.local_shadows.Prepare(device.Get(), allocator, local, candidate);
 }
 Result D3D12Renderer::Impl::PrepareLightingProbe(const RendererConfig &candidate_config,
     LightingProbeCandidate &candidate) const
@@ -245,32 +226,13 @@ Result D3D12Renderer::Impl::BuildAdaptiveMaterialPolicies(std::vector<AdaptiveSh
         for (std::size_t ordinal = 0; ordinal < kAuthoredMaterialNames.size(); ++ordinal)
         {
             bool eligible{};
-            if (config.packed_content || config.development_catalog)
-            {
-                const std::string name(kAuthoredMaterialNames[ordinal]);
-                const auto id = render_data::MaterialProduct(name);
-                const auto handle = FindRendererMaterial(config, MakeAssetId(id));
-                if (!handle) throw std::runtime_error("Compiled adaptive material is missing");
-                const auto &material = config.packed_materials[handle.value];
-                eligible = material.surface.capability_mask == basic && material.flags == 0 &&
-                    std::ranges::none_of(material.textures, [](const auto &texture) { return texture.slot >= 3; });
-            }
-            else
-            {
-                const auto &header = material_headers[ordinal];
-                const auto metadata = std::ranges::find(header.view.chunks, render_data::ChunkType::MaterialMetadata,
-                    &render_data::ChunkView::type);
-                if (metadata != header.view.chunks.end())
-                {
-                    const auto material = render_data::DecodeRockMaterial(metadata->bytes, header.view.dependencies);
-                    // Cooked alpha coverage and actual high-frequency authored
-                    // detail/height/histogram domains stay full rate. Basic base,
-                    // roughness and normal texture variation is checked per pixel.
-                    eligible = material_surface_layouts[ordinal].capability_mask == basic &&
-                        !material.alpha_mask && !material.two_sided && material.textures[3].empty() &&
-                        material.textures[4].empty() && material.textures[5].empty();
-                }
-            }
+            const std::string name(kAuthoredMaterialNames[ordinal]);
+            const auto id = render_data::MaterialProduct(name);
+            const auto handle = FindRendererMaterial(config, MakeAssetId(id));
+            if (!handle) throw std::runtime_error("Compiled adaptive material is missing");
+            const auto &material = config.packed_materials[handle.value];
+            eligible = material.surface.capability_mask == basic && material.flags == 0 &&
+                std::ranges::none_of(material.textures, [](const auto &texture) { return texture.slot >= 3; });
             // This exact renderer profile replaces terrain by the unlayered
             // analytic grid. Its actual line/normal/depth edges remain protected
             // by the pixel+halo classifier; authored terrain never inherits it.

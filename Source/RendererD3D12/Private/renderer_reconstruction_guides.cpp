@@ -17,7 +17,7 @@ namespace hs
 namespace
 {
 using Microsoft::WRL::ComPtr;
-constexpr std::uint32_t kSrvCount = 17, kUavCount = 6, kDescriptorCount = kSrvCount + kUavCount, kConstantStride = 256;
+constexpr std::uint32_t kSrvCount = 16, kUavCount = 6, kDescriptorCount = kSrvCount + kUavCount, kConstantStride = 256;
 std::atomic<std::uint64_t> g_reconstruction_guide_generation{};
 constexpr std::array<std::string_view, 1> kShaderProducts{
     "render/shader/reconstruction_guides_cs.dxil"};
@@ -276,14 +276,14 @@ bool ReconstructionGuidesSystem::MatchesLayout(const ReconstructionGuidesInputs 
 {
     if(!MatchesShape(layout,external,provider,in.transparent_guides_enabled,
             bool(in.screen_overlay_alpha.version.resource)))return false;
-    const std::array<ResourceVersion,16> current{in.depth.version,in.motion.version,in.metadata.version,
+    const std::array<ResourceVersion,15> current{in.depth.version,in.motion.version,in.metadata.version,
         in.surface_history.version,in.composite_hdr.version,in.opaque_hdr.version,
         in.exposure.version,in.transparency_revealage.version,in.transparent_depth.version,
         in.transparent_motion.version,in.transparent_history.version,in.transparent_classification.version,
-        in.transparent_metadata.version,in.transparent_unpeeled_fragment_count.version,in.transparent_transport.version,
+        in.transparent_metadata.version,in.transparent_transport.version,
         in.screen_overlay_alpha.version};
     for(std::size_t i=0;i<current.size();++i)
-        if((i<8||(i<15&&layout.transparent_guides)||(i==15&&layout.screen_overlay))&&
+        if((i<8||(i<14&&layout.transparent_guides)||(i==14&&layout.screen_overlay))&&
             layout.inputs[i]!=current[i])return false;
     return true;
 }
@@ -320,7 +320,7 @@ Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const 
             inputs.exposure.version,inputs.transparency_revealage.version,inputs.transparent_depth.version,
             inputs.transparent_motion.version,inputs.transparent_history.version,
             inputs.transparent_classification.version,inputs.transparent_metadata.version,
-            inputs.transparent_unpeeled_fragment_count.version,inputs.transparent_transport.version,
+            inputs.transparent_transport.version,
             inputs.screen_overlay_alpha.version};}
     if(retained)
     {
@@ -331,9 +331,6 @@ Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const 
                 (!retained->imports[i]||retained->imports[i].kind!=ResourceKind::Texture||
                     retained->imports[i].value>graph.ResourceCount()))
                 return GuideFailure(ErrorCode::InvalidState,"Retained reconstruction import slot changed.");
-        for(UINT i=0;i<2;++i)
-            if(!graph.BindPass(retained->pass_indices[i],i==0?49u:9u))
-                return GuideFailure(ErrorCode::InvalidState,"Retained reconstruction pass changed.");
     }
     const auto active = inputs.render_active;
     if (!ValidExtent(active) || active.width > storage->render_capacity.width || active.height > storage->render_capacity.height ||
@@ -344,7 +341,7 @@ Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const 
         !FitsTexture(inputs.surface_history, active, DXGI_FORMAT_R32G32_FLOAT) ||
         !FitsTexture(inputs.composite_hdr, active, DXGI_FORMAT_R16G16B16A16_FLOAT) ||
         !FitsTexture(inputs.opaque_hdr, active, DXGI_FORMAT_R16G16B16A16_FLOAT) ||
-        !FitsTexture(inputs.transparency_revealage, active, DXGI_FORMAT_R16_FLOAT))
+        !FitsTexture(inputs.transparency_revealage, active, DXGI_FORMAT_R16G16_FLOAT))
         return GuideFailure(ErrorCode::InvalidArgument, "Reconstruction guide texture, version, format or capacity is invalid.");
     if (!inputs.exposure.resource || !inputs.exposure.version.resource || inputs.exposure.version.resource.kind != ResourceKind::Buffer ||
         inputs.exposure.resource->GetDesc().Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
@@ -356,7 +353,6 @@ Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const 
          !FitsTexture(inputs.transparent_history, active, DXGI_FORMAT_R32G32_FLOAT) ||
          !FitsTexture(inputs.transparent_classification, active, DXGI_FORMAT_R16G16B16A16_FLOAT) ||
          !FitsTexture(inputs.transparent_metadata, active, DXGI_FORMAT_R32G32_UINT) ||
-         !FitsTexture(inputs.transparent_unpeeled_fragment_count, active, DXGI_FORMAT_R32_UINT) ||
          !FitsTexture(inputs.transparent_transport, active, DXGI_FORMAT_R16G16_FLOAT)))
         return GuideFailure(ErrorCode::InvalidArgument, "Transparent reconstruction guides require matching active textures and formats.");
     if (!std::isfinite(constants.jitter_uv.x) || !std::isfinite(constants.jitter_uv.y) ||
@@ -383,16 +379,15 @@ Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const 
     exposureView.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     exposureView.Buffer.NumElements = 2; exposureView.Buffer.StructureByteStride = sizeof(float);
     storage->device->CreateShaderResourceView(inputs.exposure.resource, &exposureView, storage->Cpu(inputs.frame_slot, 6));
-    storage->Srv(inputs.frame_slot, 7, inputs.transparency_revealage.resource, DXGI_FORMAT_R16_FLOAT);
+    storage->Srv(inputs.frame_slot, 7, inputs.transparency_revealage.resource, DXGI_FORMAT_R16G16_FLOAT);
     storage->Srv(inputs.frame_slot, 8, storage->raw_output.resource.Get(), DXGI_FORMAT_R16G16B16A16_FLOAT);
     storage->Srv(inputs.frame_slot, 9, inputs.transparent_guides_enabled ? inputs.transparent_depth.resource : nullptr, DXGI_FORMAT_R32_FLOAT);
     storage->Srv(inputs.frame_slot, 10, inputs.transparent_guides_enabled ? inputs.transparent_motion.resource : nullptr, DXGI_FORMAT_R16G16_FLOAT);
     storage->Srv(inputs.frame_slot, 11, inputs.transparent_guides_enabled ? inputs.transparent_history.resource : nullptr, DXGI_FORMAT_R32G32_FLOAT);
     storage->Srv(inputs.frame_slot, 12, inputs.transparent_guides_enabled ? inputs.transparent_classification.resource : nullptr, DXGI_FORMAT_R16G16B16A16_FLOAT);
     storage->Srv(inputs.frame_slot, 13, inputs.transparent_guides_enabled ? inputs.transparent_metadata.resource : nullptr, DXGI_FORMAT_R32G32_UINT);
-    storage->Srv(inputs.frame_slot, 14, inputs.transparent_guides_enabled ? inputs.transparent_unpeeled_fragment_count.resource : nullptr, DXGI_FORMAT_R32_UINT);
-    storage->Srv(inputs.frame_slot, 15, inputs.transparent_guides_enabled ? inputs.transparent_transport.resource : nullptr, DXGI_FORMAT_R16G16_FLOAT);
-    storage->Srv(inputs.frame_slot, 16, inputs.screen_overlay_alpha.resource, DXGI_FORMAT_R8_UNORM);
+    storage->Srv(inputs.frame_slot, 14, inputs.transparent_guides_enabled ? inputs.transparent_transport.resource : nullptr, DXGI_FORMAT_R16G16_FLOAT);
+    storage->Srv(inputs.frame_slot, 15, inputs.screen_overlay_alpha.resource, DXGI_FORMAT_R8_UNORM);
     storage->Uav(inputs.frame_slot, 0, storage->motion.resource.Get(), DXGI_FORMAT_R16G16_FLOAT);
     storage->Uav(inputs.frame_slot, 1, storage->responsive.resource.Get(), DXGI_FORMAT_R8_UNORM);
     storage->Uav(inputs.frame_slot, 2, storage->exposure.resource.Get(), DXGI_FORMAT_R32_FLOAT);
@@ -441,9 +436,11 @@ Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const 
             return Result::Success();
         };
     };
-    if(layout)layout->pass_indices[0]=graph.PassCount();
-    auto guides=retained?*graph.BindPass(retained->pass_indices[0],49):
-        graph.AddPass(49,"Reconstruction Guides",QueueHint::Direct);
+    if (layout) layout->first_pass = graph.PassCount();
+    auto guide_pass = retained ? graph.BindPass(retained->first_pass, 49) :
+        graph.AddPass(49, "Reconstruction Guides", QueueHint::Direct);
+    if (!guide_pass) return GuideFailure(ErrorCode::InvalidState, "Retained reconstruction guides pass changed.");
+    auto &guides = *guide_pass;
     if (!retained&&inputs.screen_overlay_alpha.version.resource)
         guides.Read(inputs.screen_overlay_alpha.version, Access::ComputeRead);
     if(!retained)for (const auto &guide : {inputs.depth, inputs.motion, inputs.metadata, inputs.surface_history,
@@ -451,8 +448,7 @@ Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const 
         guides.Read(guide.version, Access::ComputeRead);
     if (!retained&&inputs.transparent_guides_enabled)
         for (const auto &guide : {inputs.transparent_depth, inputs.transparent_motion, inputs.transparent_history,
-             inputs.transparent_classification, inputs.transparent_metadata, inputs.transparent_unpeeled_fragment_count,
-             inputs.transparent_transport})
+             inputs.transparent_classification, inputs.transparent_metadata, inputs.transparent_transport})
             guides.Read(guide.version, Access::ComputeRead);
     motion=retained?retained->outputs[2]:guides.Write(motion,Access::UnorderedWrite);
     depth=retained?retained->outputs[5]:guides.Write(depth,Access::UnorderedWrite);
@@ -460,9 +456,10 @@ Result ReconstructionGuidesSystem::RegisterImpl(RenderGraphBuilder &graph,const 
     exposure=retained?retained->outputs[4]:guides.Write(exposure,Access::UnorderedWrite);
     if(composition.resource)composition=retained?retained->outputs[6]:guides.Write(composition,Access::UnorderedWrite);
     guides.SetExecuteChecked(execute(0, active));
-    if(layout)layout->pass_indices[1]=graph.PassCount();
-    auto reconstruct=retained?*graph.BindPass(retained->pass_indices[1],9):
-        graph.AddPass(9,std::string(providerName)+" Reconstruction",external?QueueHint::Compute:QueueHint::Direct);
+    auto reconstruction_pass = retained ? graph.BindPass(retained->first_pass + 1, 9) :
+        graph.AddPass(9, std::string(providerName) + " Reconstruction", external ? QueueHint::Compute : QueueHint::Direct);
+    if (!reconstruction_pass) return GuideFailure(ErrorCode::InvalidState, "Retained reconstruction pass changed.");
+    auto &reconstruct = *reconstruction_pass;
     if(!retained)for (const auto version : {inputs.composite_hdr.version, depth, motion, responsive, exposure})
         reconstruct.Read(version, Access::ComputeRead);
     if(!retained&&composition.resource)reconstruct.Read(composition,Access::ComputeRead);

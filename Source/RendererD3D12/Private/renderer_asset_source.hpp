@@ -1,6 +1,5 @@
 #pragma once
 
-#include "checked_binary_read.hpp"
 #include <hs/core/shipped_content_owner.hpp>
 #include <hs/core/sha256.hpp>
 #include <hs/render_data/render_bulk.hpp>
@@ -30,6 +29,39 @@ struct LooseRendererAsset
 
     std::filesystem::path path;
     std::optional<WholeFileProof> admitted;
+
+    [[nodiscard]] Result BindExpectedDigest(std::string_view digest)
+    {
+        if (digest.size() != 71 || !digest.starts_with("sha256:"))
+            return Result::Failure(ErrorCode::InvalidArgument, "RendererAssetSource", "Expected digest must be sha256 plus 64 lowercase hexadecimal digits.");
+        std::array<std::byte, 32> parsed{};
+        const auto nibble = [](char value) -> int {
+            if (value >= '0' && value <= '9') return value - '0';
+            if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+            return -1;
+        };
+        for (std::size_t index = 0; index < parsed.size(); ++index)
+        {
+            const auto high = nibble(digest[7 + index * 2]);
+            const auto low = nibble(digest[8 + index * 2]);
+            if (high < 0 || low < 0)
+                return Result::Failure(ErrorCode::InvalidArgument, "RendererAssetSource", "Expected digest contains a non-lowercase hexadecimal digit.");
+            parsed[index] = static_cast<std::byte>((high << 4) | low);
+        }
+        if (admitted)
+        {
+            if (admitted->digest != parsed)
+                return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Selected digest differs from the admitted loose product.");
+            return Result::Success();
+        }
+        std::error_code error;
+        const auto bytes = std::filesystem::file_size(path, error);
+        if (error)
+            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Could not size immutable asset: " + path.string());
+        // Selected metadata is bound before I/O; every full read still verifies actual bytes.
+        admitted = WholeFileProof{bytes, parsed};
+        return Result::Success();
+    }
 };
 
 struct PackedRendererAsset
@@ -47,7 +79,9 @@ struct ImmutableAssetRange
 
 // The source kind is selected by content composition. Loose products carry a
 // path and optional whole-file admission proof; packed products carry only a
-// retained owner and one bounded bulk range.
+// retained owner and one bounded bulk range. Pinned shipping packs have payload
+// SHA verified at build time; runtime packed reads check extent and exact I/O but
+// do not rehash payloads, reducing runtime corruption detection versus loose reads.
 struct RendererAssetSource
 {
     using Storage = std::variant<LooseRendererAsset, PackedRendererAsset>;
@@ -140,68 +174,39 @@ struct RendererAssetSource
         return Result::Success();
     }
 
-    [[nodiscard]] Result BindExpectedDigest(std::string_view digest)
-    {
-        if (digest.size() != 71 || !digest.starts_with("sha256:"))
-            return Result::Failure(ErrorCode::InvalidArgument, "RendererAssetSource", "Expected digest must be sha256 plus 64 lowercase hexadecimal digits.");
-        std::array<std::byte, 32> parsed{};
-        const auto nibble = [](char value) -> int {
-            if (value >= '0' && value <= '9') return value - '0';
-            if (value >= 'a' && value <= 'f') return value - 'a' + 10;
-            return -1;
-        };
-        for (std::size_t index = 0; index < parsed.size(); ++index)
-        {
-            const auto high = nibble(digest[7 + index * 2]);
-            const auto low = nibble(digest[8 + index * 2]);
-            if (high < 0 || low < 0)
-                return Result::Failure(ErrorCode::InvalidArgument, "RendererAssetSource", "Expected digest contains a non-lowercase hexadecimal digit.");
-            parsed[index] = static_cast<std::byte>((high << 4) | low);
-        }
-        if (auto *packed = std::get_if<PackedRendererAsset>(&storage))
-        {
-            if (packed->range.expected_digest != parsed)
-                return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Selected digest differs from the packed range digest.");
-            return Result::Success();
-        }
-        auto &loose = std::get<LooseRendererAsset>(storage);
-        if (loose.admitted)
-        {
-            if (loose.admitted->digest != parsed)
-                return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Selected digest differs from the admitted loose product.");
-            return Result::Success();
-        }
-        std::uint64_t bytes{};
-        if (auto result = ByteCount(bytes); !result) return result;
-        // Selected metadata is bound before I/O; every full read still verifies actual bytes.
-        loose.admitted = LooseRendererAsset::WholeFileProof{bytes, parsed};
-        return Result::Success();
-    }
-
-    [[nodiscard]] Result Read(std::vector<std::byte> &output,
-        std::optional<std::uint64_t> expected_bytes = std::nullopt) const
+    [[nodiscard]] Result ReadInto(std::span<std::byte> output) const
     {
         if (const auto *packed = std::get_if<PackedRendererAsset>(&storage))
         {
             std::uint64_t bytes{};
             if (auto result = ByteCount(bytes); !result) return result;
-            if (expected_bytes && bytes != *expected_bytes)
+            if (bytes != output.size())
                 return Result::Failure(ErrorCode::InvalidState, "RendererPack", "Bulk size differs from its reservation.");
-            std::vector<std::byte> temporary(static_cast<std::size_t>(bytes));
-            if (auto result = packed->owner->ReadVerified(packed->range.offset, temporary,
-                    packed->range.expected_digest); !result) return result;
-            output = std::move(temporary);
-            return Result::Success();
+            return packed->owner->ReadExact(packed->range.offset, output);
         }
 
         const auto &loose = std::get<LooseRendererAsset>(storage);
-        const auto read_size = loose.admitted ? std::optional<std::uint64_t>{loose.admitted->byte_count} : expected_bytes;
-        std::vector<std::byte> temporary;
-        if (auto result = ReadCheckedBinary(loose.path, temporary, read_size); !result) return result;
-        if ((expected_bytes && temporary.size() != *expected_bytes) ||
-            (loose.admitted && (temporary.size() != loose.admitted->byte_count ||
-                                Sha256(temporary) != loose.admitted->digest)))
+        ShippedContentOwner owner;
+        if (auto result = ShippedContentOwner::Open(loose.path, owner); !result) return result;
+        if (owner.Size() != output.size() ||
+            (loose.admitted && owner.Size() != loose.admitted->byte_count))
             return Result::Failure(ErrorCode::InvalidState, "RendererDevelopmentCatalog", "Loose product changed after admission.");
+        if (loose.admitted) return owner.ReadVerified(0, output, loose.admitted->digest);
+        return owner.ReadExact(0, output);
+    }
+
+    [[nodiscard]] Result Read(std::vector<std::byte> &output,
+        std::optional<std::uint64_t> expected_bytes = std::nullopt) const
+    {
+        std::uint64_t bytes{};
+        if (auto result = ByteCount(bytes); !result) return result;
+        if (expected_bytes && bytes != *expected_bytes)
+            return Result::Failure(ErrorCode::InvalidState, IsPacked() ? "RendererPack" : "RendererDevelopmentCatalog",
+                IsPacked() ? "Bulk size differs from its reservation." : "Loose product changed after admission.");
+        if (bytes > std::numeric_limits<std::size_t>::max())
+            return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Asset exceeds the addressable size limit.");
+        std::vector<std::byte> temporary(static_cast<std::size_t>(bytes));
+        if (auto result = ReadInto(temporary); !result) return result;
         output = std::move(temporary);
         return Result::Success();
     }
@@ -214,7 +219,8 @@ struct RendererAssetSource
         std::uint64_t product_base{};
         const ShippedContentOwner *owner{};
         ShippedContentOwner loose_owner;
-        if (IsPacked())
+        const bool packed_source = IsPacked();
+        if (packed_source)
         {
             const auto &packed = Packed();
             if (auto result = ByteCount(product_bytes); !result) return result;
@@ -241,8 +247,12 @@ struct RendererAssetSource
                 range.byte_count > product_bytes - range.offset || destination > output.size() ||
                 range.byte_count > output.size() - destination)
                 return Result::Failure(ErrorCode::InvalidState, "RendererAssetSource", "Sample range exceeds its product or output.");
-            if (auto result = owner->ReadVerified(product_base + range.offset,
-                    output.subspan(destination, range.byte_count), range.digest); !result) return result;
+            auto result = packed_source
+                ? owner->ReadExact(product_base + range.offset,
+                    output.subspan(destination, range.byte_count))
+                : owner->ReadVerified(product_base + range.offset,
+                    output.subspan(destination, range.byte_count), range.digest);
+            if (!result) return result;
             destination += range.byte_count;
         }
         if (destination != output.size())

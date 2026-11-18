@@ -2,9 +2,12 @@
 
 #if defined(HS_OFFLINE_PROBE_BAKER)
 #include <hs/render_data/terrain_surface.hpp>
+#include <hs/render_data/texture_package.hpp>
+#include "../../../Content/Shaders/terrain_bake_abi.hlsli"
 
 #include <DirectXPackedVector.h>
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -14,9 +17,29 @@ namespace hs
 namespace
 {
 constexpr UINT kEdge=render_data::kTerrainSurfacePageEdge, kMips=render_data::kTerrainSurfacePageMips;
+constexpr UINT kPlaneCount=3;
+constexpr UINT64 kMaxPlanePageBytes=256ull<<20;
+constexpr UINT64 kMaxSectionPageBytes=kPlaneCount*kMaxPlanePageBytes;
 constexpr UINT kApron=kEdge/16, kInterior=kEdge-2*kApron;
 static_assert((1u<<(kMips-1))==kEdge);
 constexpr DXGI_FORMAT kFormat=DXGI_FORMAT_R8G8B8A8_UNORM;
+using TerrainSection=render_data::TerrainSurfaceSection;
+#define HS_TERRAIN_BAKE_SECTION(name) TerrainSection name{};
+#define HS_TERRAIN_BAKE_FLOAT2(name) DirectX::XMFLOAT2 name{};
+#define HS_TERRAIN_BAKE_UINT(name) UINT name{};
+struct TerrainPageConstants
+{
+    HS_TERRAIN_BAKE_CONSTANT_FIELDS(HS_TERRAIN_BAKE_SECTION, HS_TERRAIN_BAKE_FLOAT2, HS_TERRAIN_BAKE_UINT)
+};
+#undef HS_TERRAIN_BAKE_SECTION
+#undef HS_TERRAIN_BAKE_FLOAT2
+#undef HS_TERRAIN_BAKE_UINT
+constexpr UINT kRootWords=sizeof(TerrainPageConstants)/sizeof(UINT);
+constexpr UINT kEdgeWord=offsetof(TerrainPageConstants,Edge)/sizeof(UINT);
+static_assert(sizeof(TerrainPageConstants)==52);
+static_assert(offsetof(TerrainPageConstants,ParentCenter)==32);
+static_assert(offsetof(TerrainPageConstants,ParentSpan)==40);
+static_assert(offsetof(TerrainPageConstants,Edge)==48);
 
 Result TerrainFailure(std::string message)
 {
@@ -91,7 +114,7 @@ std::vector<UINT> MeadowControls(std::span<const render_data::ExpandedVertex> ve
 struct D3D12Renderer::Impl::TerrainPagePreparation
 {
     ComPtr<ID3D12RootSignature> root;
-    std::array<ComPtr<ID3D12PipelineState>,3> bake;
+    ComPtr<ID3D12PipelineState> bake;
     ComPtr<ID3D12PipelineState> mip;
     ComPtr<ID3D12DescriptorHeap> heap;
     AllocationResource output,controls,readback;
@@ -110,7 +133,7 @@ Result D3D12Renderer::Impl::BakeTerrainPages(const std::shared_ptr<const StaticR
     auto candidate=std::make_shared<TerrainPagePreparation>();
     if(scene) for(const auto &r:scene->instances) append(candidate->sections,r);
     const auto &sections=candidate->sections;
-    if(sections.empty() || sections.size()>UINT_MAX/3u)
+    if(sections.empty() || sections.size()>UINT_MAX/kPlaneCount)
         return TerrainFailure("Terrain page bake requires a representable nonempty section set.");
     for(const auto &s:sections)
         if(!std::isfinite(s.x)||!std::isfinite(s.z)||!std::isfinite(s.span_x)||!std::isfinite(s.span_z)||
@@ -122,11 +145,9 @@ Result D3D12Renderer::Impl::BakeTerrainPages(const std::shared_ptr<const StaticR
     if(sections.empty()) return TerrainFailure("Terrain page bake requires a nonempty tile set.");
     if(auto waited=WaitForGpu();!waited) return waited;
     
-    constexpr UINT64 kMaxSectionPageBytes=256ull<<20;
-    constexpr UINT slices=1;
     D3D12_RESOURCE_DESC output_desc{};
     output_desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    output_desc.Width=kEdge;output_desc.Height=kEdge;output_desc.DepthOrArraySize=slices;
+    output_desc.Width=kEdge;output_desc.Height=kEdge;output_desc.DepthOrArraySize=kPlaneCount;
     output_desc.MipLevels=kMips;output_desc.Format=DXGI_FORMAT_R8G8B8A8_TYPELESS;output_desc.SampleDesc.Count=1;
     output_desc.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
     const auto page_bytes=device->GetResourceAllocationInfo(0,1,&output_desc).SizeInBytes;
@@ -189,7 +210,7 @@ Result D3D12Renderer::Impl::BakeTerrainPages(const std::shared_ptr<const StaticR
     D3D12_ROOT_PARAMETER params[5]{};
     for(UINT i=0;i<3;++i){params[i].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;params[i].DescriptorTable={1,&ranges[i]};}
     params[3].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;params[3].Descriptor={7,0};
-    params[4].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[4].Constants={0,0,14};
+    params[4].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;params[4].Constants={0,0,kRootWords};
     D3D12_STATIC_SAMPLER_DESC samplers[2]{};
     for(UINT i=0;i<2;++i)
     {
@@ -212,10 +233,7 @@ Result D3D12Renderer::Impl::BakeTerrainPages(const std::shared_ptr<const StaticR
         const auto code=device->CreateComputePipelineState(&desc,IID_PPV_ARGS(&pso));
         return FAILED(code)?HResultFailure("Create terrain page compute pipeline",code):Result::Success();
     };
-    constexpr const char *bake_products[]{"terrain/producer/bake_color_cs.dxil",
-        "terrain/producer/bake_base_cs.dxil","terrain/producer/bake_weight_cs.dxil"};
-    for(UINT plane=0;plane<3;++plane)
-        if(auto r=pipeline(bake_products[plane],candidate->bake[plane]);!r) return r;
+    if(auto r=pipeline("terrain/producer/bake_cs.dxil",candidate->bake);!r) return r;
     if(auto r=pipeline("terrain/producer/mip_cs.dxil",candidate->mip);!r) return r;
     D3D12_DESCRIPTOR_HEAP_DESC heap{};heap.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
     heap.NumDescriptors=6+2*kMips;heap.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
@@ -278,9 +296,9 @@ Result D3D12Renderer::Impl::BakeTerrainPages(const std::shared_ptr<const StaticR
     auto *output=candidate->output.resource.Get();
     for(UINT level=0;level<kMips;++level)
     {
-        srv(output,kFormat,level,1,slices,cpu(6+2*level));
+        srv(output,kFormat,level,1,kPlaneCount,cpu(6+2*level));
         D3D12_UNORDERED_ACCESS_VIEW_DESC u{};u.Format=kFormat;u.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
-        u.Texture2DArray.MipSlice=level;u.Texture2DArray.ArraySize=slices;
+        u.Texture2DArray.MipSlice=level;u.Texture2DArray.ArraySize=kPlaneCount;
         device->CreateUnorderedAccessView(output,nullptr,&u,cpu(7+2*level));
     }
     hr=list->Close();
@@ -292,11 +310,12 @@ Result D3D12Renderer::Impl::BakeTerrainPages(const std::shared_ptr<const StaticR
     return Result::Success();
 }
 
-Result D3D12Renderer::BakeTerrainSurfacePages(const RendererConfig &configuration,
+Result D3D12Renderer::BakeTerrainSurfacePages(RendererConfig configuration,
     const std::shared_ptr<const StaticRenderScene> &scene,
     const std::function<Result(std::span<const render_data::TerrainSurfaceSection>,
         render_data::TextureDescription, std::array<std::byte,32>)> &begin,
-    const std::function<Result(std::uint32_t, std::span<const std::byte>)> &section_sink)
+    const std::function<Result(std::uint32_t,
+        std::span<const render_data::TextureSubresourceView>)> &section_sink)
 {
     if (!scene || scene->instances.empty() || !begin || !section_sink)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
@@ -324,16 +343,16 @@ Result D3D12Renderer::BakeTerrainSurfacePages(const RendererConfig &configuratio
     try
     {
       const auto work = [&]() -> Result {
-        if (auto initialized = owner.InitializeWorldTransportBake(configuration, WorldTransportBakeKind::Terrain); !initialized)
+        if (auto initialized = owner.InitializeWorldTransportBake(std::move(configuration), WorldTransportBakeKind::Terrain); !initialized)
             return initialized;
         auto &impl = *owner.impl_;
         if (auto prepared = impl.BakeTerrainPages(scene, lifetime); !prepared) return prepared;
         auto &page = *lifetime;
         const auto &sections = page.sections;
         const auto desc = page.output.resource->GetDesc();
-        constexpr UINT count = kMips;
+        constexpr UINT count = kPlaneCount * kMips;
         const render_data::TextureDescription texture{kEdge, kEdge,
-            static_cast<UINT>(sections.size()) * 3u, kMips, render_data::kTextureFormatRgba8};
+            static_cast<UINT>(sections.size()) * kPlaneCount, kMips, render_data::kTextureFormatRgba8};
         std::array<std::byte,32> identity{};
         if (auto identified = impl.TerrainPageSourceIdentity(identity); !identified) return identified;
         if (auto started = begin(sections, texture, identity); !started) return started;
@@ -345,26 +364,32 @@ Result D3D12Renderer::BakeTerrainSurfacePages(const RendererConfig &configuratio
         impl.device->GetCopyableFootprints(&desc, 0, count, 0, footprints.data(), rows.data(),
             row_bytes.data(), &readback_size);
         if (!readback_size || readback_size == UINT64_MAX || readback_size > SIZE_MAX ||
-            readback_size > (256ull << 20))
+            readback_size > kMaxSectionPageBytes)
             return TerrainFailure("Terrain page readback footprint is invalid.");
-        size_t tight_size = 0;
+        std::array<render_data::TextureSubresourceView, count> subresources{};
         for (UINT sub = 0; sub < count; ++sub)
         {
             const UINT mip = sub % kMips;
             const UINT width = std::max(1u, kEdge >> mip), height = std::max(1u, kEdge >> mip);
+            const auto row_pitch = footprints[sub].Footprint.RowPitch;
             if (row_bytes[sub] != UINT64(width) * 4 || rows[sub] != height ||
-                footprints[sub].Footprint.RowPitch < row_bytes[sub] ||
-                tight_size > std::numeric_limits<size_t>::max() - size_t(row_bytes[sub]) * height)
+                row_pitch < row_bytes[sub])
                 return TerrainFailure("Terrain page readback row layout is invalid.");
-            tight_size += size_t(row_bytes[sub]) * height;
+            const auto byte_length = static_cast<UINT64>(rows[sub] - 1u) * row_pitch + row_bytes[sub];
+            if (footprints[sub].Offset > readback_size || byte_length > readback_size - footprints[sub].Offset ||
+                byte_length > UINT32_MAX)
+                return TerrainFailure("Terrain page readback row layout is invalid.");
+            subresources[sub].array_slice = sub / kMips;
+            subresources[sub].mip_level = mip;
+            subresources[sub].width = width;
+            subresources[sub].height = height;
+            subresources[sub].row_pitch = row_pitch;
+            subresources[sub].slice_pitch = static_cast<std::uint32_t>(byte_length);
         }
         D3D12MA::ALLOCATION_DESC allocation{};
         allocation.HeapType = D3D12_HEAP_TYPE_READBACK;
         if (auto created = impl.CreateAllocation(page.readback, allocation, BufferDescription(readback_size),
                 D3D12_RESOURCE_STATE_COPY_DEST); !created) return created;
-        if (tight_size > std::numeric_limits<size_t>::max() / 3)
-            return TerrainFailure("Terrain three-plane payload size overflows.");
-        std::vector<std::byte> payload(tight_size * 3);
         const auto gpu = [&](UINT i) {
             auto h=page.heap->GetGPUDescriptorHandleForHeapStart(); h.ptr+=UINT64(i)*impl.srv_stride; return h;
         };
@@ -379,77 +404,72 @@ Result D3D12Renderer::BakeTerrainSurfacePages(const RendererConfig &configuratio
             std::memcpy(mapped_controls,controls.data(),controls.size()*sizeof(UINT));
             page.controls.resource->Unmap(0,nullptr);
           }
-          for (UINT plane = 0; plane < 3; ++plane)
+          ComPtr<ID3D12CommandAllocator> allocator;
+          ComPtr<ID3D12GraphicsCommandList> list;
+          auto hr = impl.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
+          if (FAILED(hr)) return HResultFailure("Create terrain section allocator", hr);
+          hr = impl.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&list));
+          if (FAILED(hr)) return HResultFailure("Create terrain section list", hr);
+          auto *output = page.output.resource.Get();
+          Transition(list.Get(), output, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+          auto *heap = page.heap.Get(); list->SetDescriptorHeaps(1, &heap);
+          list->SetComputeRootSignature(page.root.Get());
+          list->SetComputeRootDescriptorTable(0, gpu(0));
+          list->SetComputeRootDescriptorTable(1, gpu(0));
+          list->SetComputeRootDescriptorTable(2, gpu(7));
+          list->SetComputeRootShaderResourceView(3, page.controls.resource->GetGPUVirtualAddress());
+          list->SetPipelineState(page.bake.Get());
+          const auto &parent=page.parent_sections[page.tiles[index].source_index];
+          const TerrainPageConstants constants{sections[index],{parent.x,parent.z},
+              {parent.span_x,parent.span_z},kEdge};
+          list->SetComputeRoot32BitConstants(4, kRootWords, &constants, 0);
+          list->Dispatch(kEdge / 8, kEdge / 8, 1);
+          list->SetPipelineState(page.mip.Get());
+          for (UINT level = 0; level < kMips; ++level)
           {
-            ComPtr<ID3D12CommandAllocator> allocator;
-            ComPtr<ID3D12GraphicsCommandList> list;
-            auto hr = impl.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator));
-            if (FAILED(hr)) return HResultFailure("Create terrain section allocator", hr);
-            hr = impl.device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(), nullptr, IID_PPV_ARGS(&list));
-            if (FAILED(hr)) return HResultFailure("Create terrain section list", hr);
-            auto *output = page.output.resource.Get();
-            Transition(list.Get(), output, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            auto *heap = page.heap.Get(); list->SetDescriptorHeaps(1, &heap);
-            list->SetComputeRootSignature(page.root.Get());
-            list->SetComputeRootDescriptorTable(0, gpu(0));
-            list->SetComputeRootDescriptorTable(1, gpu(0));
-            list->SetComputeRootDescriptorTable(2, gpu(7));
-            list->SetComputeRootShaderResourceView(3, page.controls.resource->GetGPUVirtualAddress());
-            list->SetPipelineState(page.bake[plane].Get());
-            list->SetComputeRoot32BitConstants(4, 8, &sections[index], 0);
-            list->SetComputeRoot32BitConstant(4, plane, 8);
-            list->SetComputeRoot32BitConstant(4, kEdge, 9);
-            const auto &parent=page.parent_sections[page.tiles[index].source_index];
-            list->SetComputeRoot32BitConstants(4, 2, &parent.x, 10);
-            list->SetComputeRoot32BitConstants(4, 2, &parent.span_x, 12);
-            list->Dispatch(kEdge / 8, kEdge / 8, 1);
-            list->SetPipelineState(page.mip.Get());
-            for (UINT level = 0; level < kMips; ++level)
-            {
-                Transition(list.Get(), output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, level);
-                if (level + 1 == kMips) break;
-                const UINT edge = kEdge >> (level + 1);
-                list->SetComputeRootDescriptorTable(1, gpu(6 + 2 * level));
-                list->SetComputeRootDescriptorTable(2, gpu(7 + 2 * (level + 1)));
-                list->SetComputeRoot32BitConstant(4, edge, 9);
-                list->Dispatch((edge + 7) / 8, (edge + 7) / 8, 1);
-            }
-            Transition(list.Get(), output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
-            for (UINT sub = 0; sub < count; ++sub)
-            {
-                D3D12_TEXTURE_COPY_LOCATION from{}, to{};
-                from.pResource = output; from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; from.SubresourceIndex = sub;
-                to.pResource = page.readback.resource.Get(); to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-                to.PlacedFootprint = footprints[sub];
-                list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
-            }
-            Transition(list.Get(), output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
-            hr = list->Close();
-            if (FAILED(hr)) return HResultFailure("Close terrain section list", hr);
-            std::vector<AllocationResource> retained;
-            impl.pending_terrain_pages = lifetime;
-            if (auto submitted = impl.SubmitResidentUtilityUpload(list.Get(), allocator.Get(), retained); !submitted)
-                return submitted;
-            impl.pending_terrain_pages.reset();
-            void *mapped_ptr{};
-            const D3D12_RANGE read_range{0, static_cast<SIZE_T>(readback_size)};
-            hr = page.readback.resource->Map(0, &read_range, &mapped_ptr);
-            if (FAILED(hr)) return HResultFailure("Map terrain page readback", hr);
-            const auto *mapped = static_cast<const std::byte *>(mapped_ptr);
-            size_t offset = size_t(plane) * tight_size;
-            for (UINT sub = 0; sub < count; ++sub)
-                for (UINT y = 0; y < rows[sub]; ++y)
-                {
-                    const auto width = static_cast<size_t>(row_bytes[sub]);
-                    std::memcpy(payload.data() + offset, mapped + footprints[sub].Offset +
-                        UINT64(y) * footprints[sub].Footprint.RowPitch, width);
-                    offset += width;
-                }
-            const D3D12_RANGE no_write{};
-            page.readback.resource->Unmap(0, &no_write);
+              for (UINT plane = 0; plane < kPlaneCount; ++plane)
+                  Transition(list.Get(), output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                      D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, level + plane * kMips);
+              if (level + 1 == kMips) break;
+              const UINT edge = kEdge >> (level + 1);
+              list->SetComputeRootDescriptorTable(1, gpu(6 + 2 * level));
+              list->SetComputeRootDescriptorTable(2, gpu(7 + 2 * (level + 1)));
+              list->SetComputeRoot32BitConstant(4, edge, kEdgeWord);
+              list->Dispatch((edge + 7) / 8, (edge + 7) / 8, kPlaneCount);
           }
-            if (auto saved = section_sink(index, payload); !saved) return saved;
+          Transition(list.Get(), output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+          for (UINT sub = 0; sub < count; ++sub)
+          {
+              D3D12_TEXTURE_COPY_LOCATION from{}, to{};
+              from.pResource = output; from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; from.SubresourceIndex = sub;
+              to.pResource = page.readback.resource.Get(); to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+              to.PlacedFootprint = footprints[sub];
+              list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+          }
+          Transition(list.Get(), output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
+          hr = list->Close();
+          if (FAILED(hr)) return HResultFailure("Close terrain section list", hr);
+          std::vector<AllocationResource> retained;
+          impl.pending_terrain_pages = lifetime;
+          if (auto submitted = impl.SubmitResidentUtilityUpload(list.Get(), allocator.Get(), retained); !submitted)
+              return submitted;
+          impl.pending_terrain_pages.reset();
+          void *mapped_ptr{};
+          const D3D12_RANGE read_range{0, static_cast<SIZE_T>(readback_size)};
+          hr = page.readback.resource->Map(0, &read_range, &mapped_ptr);
+          if (FAILED(hr)) return HResultFailure("Map terrain page readback", hr);
+          const auto *mapped = static_cast<const std::byte *>(mapped_ptr);
+          struct ReadbackUnmap
+          {
+              ID3D12Resource *resource;
+              ~ReadbackUnmap() { const D3D12_RANGE no_write{}; resource->Unmap(0, &no_write); }
+          } unmap{page.readback.resource.Get()};
+          for (UINT sub = 0; sub < count; ++sub)
+          {
+              const auto byte_length = subresources[sub].slice_pitch;
+              subresources[sub].bytes = {mapped + footprints[sub].Offset, byte_length};
+          }
+          if (auto saved = section_sink(index, subresources); !saved) return saved;
         }
         return Result::Success();
       };

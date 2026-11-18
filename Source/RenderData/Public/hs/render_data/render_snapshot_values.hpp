@@ -377,7 +377,6 @@ struct RenderSnapshotPair
 {
     // Empty scenes still have a current value; publication availability belongs to the exchange.
     RenderSnapshot previous{}, current{};
-    Sequence previous_publication_sequence{}, current_publication_sequence{};
     bool has_previous{};
 };
 

@@ -1,5 +1,4 @@
 #include "renderer_asset_io.hpp"
-#include "checked_binary_read.hpp"
 #include <hs/core/sha256.hpp>
 
 #include <Windows.h>
@@ -14,12 +13,42 @@
 #include <chrono>
 #include <future>
 #include <limits>
-#include <optional>
+#include <new>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
 
 namespace hs
 {
+AssetReadBuffer::AssetReadBuffer(std::size_t size) : size_(size)
+{
+    if (size_)
+    {
+        data_.reset(static_cast<std::byte *>(HeapAlloc(GetProcessHeap(), 0, size_)));
+        if (!data_) throw std::bad_alloc();
+    }
+}
+AssetReadBuffer::AssetReadBuffer(AssetReadBuffer &&other) noexcept
+    : data_(std::move(other.data_)), size_(std::exchange(other.size_, 0))
+{}
+AssetReadBuffer &AssetReadBuffer::operator=(AssetReadBuffer &&other) noexcept
+{
+    if (this != &other)
+    {
+        data_ = std::move(other.data_);
+        size_ = std::exchange(other.size_, 0);
+    }
+    return *this;
+}
+void AssetReadBuffer::HeapDelete::operator()(std::byte *data) const noexcept
+{
+    HeapFree(GetProcessHeap(), 0, data);
+}
+void AssetReadBuffer::Reset() noexcept
+{
+    data_.reset();
+    size_ = 0;
+}
 namespace
 {
 Result IoFailure(std::string message)
@@ -32,44 +61,6 @@ struct EventOwner
     ~EventOwner() { if (value) CloseHandle(value); }
 };
 constexpr std::uint32_t kMaxConcurrentAssetCpuTasks = 32;
-struct CpuTaskAdmission
-{
-    std::atomic<std::uint32_t> active{};
-};
-struct CpuTaskLease
-{
-    std::shared_ptr<CpuTaskAdmission> admission;
-    CpuTaskLease() = default;
-    explicit CpuTaskLease(std::shared_ptr<CpuTaskAdmission> owner) : admission(std::move(owner)) {}
-    CpuTaskLease(const CpuTaskLease &) = delete;
-    CpuTaskLease &operator=(const CpuTaskLease &) = delete;
-    CpuTaskLease(CpuTaskLease &&other) noexcept : admission(std::move(other.admission)) {}
-    CpuTaskLease &operator=(CpuTaskLease &&other) noexcept
-    {
-        if (this != &other)
-        {
-            if (admission) admission->active.fetch_sub(1, std::memory_order_acq_rel);
-            admission = std::move(other.admission);
-        }
-        return *this;
-    }
-    ~CpuTaskLease()
-    {
-        if (admission) admission->active.fetch_sub(1, std::memory_order_acq_rel);
-    }
-    explicit operator bool() const noexcept { return static_cast<bool>(admission); }
-};
-std::optional<CpuTaskLease> TryAcquireCpuTask(const std::shared_ptr<CpuTaskAdmission> &admission) noexcept
-{
-    auto active = admission->active.load(std::memory_order_relaxed);
-    while (active < kMaxConcurrentAssetCpuTasks)
-    {
-        if (admission->active.compare_exchange_weak(active, active + 1,
-                std::memory_order_acq_rel, std::memory_order_relaxed))
-            return CpuTaskLease{admission};
-    }
-    return std::nullopt;
-}
 #if HS_WITH_DIRECTSTORAGE
 using Microsoft::WRL::ComPtr;
 struct NativeTransport
@@ -80,7 +71,7 @@ struct NativeTransport
     std::array<bool, 256> occupied{};
     std::uint64_t next_tag{1};
     std::uint64_t submit_generation{};
-    std::uint32_t chunk_bytes{}, staging_bytes{};
+    std::uint32_t chunk_bytes{};
     bool queued_any{};
     HRESULT last_error{S_OK};
     void ReadErrors() noexcept
@@ -98,27 +89,31 @@ struct ReadOwner
 {
     ImmutableAssetRead input;
     ResidencyTicket storage;
-    std::vector<std::byte> bytes;
-    std::future<std::vector<std::byte>> future;
+    AssetReadBuffer bytes;
+    std::future<AssetReadBuffer> future;
     std::future<void> prepare_future;
-    // Permit spans terminal execution through Poll/owner collection, bounding queued results too.
-    CpuTaskLease cpu_task;
-    std::shared_ptr<std::atomic_bool> cancellation{std::make_shared<std::atomic_bool>()};
+    std::uint32_t *cpu_task_count{};
+    // The owner joins its tasks before destroying their cancellation flag.
+    std::atomic_bool cancelled{};
     EventOwner event;
-    bool cancelled{}, submitted{};
 #if HS_WITH_DIRECTSTORAGE
-    std::shared_ptr<NativeTransport> transport;
+    NativeTransport *transport{};
     ComPtr<IDStorageFile> file;
     std::uint32_t status{};
     std::uint64_t tag{};
     std::uint64_t transport_generation{};
 #endif
+    void HoldCpuSlot(std::uint32_t &count) noexcept
+    {
+        cpu_task_count = &count;
+        ++count;
+    }
     ~ReadOwner()
     {
         // Release of the queue/file/destination/event is never cancellation.
         // This owner outlives every submitted native marker or async future.
 #if HS_WITH_DIRECTSTORAGE
-        if (transport && (submitted || transport_generation))
+        if (transport_generation)
         {
             if (transport_generation > transport->submit_generation)
             {
@@ -132,18 +127,18 @@ struct ReadOwner
 #endif
         if (future.valid()) future.wait();
         if (prepare_future.valid()) prepare_future.wait();
+        if (cpu_task_count) --*cpu_task_count;
     }
 };
 } // namespace
 struct RendererAssetIo::Impl
 {
-    std::unordered_map<std::uint64_t, std::unique_ptr<ReadOwner>> reads;
-    std::shared_ptr<CpuTaskAdmission> cpu_tasks{std::make_shared<CpuTaskAdmission>()};
-    bool initialized{};
-    ResidencyTicket transport_ticket;
+    std::uint32_t active_cpu_tasks{};
 #if HS_WITH_DIRECTSTORAGE
-    std::shared_ptr<NativeTransport> transport;
+    std::unique_ptr<NativeTransport> transport;
 #endif
+    std::unordered_map<std::uint64_t, std::unique_ptr<ReadOwner>> reads;
+    bool initialized{};
 };
 RendererAssetIo::RendererAssetIo() : impl_(std::make_unique<Impl>()) {}
 RendererAssetIo::~RendererAssetIo() = default;
@@ -167,7 +162,7 @@ Result RendererAssetIo::Initialize(bool native_enabled, std::uint32_t staging_by
     if (!staging_bytes) return IoFailure("DirectStorage requires a bounded staging reservation.");
     const auto ticket = residency.ReserveHost(staging_bytes);
     if (!ticket) return IoFailure("DirectStorage staging cannot fit the shared host budget.");
-    auto transport = std::make_shared<NativeTransport>();
+    auto transport = std::make_unique<NativeTransport>();
     auto hr = DStorageGetFactory(IID_PPV_ARGS(&transport->factory));
     if (SUCCEEDED(hr)) hr = transport->factory->SetStagingBufferSize(staging_bytes);
     DSTORAGE_QUEUE_DESC description{};
@@ -183,8 +178,6 @@ Result RendererAssetIo::Initialize(bool native_enabled, std::uint32_t staging_by
         return IoFailure("DirectStorage transport initialization failed: " + std::to_string(hr));
     }
     transport->chunk_bytes = std::min(staging_bytes, 8u * 1024u * 1024u);
-    transport->staging_bytes = staging_bytes;
-    impl_->transport_ticket = ticket;
     impl_->transport = std::move(transport);
     impl_->initialized = true;
     return Result::Success();
@@ -192,32 +185,6 @@ Result RendererAssetIo::Initialize(bool native_enabled, std::uint32_t staging_by
     static_cast<void>(staging_bytes); static_cast<void>(residency);
     return IoFailure("Native DirectStorage was requested without its pinned SDK build.");
 #endif
-}
-Result RendererAssetIo::ShareTransportFrom(const RendererAssetIo &other, ResidencyManager &residency)
-{
-    if (impl_->initialized || !impl_->reads.empty() || !other.impl_->initialized)
-        return IoFailure("Resident asset IO candidate was already initialized.");
-#if HS_WITH_DIRECTSTORAGE
-    if (other.impl_->transport)
-    {
-        const auto size = other.impl_->transport->staging_bytes;
-        const auto ticket = residency.ReserveHost(size);
-        if (!ticket || !residency.CommitHost(ticket, size))
-        {
-            if (ticket) static_cast<void>(residency.ReleaseNow(ticket));
-            return IoFailure("Resident asset IO transport accounting exceeds the shared host budget.");
-        }
-        // The candidate ledger replaces the old ledger at publication. Both
-        // refer to one retained native transport, not two staging buffers.
-        impl_->transport_ticket = ticket;
-    }
-    impl_->transport = other.impl_->transport;
-#else
-    static_cast<void>(residency);
-#endif
-    impl_->cpu_tasks = other.impl_->cpu_tasks;
-    impl_->initialized = other.impl_->initialized;
-    return Result::Success();
 }
 Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &streaming,
                                 ResidencyManager &residency, ResidencyTicket storage, bool &submitted,
@@ -252,24 +219,21 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
         if (total != input.expected_bytes)
             return IoFailure("Immutable asset range total differs from its host reservation.");
     }
-    std::optional<CpuTaskLease> cpu_task;
     const bool native_file_read =
 #if HS_WITH_DIRECTSTORAGE
         impl_->transport && !input.source.IsPacked();
 #else
         false;
 #endif
-    if (!native_file_read)
-    {
-        cpu_task = TryAcquireCpuTask(impl_->cpu_tasks);
-        if (!cpu_task) return Result::Success(); // Requested remains eligible for a later pump.
-    }
+    if (!native_file_read && impl_->active_cpu_tasks >= kMaxConcurrentAssetCpuTasks)
+        return Result::Success(); // Requested remains eligible for a later pump.
     auto read = std::make_unique<ReadOwner>();
     read->input = std::move(input);
     read->storage = storage;
+    if (!native_file_read) read->HoldCpuSlot(impl_->active_cpu_tasks);
 #if HS_WITH_DIRECTSTORAGE
     // DirectStorage's file handle denies atomic replacement; packed input already owns its native Core file.
-    if (impl_->transport && !read->input.source.IsPacked())
+    if (native_file_read)
     {
         auto &transport = *impl_->transport;
         std::uint64_t product_bytes{};
@@ -299,12 +263,12 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
         const auto actual_size = (static_cast<std::uint64_t>(file_info.nFileSizeHigh) << 32u) | file_info.nFileSizeLow;
         if (FAILED(hr) || actual_size != product_bytes)
             return IoFailure("DirectStorage immutable file size/open validation failed.");
-        read->bytes.resize(static_cast<std::size_t>(read->input.expected_bytes));
+        read->bytes = AssetReadBuffer(static_cast<std::size_t>(read->input.expected_bytes));
         read->event.value = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (!read->event.value) return IoFailure("DirectStorage read completion event creation failed.");
         read->status = static_cast<std::uint32_t>(free_status - transport.occupied.begin());
         read->tag = transport.next_tag++;
-        read->transport = impl_->transport;
+        read->transport = impl_->transport.get();
         const auto key = read->input.request.value;
         auto *retained = read.get();
         // Map insertion/allocation happens before EnqueueRequest can auto-submit.
@@ -344,14 +308,12 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
         transport.queue->EnqueueSetEvent(retained->event.value);
         retained->transport_generation = transport.submit_generation + 1u;
         transport.queued_any = true;
-        retained->submitted = !defer_native_submit;
         if (!defer_native_submit) SubmitQueuedReads();
         return Result::Success();
     }
 #endif
     const auto expected = read->input.expected_bytes;
     const auto key = read->input.request.value;
-    read->cpu_task = std::move(*cpu_task);
     auto *retained = read.get();
     impl_->reads.emplace(key, std::move(read));
     if (!streaming.BeginRead({key}) || !streaming.SubmitRead({key}))
@@ -361,26 +323,25 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
         auto source = std::move(retained->input.source);
         auto prepare = std::move(retained->input.prepare);
         auto ranges = std::move(retained->input.ranges);
-        const auto cancellation = retained->cancellation;
+        auto *cancellation = &retained->cancelled;
         retained->future = std::async(std::launch::async,
             [source = std::move(source), expected, prepare = std::move(prepare),
              ranges = std::move(ranges), cancellation] {
-            std::vector<std::byte> bytes;
+            AssetReadBuffer bytes(static_cast<std::size_t>(expected));
             if (ranges.empty())
             {
-                if (auto result = source.Read(bytes, expected); !result)
+                if (auto result = source.ReadInto(bytes.Bytes()); !result)
                     throw std::runtime_error(std::string(result.Message()));
             }
             else
             {
-                bytes.resize(static_cast<std::size_t>(expected));
                 if (!cancellation->load(std::memory_order_acquire))
                 {
-                    if (auto result = source.ReadRanges(ranges, bytes, cancellation.get()); !result)
+                    if (auto result = source.ReadRanges(ranges, bytes.Bytes(), cancellation); !result)
                         throw std::runtime_error(std::string(result.Message()));
                 }
             }
-            if (prepare && !cancellation->load(std::memory_order_acquire)) prepare(bytes);
+            if (prepare && !cancellation->load(std::memory_order_acquire)) prepare(bytes.Bytes());
             return bytes;
         });
     }
@@ -391,7 +352,6 @@ Result RendererAssetIo::Enqueue(ImmutableAssetRead input, StreamingManager &stre
         impl_->reads.erase(key);
         return IoFailure("Could not submit immutable async asset read: " + std::string(error.what()));
     }
-    retained->submitted = true;
     submitted = true;
     return Result::Success();
 }
@@ -410,18 +370,26 @@ void RendererAssetIo::SubmitQueuedReads() noexcept
 Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &streaming,
                              ResidencyManager &residency, AssetReadCompletion &output)
 {
+    return CompleteRead(request, streaming, residency, output, wait_for_reads_);
+}
+
+Result RendererAssetIo::CompleteRead(StreamingRequestId request, StreamingManager &streaming,
+                                     ResidencyManager &residency, AssetReadCompletion &output, bool wait)
+{
     output.ready = output.cancelled = false;
     output.storage = {};
     // Release the previous payload without allocating another Debug iterator proxy.
-    output.bytes.clear();
-    output.bytes.shrink_to_fit();
+    output.bytes.Reset();
     const auto found = impl_->reads.find(request.value);
     if (found == impl_->reads.end()) return IoFailure("Asset read owner is missing.");
     auto &read = *found->second;
     const auto *page = streaming.Find(request);
-    read.cancelled = read.cancelled || !page || page->state == StreamingPageState::Cancelled ||
+    const bool cancellation_requested = read.cancelled.load(std::memory_order_relaxed);
+    const bool ledger_cancelled = !page || page->state == StreamingPageState::Cancelled ||
         page->content_generation != read.input.generation;
-    if (read.cancelled) read.cancellation->store(true, std::memory_order_release);
+    const bool cancelled = cancellation_requested || ledger_cancelled;
+    if (!cancellation_requested && ledger_cancelled)
+        read.cancelled.store(true, std::memory_order_release);
     const auto fail_completed_read = [&](std::string message) {
         static_cast<void>(streaming.FinishRead(request));
         static_cast<void>(streaming.Cancel(request));
@@ -433,7 +401,7 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
 #if HS_WITH_DIRECTSTORAGE
     if (read.transport)
     {
-        if (wait_for_reads_)
+        if (wait)
         {
             const auto event_result = WaitForSingleObject(read.event.value, INFINITE);
             if (event_result != WAIT_OBJECT_0)
@@ -445,7 +413,7 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
         hr = read.transport->statuses->GetHResult(read.status);
         // Status completion precedes the event marker. The event must also
         // complete before its handle/queue slot can be reused or destroyed.
-        if (!wait_for_reads_)
+        if (!wait)
         {
             const auto event_result = WaitForSingleObject(read.event.value, 0);
             if (event_result == WAIT_TIMEOUT) return Result::Success();
@@ -453,15 +421,15 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
         }
         // Error details borrow the completed request's file; drain them before its owner retires.
         read.transport->ReadErrors();
-        if (SUCCEEDED(hr) && !read.cancelled)
+        if (SUCCEEDED(hr) && !cancelled)
         {
             if (!read.prepare_future.valid())
             {
-                auto cpu_task = TryAcquireCpuTask(impl_->cpu_tasks);
-                if (!cpu_task) return Result::Success(); // Keep bytes and marker owner until verification can be admitted.
-                read.cpu_task = std::move(*cpu_task);
+                if (impl_->active_cpu_tasks >= kMaxConcurrentAssetCpuTasks)
+                    return Result::Success(); // Keep bytes and marker owner until verification can be admitted.
+                read.HoldCpuSlot(impl_->active_cpu_tasks);
                 const auto source_proof = read.input.source.AdmittedWholeFileProof();
-                const auto cancellation = read.cancellation;
+                auto *cancellation = &read.cancelled;
                 // ReadOwner joins this future before destroying its input or bytes.
                 const auto *prepare = &read.input.prepare;
                 const std::span<const ImmutableAssetRange> ranges{read.input.ranges};
@@ -471,7 +439,7 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
                     read.prepare_future = std::async(std::launch::async,
                         [prepare, ranges, source_proof, cancellation, bytes] {
                         if (cancellation->load(std::memory_order_acquire)) return;
-                        if (ranges.empty() && source_proof && Sha256(*bytes) != source_proof->digest)
+                        if (ranges.empty() && source_proof && Sha256(bytes->Bytes()) != source_proof->digest)
                             throw std::runtime_error("Immutable file digest mismatch.");
                         if (!ranges.empty())
                         {
@@ -479,13 +447,13 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
                             for (const auto &range : ranges)
                             {
                                 if (range.byte_count > bytes->size() - offset ||
-                                    Sha256(std::span<const std::byte>(*bytes).subspan(offset, range.byte_count)) != range.digest)
+                                    Sha256(bytes->Bytes().subspan(offset, range.byte_count)) != range.digest)
                                     throw std::runtime_error("Immutable subresource range digest mismatch.");
                                 offset += range.byte_count;
                             }
                             if (offset != bytes->size()) throw std::runtime_error("Immutable subresource ranges are incomplete.");
                         }
-                        if (!cancellation->load(std::memory_order_acquire) && *prepare) (*prepare)(*bytes);
+                        if (!cancellation->load(std::memory_order_acquire) && *prepare) (*prepare)(bytes->Bytes());
                     });
                 }
                 catch (const std::exception &error)
@@ -497,8 +465,7 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
         }
         if (read.prepare_future.valid())
         {
-            if (wait_for_reads_) read.prepare_future.wait();
-            else if (read.prepare_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+            if (!wait && read.prepare_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
                 return Result::Success();
             try { read.prepare_future.get(); }
             catch (const std::exception &error)
@@ -513,8 +480,7 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
 #endif
     {
         if (!read.future.valid()) return Result::Success();
-        if (wait_for_reads_) read.future.wait();
-        else if (read.future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+        if (!wait && read.future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
             return Result::Success();
         try { read.bytes = read.future.get(); }
         catch (const std::exception &error)
@@ -522,14 +488,14 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
             return fail_completed_read("Immutable asset read failed: " + std::string(error.what()));
         }
     }
-    if (SUCCEEDED(hr) && !read.cancelled &&
+    if (SUCCEEDED(hr) && !cancelled &&
         (read.bytes.size() != read.input.expected_bytes ||
-         !residency.CommitHost(read.storage, read.bytes.capacity())))
+         !residency.CommitHost(read.storage, read.bytes.size())))
         return fail_completed_read("Completed immutable read size or shared host accounting is invalid.");
     static_cast<void>(streaming.FinishRead(request));
     output.ready = true;
-    output.cancelled = read.cancelled;
-    if (FAILED(hr) || read.cancelled)
+    output.cancelled = cancelled;
+    if (FAILED(hr) || cancelled)
     {
         static_cast<void>(streaming.Cancel(request));
         static_cast<void>(residency.ReleaseNow(read.storage));
@@ -539,7 +505,7 @@ Result RendererAssetIo::Poll(StreamingRequestId request, StreamingManager &strea
         output.bytes = std::move(read.bytes);
         output.storage = read.storage;
     }
-    const bool failed = FAILED(hr) && !(read.cancelled && hr == HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED));
+    const bool failed = FAILED(hr) && !(cancelled && hr == HRESULT_FROM_WIN32(ERROR_OPERATION_ABORTED));
     impl_->reads.erase(found);
     return failed ? IoFailure("DirectStorage read failed: " + std::to_string(hr)) : Result::Success();
 }
@@ -548,8 +514,7 @@ void RendererAssetIo::Cancel(StreamingRequestId request, StreamingManager &strea
     static_cast<void>(streaming.Cancel(request));
     const auto found = impl_->reads.find(request.value);
     if (found == impl_->reads.end()) return;
-    found->second->cancelled = true;
-    found->second->cancellation->store(true, std::memory_order_release);
+    found->second->cancelled.store(true, std::memory_order_release);
 #if HS_WITH_DIRECTSTORAGE
     if (found->second->transport)
     {
@@ -558,17 +523,13 @@ void RendererAssetIo::Cancel(StreamingRequestId request, StreamingManager &strea
     }
 #endif
 }
-void RendererAssetIo::CancelAll(StreamingManager &streaming) noexcept
-{
-    for (const auto &[id, read] : impl_->reads) { static_cast<void>(read); Cancel({id}, streaming); }
-}
 Result RendererAssetIo::CollectCancelled(StreamingManager &streaming, ResidencyManager &residency)
 {
     for (auto iterator = impl_->reads.begin(); iterator != impl_->reads.end();)
     {
         const auto request = iterator->second->input.request;
         const auto *page = streaming.Find(request);
-        const bool cancelled = iterator->second->cancelled || !page ||
+        const bool cancelled = iterator->second->cancelled.load(std::memory_order_relaxed) || !page ||
             page->state == StreamingPageState::Cancelled ||
             page->content_generation != iterator->second->input.generation;
         ++iterator; // Poll may erase the retained owner, but never inserts one.
@@ -581,19 +542,13 @@ Result RendererAssetIo::CollectCancelled(StreamingManager &streaming, ResidencyM
 }
 Result RendererAssetIo::DrainSubmitted(StreamingManager &streaming, ResidencyManager &residency)
 {
-    CancelAll(streaming);
+    for (const auto &entry : impl_->reads) Cancel({entry.first}, streaming);
     SubmitQueuedReads();
     while (!impl_->reads.empty())
     {
-        auto &read = *impl_->reads.begin()->second;
-#if HS_WITH_DIRECTSTORAGE
-        if (read.transport && WaitForSingleObject(read.event.value, INFINITE) != WAIT_OBJECT_0)
-            return IoFailure("DirectStorage drain did not establish terminal completion.");
-#endif
-        if (read.future.valid()) read.future.wait();
-        if (read.prepare_future.valid()) read.prepare_future.wait();
         AssetReadCompletion output;
-        if (auto result = Poll(read.input.request, streaming, residency, output); !result) return result;
+        if (auto result = CompleteRead({impl_->reads.begin()->first}, streaming, residency, output, true); !result)
+            return result;
     }
     return Result::Success();
 }

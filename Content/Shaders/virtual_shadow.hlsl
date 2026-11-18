@@ -19,6 +19,12 @@ struct PageEntry
     int x, y; uint level, physical;
     uint epoch, flags, reserved0, reserved1;
 };
+struct ResidentPage
+{
+    int2 key;
+    uint level, state;
+};
+static const uint ResidentEmpty = 0u, ResidentDirty = 1u, ResidentValid = 2u;
 struct Caster
 {
     float4 current_bounds, previous_bounds;
@@ -42,7 +48,8 @@ ByteAddressBuffer BakedPages : register(t5, space21);
 // meshlet count, frontend, reserved}; each 32-byte segment repeats its group's
 // immutable draw template.
 ByteAddressBuffer CommandSegments : register(t6, space21);
-RWStructuredBuffer<PageEntry> Residents : register(u1, space21);
+Texture2D<float> CachedStaticDepth : register(t7, space21);
+RWStructuredBuffer<ResidentPage> Residents : register(u1, space21);
 RWByteAddressBuffer Requests : register(u2, space21);
 RWStructuredBuffer<DrawRecord> DrawRecords : register(u3, space21);
 RWByteAddressBuffer IndexedCommands : register(u4, space21);
@@ -52,8 +59,7 @@ RWByteAddressBuffer ClearCommands : register(u7, space21);
 RWByteAddressBuffer PageDrawCounts : register(u8, space21);
 groupshared uint AdmissionPageCounts[32];
 
-// flags: requested1, static redraw2, dynamic redraw4, overflow8, published16,
-// resident static valid32. A table entry is never published before both draws.
+// Page flags: requested 1, static redraw 2, dynamic redraw 4, overflow 8, published 16.
 float3 LightPosition(float3 world)
 {
     return float3(dot(world, LightRight.xyz), dot(world, LightUp.xyz), dot(world, LightForward.xyz));
@@ -122,18 +128,18 @@ float2 PageAxisBounds(int key, float side, float guard)
     const float lower = float(key) * side - guard;
     return float2(lower, lower + side + 2.0 * guard);
 }
-bool SphereOverlapsLight(float4 sphere, PageEntry page, float3 light)
+bool SphereOverlapsLight(float4 sphere, int2 key, uint level, float3 light)
 {
-    const float guard = Clipmaps[page.level].y * 2.0;
-    const float2 x = PageAxisBounds(page.x, Clipmaps[page.level].x, guard);
-    const float2 y = PageAxisBounds(page.y, Clipmaps[page.level].x, guard);
+    const float guard = Clipmaps[level].y * 2.0;
+    const float2 x = PageAxisBounds(key.x, Clipmaps[level].x, guard);
+    const float2 y = PageAxisBounds(key.y, Clipmaps[level].x, guard);
     return sphere.w >= 0.0 && light.x + sphere.w >= x.x && light.y + sphere.w >= y.x &&
         light.x - sphere.w <= x.y && light.y - sphere.w <= y.y && light.z + sphere.w >= Depth.x &&
         light.z - sphere.w <= Depth.x + Depth.w;
 }
-bool SphereOverlaps(float4 sphere, PageEntry page)
+bool SphereOverlaps(float4 sphere, ResidentPage page)
 {
-    return SphereOverlapsLight(sphere, page, LightPosition(sphere.xyz));
+    return SphereOverlapsLight(sphere, page.key, page.level, LightPosition(sphere.xyz));
 }
 // Binary searches use the same inclusive float boundaries as SphereOverlaps.
 bool CandidateAxisRange(float minimum, float maximum, int origin, int side, float page_side,
@@ -215,9 +221,8 @@ void InitCS(uint3 tid : SV_DispatchThreadID)
     }
     if (Options.x != 0u && id < Counts.w)
     {
-        PageEntry resident = (PageEntry)0;
-        resident.physical = id; resident.epoch = 0u;
-        Residents[id] = resident;
+        // Every epoch change resets all physical slots before residency runs.
+        Residents[id] = (ResidentPage)0;
     }
 }
 [numthreads(8, 8, 1)]
@@ -258,35 +263,26 @@ void FeedbackCS(uint3 tid : SV_DispatchThreadID, uint lane : SV_GroupIndex)
     if (receiver < Counts.y)
     {
         const Receiver box = Receivers[receiver];
-        // Depth-only bounds still participate in the CPU's stable Z interval.
-        // Keep all lanes in Begin/FlushFeedbackRequests, including these receivers.
-        if (box.minimum.w == 0.0)
+        float2 lower = 3.402823e38, upper = -3.402823e38;
+        [unroll] for (uint corner = 0; corner < 8; ++corner)
         {
-            float2 lower = 3.402823e38, upper = -3.402823e38;
-            [unroll] for (uint corner = 0; corner < 8; ++corner)
-            {
-                const float3 p = float3((corner & 1u) ? box.maximum.x : box.minimum.x,
-                    (corner & 2u) ? box.maximum.y : box.minimum.y,
-                    (corner & 4u) ? box.maximum.z : box.minimum.z);
-                const float2 projected = LightPosition(p).xy;
-                lower = min(lower, projected); upper = max(upper, projected);
-            }
-            // Request every overlapping level; transparent fragments and froxels can
-            // later select any valid resident level at their own world position.
-            [unroll] for (uint level = 0; level < 3; ++level)
-            {
-                const int2 first = max(int2(floor(lower / Clipmaps[level].x)), Windows[level].xy);
-                const int2 last = min(int2(floor(upper / Clipmaps[level].x)), Windows[level].xy + Windows[level].z - 1);
-                for (int y = first.y; y <= last.y; ++y)
-                    for (int x = first.x; x <= last.x; ++x) Request(EntryForKey(int2(x, y), level));
-            }
+            const float3 p = float3((corner & 1u) ? box.maximum.x : box.minimum.x,
+                (corner & 2u) ? box.maximum.y : box.minimum.y,
+                (corner & 4u) ? box.maximum.z : box.minimum.z);
+            const float2 projected = LightPosition(p).xy;
+            lower = min(lower, projected); upper = max(upper, projected);
+        }
+        // Request every overlapping level; transparent fragments and froxels can
+        // later select any valid resident level at their own world position.
+        [unroll] for (uint level = 0; level < 3; ++level)
+        {
+            const int2 first = max(int2(floor(lower / Clipmaps[level].x)), Windows[level].xy);
+            const int2 last = min(int2(floor(upper / Clipmaps[level].x)), Windows[level].xy + Windows[level].z - 1);
+            for (int y = first.y; y <= last.y; ++y)
+                for (int x = first.x; x <= last.x; ++x) Request(EntryForKey(int2(x, y), level));
         }
     }
     FlushFeedbackRequests(lane);
-}
-bool KeyEqual(PageEntry a, PageEntry b)
-{
-    return a.epoch == b.epoch && a.level == b.level && a.x == b.x && a.y == b.y;
 }
 [numthreads(64, 1, 1)]
 void ResidentCS(uint3 tid : SV_DispatchThreadID)
@@ -298,21 +294,25 @@ void ResidentCS(uint3 tid : SV_DispatchThreadID)
     {
         const uint p = tid.x;
         if (p >= Counts.w) return;
-        PageEntry resident = Residents[p];
-        if (resident.epoch != Identity.w) return;
-        if ((resident.flags & 32u) != 0u) for (uint c = Limits.x; c < Counts.x; c = Casters[c].properties.w)
+        ResidentPage resident = Residents[p];
+        if (resident.state == ResidentEmpty) return;
+        if (resident.state == ResidentValid) for (uint c = Limits.x; c < Counts.x; c = Casters[c].properties.w)
         {
             const uint f = Casters[c].properties.x;
-            if ((f & 16u) != 0u && (((f & 12u) != 0u) &&
-                (((f & 1u) != 0u && SphereOverlaps(Casters[c].current_bounds, resident)) ||
-                 ((f & 2u) != 0u && SphereOverlaps(Casters[c].previous_bounds, resident)))))
+            if (((f & 1u) != 0u && SphereOverlaps(Casters[c].current_bounds, resident)) ||
+                ((f & 2u) != 0u && SphereOverlaps(Casters[c].previous_bounds, resident)))
             {
-                resident.flags &= ~32u; break;
+                resident.state = ResidentDirty;
+                Residents[p].state = ResidentDirty;
+                break;
             }
         }
-        Residents[p] = resident;
-        const uint entry = EntryForKey(int2(resident.x, resident.y), resident.level);
-        if (entry != 0xffffffffu) PageTable[entry].physical = p;
+        const uint entry = EntryForKey(resident.key, resident.level);
+        if (entry != 0xffffffffu)
+        {
+            PageTable[entry].physical = p;
+            if (Requested(entry)) PageTable[entry].flags = resident.state == ResidentValid ? 5u : 7u;
+        }
         return;
     }
     // The UAV boundary between phases completes invalidation/mapping. A single
@@ -322,7 +322,7 @@ void ResidentCS(uint3 tid : SV_DispatchThreadID)
     uint free_cursor = 0u;
     // Requests are immutable here. Preserve ascending entry/allocation order,
     // while reading each request word once and skipping its unrequested pages.
-    for (uint rank = 0u; rank < Frame.z; ++rank)
+    for (uint rank = 0u; rank < Frame.z && free_cursor < Counts.w; ++rank)
     {
         const uint word=RequestWord(rank);
         uint mask = Requests.Load(word * 4u);
@@ -331,30 +331,26 @@ void ResidentCS(uint3 tid : SV_DispatchThreadID)
             const uint entry = PopRequestedEntry(word, mask);
             if (entry >= Counts.z) continue;
             PageEntry page = PageTable[entry];
-            uint physical = page.physical;
-            if (physical == 0xffffffffu)
+            if (page.physical != 0xffffffffu) continue;
+            for (; free_cursor < Counts.w; ++free_cursor)
             {
-                for (; free_cursor < Counts.w; ++free_cursor)
+                const ResidentPage old = Residents[free_cursor];
+                const uint old_entry = old.state == ResidentEmpty ? 0xffffffffu : EntryForKey(old.key, old.level);
+                if (!Requested(old_entry) || (BakedDepth.z != 0.0 && page.level == 2u && old.level != 2u))
                 {
-                    const uint p = free_cursor;
-                    const PageEntry old = Residents[p];
-                    // Do not evict a resident requested anywhere in this frame.
-                    const uint old_entry = old.epoch == Identity.w
-                        ? EntryForKey(int2(old.x, old.y), old.level) : 0xffffffffu;
-                    if (!Requested(old_entry) || (BakedDepth.z!=0.0 && page.level==2u && old.level!=2u))
+                    if (old_entry != 0xffffffffu)
                     {
-                        if(old_entry!=0xffffffffu) PageTable[old_entry].physical=0xffffffffu;
-                        physical = p; ++free_cursor; break;
+                        PageTable[old_entry].physical = 0xffffffffu;
+                        PageTable[old_entry].flags = 0u;
                     }
+                    break;
                 }
-                if (physical == 0xffffffffu) continue; // budget: remains invalid
-                PageEntry resident = page; resident.physical = physical; resident.flags = 0u;
-                Residents[physical] = resident;
             }
-            page.physical = physical;
-            page.flags = 1u | 4u;
-            if ((Residents[physical].flags & 32u) == 0u) page.flags |= 2u;
-            PageTable[entry] = page;
+            if (free_cursor == Counts.w) return;
+            ResidentPage fresh = {int2(page.x, page.y), page.level, ResidentDirty};
+            Residents[free_cursor] = fresh;
+            PageTable[entry].physical = free_cursor++;
+            PageTable[entry].flags = 7u;
         }
     }
 }
@@ -365,7 +361,7 @@ bool DrawCandidate(PageEntry page, Caster caster, float3 light, out uint layer, 
     if (page.physical == 0xffffffffu || (page.flags & 1u) == 0u ||
         (caster.properties.x & 1u) == 0u || (layer == 0u && (page.flags & 2u) == 0u)) return false;
     if(layer==0u && (caster.properties.x & 64u)!=0u && BakedPageOffset(page)!=0xffffffffu) return false;
-    return SphereOverlapsLight(caster.current_bounds, page, light);
+    return SphereOverlapsLight(caster.current_bounds, int2(page.x, page.y), page.level, light);
 }
 void CullPageCaster(uint entry, Caster caster, float3 light)
 {
@@ -593,11 +589,8 @@ void PublishCS(uint3 tid : SV_DispatchThreadID)
     if (page.physical == 0xffffffffu || (page.flags & 9u) != 1u) return;
     // Both bank passes precede publication through graph dependencies. An
     // overflowed static page never upgrades its persistent cache validity.
-    page.flags |= 16u;
-    PageTable[tid.x] = page;
-    PageEntry resident = Residents[page.physical];
-    resident.flags |= 32u;
-    Residents[page.physical] = resident;
+    PageTable[tid.x].flags = page.flags | 16u;
+    if (page.flags & 2u) Residents[page.physical].state = ResidentValid;
 }
 struct ClearOutput { float4 position : SV_Position; float4 clip_distance : SV_ClipDistance0; };
 ClearOutput ClearVS(uint vertex : SV_VertexID)
@@ -624,4 +617,10 @@ float SeedPS(ClearOutput input) : SV_Depth
     if(value==0.0) return 0.0;
     const float world_z=BakedDepth.y-value*(BakedDepth.y-BakedDepth.x);
     return 1.0-(world_z-Depth.x)*Depth.y;
+}
+
+float DynamicSeedPS(ClearOutput input) : SV_Depth
+{
+    // Dynamic depth starts from cached static texels; GREATER raster completes their max.
+    return CachedStaticDepth.Load(int3(int2(input.position.xy), 0));
 }

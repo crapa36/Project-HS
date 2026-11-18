@@ -368,8 +368,10 @@ Result SdkPresentation::NotifySubmission(const SdkFrameIdentity &identity, ID3D1
     if (result) impl_->submitted = true;
     return result;
 }
-Result SdkPresentation::Present(IDXGISwapChain4 *chain, const SdkFrameIdentity &identity, UINT sync, UINT flags)
+Result SdkPresentation::Present(IDXGISwapChain4 *chain, const SdkFrameIdentity &identity, UINT sync, UINT flags,
+                                bool &native_presented)
 {
+    native_presented = false;
     actual_present_count_ = {};
     if (!chain) return Failure(ErrorCode::InvalidArgument, "Present requires the sole current swapchain.");
     if (impl_)
@@ -385,8 +387,13 @@ Result SdkPresentation::Present(IDXGISwapChain4 *chain, const SdkFrameIdentity &
     HRESULT native = S_OK;
     std::uint32_t streamline_frames_actually_presented{};
     RendererStreamlinePresentCount observation;
-    if (impl_ && impl_->owner == SdkPresentationOwner::Fsr) sdk = impl_->fsr->Present(sync, flags);
-    else native = chain->Present(sync, flags);
+    if (impl_ && impl_->owner == SdkPresentationOwner::Fsr)
+        sdk = impl_->fsr->Present(sync, flags, native_presented);
+    else
+    {
+        native = chain->Present(sync, flags);
+        native_presented = native == S_OK;
+    }
     if (impl_ && impl_->owner == SdkPresentationOwner::Streamline)
         sdk = impl_->sl->PresentCompleted(identity, &streamline_frames_actually_presented, &observation);
     if (impl_ && impl_->owner == SdkPresentationOwner::Xess)

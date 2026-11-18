@@ -47,7 +47,7 @@ namespace hs
 class ShippedContentOwner;
 class RendererDevelopmentCatalog;
 namespace render_data { class RendererCatalogData; }
-namespace render_data { struct StaticShadowArchiveDescription; struct TerrainSurfaceSection; }
+namespace render_data { struct StaticShadowArchiveDescription; struct TerrainSurfaceSection; struct TextureSubresourceView; }
 struct RenderPackage;
 struct ViewId;
 
@@ -197,20 +197,20 @@ struct RendererTextureProductStatus
     std::uint64_t requests{}, uploads{}, publications{}, reclaims{}, revision{};
     std::uint32_t actual_resident_mip{}, effective_desired_mip{}, target_mip{};
 };
-struct RendererSceneProbeBakeStatus { bool sources_ready{}, capture_complete{}; };
 
+#if defined(HS_DEVELOPMENT_TOOLS)
 struct RendererPsoCacheStats
 {
     std::uint64_t hits{}, misses{}, native_creates{}, stores{}, store_failures{}, load_failures{};
     std::uint64_t io_failures{}, discarded_files{}, unsupported_libraries{}, uncached_mesh_creates{};
-    std::uint64_t root_registrations{}, key_failures{}, loaded_bytes{}, serialized_bytes{};
-    bool initialized{}, library_supported{}, mesh_library_supported{}, persistence_enabled{};
+    std::uint64_t root_registrations{}, loaded_bytes{}, serialized_bytes{};
     std::int32_t last_cache_hresult{}, last_io_error{};
     std::uint64_t key_build_ns{}, key_build_max_ns{}, library_load_ns{}, library_load_max_ns{},
         native_create_ns{}, native_create_max_ns{}, library_store_ns{}, library_store_max_ns{},
         serialize_ns{}, cache_write_ns{}, mutex_wait_ns{}, mutex_wait_max_ns{};
     bool capture_timings{};
 };
+#endif
 
 // Capture-only Initialize wall intervals. Steps are sequential call boundaries;
 // operations are nested subsets, including overlaps. Neither measures driver/GPU busy time.
@@ -218,6 +218,7 @@ enum class RendererStartupStep : std::uint8_t
 {
     QualityProfiles, Configuration, Device, MaterialSurfaceProfile, AdaptiveMaterialPolicies, TransientPools, SwapchainTargets, DepthShadow, UiTexture, PostProcessTargets, MainPipeline, CharacterGeometryAnimation, CharacterTextures, EnvironmentTextures, EnvironmentBrdfLut, EnvironmentBrdfDescriptors, MaterialParameters, EnvironmentMeshes, HardwareTextureStreaming, PresentationGuides, ClusterResources, VirtualShadows, AdditionalShadows, AdaptiveShading, AmbientOcclusion, SurfaceLighting, LayeredTranslucency, LightingProbe, ScreenOverlay, HdrPost, LightList, Volumetrics, LocalProbes, ReconstructionGuides, Devtools, InitialGraphicsSettings, Count
 };
+#if defined(HS_DEVELOPMENT_TOOLS)
 inline constexpr std::array<std::string_view, static_cast<std::size_t>(RendererStartupStep::Count)> kRendererStartupStepNames{
     "quality_profiles",
     "configuration",
@@ -256,10 +257,12 @@ inline constexpr std::array<std::string_view, static_cast<std::size_t>(RendererS
     "devtools",
     "initial_graphics_settings"
 };
+#endif
 enum class RendererStartupOperation : std::uint8_t
 {
     CheckedBinaryRead, Sha256, PackageDecodeValidate, GeometryPrepare, AnimationPrepare, NativeResourceAllocation, DescriptorWrite, UploadSubmit, GpuCompletionAdmission, GpuFenceWait, HostUploadPack, Count
 };
+#if defined(HS_DEVELOPMENT_TOOLS)
 inline constexpr std::array<std::string_view, static_cast<std::size_t>(RendererStartupOperation::Count)> kRendererStartupOperationNames{
     "checked_binary_read",
     "sha256",
@@ -284,6 +287,7 @@ struct RendererStartupTimings
     std::array<RendererStartupSample, kRendererStartupStepNames.size()> steps{};
     std::array<RendererStartupSample, kRendererStartupOperationNames.size()> operations{};
 };
+#endif
 
 struct RendererConfig
 {
@@ -406,17 +410,11 @@ struct RendererConfig
     }
 };
 
-// Reports requested settings and the native setup calls/results actually observed.
-// D3D12 exposes no getter for SetEnableGPUBasedValidation's void setting.
 struct RendererValidationStatus
 {
     bool debug_layer_requested{}, gpu_validation_requested{};
     bool debug_interface_acquisition_attempted{};
     bool debug_interface_acquired{}, gpu_validation_interface_queried{};
-    bool debug_layer_enable_called_before_device{}, gpu_validation_enable_called_before_device{};
-    bool device_creation_attempted{}, device_creation_succeeded{};
-    std::int32_t device_creation_hresult{};
-    bool device_created_after_requested_enable_calls{};
     bool message_collection_attempted{};
     // Sticky failure: a later empty read cannot repair a gap in validation evidence.
     std::int32_t message_collection_hresult{};
@@ -547,8 +545,6 @@ struct GpuPassTiming
     std::uint64_t cpu_record_begin_qpc{}, cpu_record_end_qpc{};
     std::uint64_t cpu_provider_submit_begin_qpc{}, cpu_provider_submit_end_qpc{};
     bool cpu_record_valid{}, cpu_provider_submit_valid{};
-    std::uint64_t cpu_callback_begin_qpc{}, cpu_callback_end_qpc{};
-    bool cpu_callback_valid{};
 };
 
 enum class GpuFrameTimingKind : std::uint8_t
@@ -606,7 +602,6 @@ struct RendererQueueStats
     std::uint32_t copy_batches{};
     std::uint32_t cross_queue_waits{};
     std::uint32_t record_jobs{};
-    std::uint32_t transient_resource_count{}, transient_block_count{}, alias_activation_count{};
     std::uint64_t transient_bytes_without_aliasing{}, transient_backing_bytes{};
 };
 
@@ -633,7 +628,6 @@ struct RendererResidencyStats
 };
 
 inline constexpr std::size_t kRendererDiagnosticsFrameCapacity = 240;
-inline constexpr std::size_t kRendererDiagnosticsPassCapacity = 512;
 // Matches the renderer's tracked categories; these are partial accounting,
 // independently reported from the process-wide DXGI usage/budget observation.
 enum class RendererDiagnosticsMemoryCategory : std::uint8_t
@@ -673,80 +667,18 @@ struct RendererDiagnosticsFrame
     std::uint32_t view_id{};
     std::uint64_t view_render_sequence{};
     bool presented{};
-    bool fence_completed{}, cpu_recording_available{}, gpu_critical_path_available{};
+    bool fence_completed{};
     bool validation_enabled{}, gpu_validation_enabled{};
-    double cpu_recording_ms{}, gpu_critical_path_ms{};
     RendererQueueStats queues;
     RendererDiagnosticsMemory memory;
 };
-struct RendererDiagnosticsPercentiles
-{
-    bool available{};
-    std::uint32_t samples{};
-    double p50{}, p95{}, p99{};
-};
-struct RendererDiagnosticsCadence
-{
-    bool available{};
-    std::uint32_t frames{};
-    double fps{}, elapsed_ms{};
-    RendererDiagnosticsPercentiles pacing_ms;
-    std::string source, unavailable_reason;
-};
-struct RendererDiagnosticsPass
-{
-    std::uint32_t pass_id{};
-    std::string name;
-    RenderQueue queue{};
-    bool measured{}, clock_calibrated{}, name_truncated{};
-    std::uint64_t nanoseconds{}, begin_ticks{}, end_ticks{}, timestamp_frequency{};
-    std::uint64_t cpu_qpc_frequency{};
-    std::uint64_t cpu_record_begin_qpc{}, cpu_record_end_qpc{};
-    std::uint64_t cpu_callback_begin_qpc{}, cpu_callback_end_qpc{};
-    std::uint64_t cpu_provider_submit_begin_qpc{}, cpu_provider_submit_end_qpc{};
-    bool cpu_record_valid{}, cpu_callback_valid{}, cpu_provider_submit_valid{};
-    // Aligned passes use CPU QPC and a shared origin. Otherwise offsets are
-    // relative to the first timestamp in this queue, with no cross-queue claim.
-    double begin_ms{}, end_ms{};
-    std::string clock_domain;
-};
-struct RendererDiagnosticsMeasurementSet
-{
-    RendererDiagnosticsPercentiles cpu_render_ms, gpu_critical_path_ms, present_call_ms, submit_to_present_return_ms;
-    RendererDiagnosticsCadence rendered_cadence, present_call_cadence;
-};
-struct RendererDiagnosticsViewMeasurements
-{
-    std::uint32_t view_id{};
-    bool presenting{};
-    RendererDiagnosticsMeasurementSet validation_on, validation_off;
-};
 struct RendererDiagnosticsSnapshot
 {
-    std::uint32_t frame_capacity{kRendererDiagnosticsFrameCapacity}, pass_capacity{kRendererDiagnosticsPassCapacity};
-    std::uint64_t total_rendered_frames{}, total_completed_frames{}, duplicate_samples{}, rejected_samples{};
-    std::uint64_t timeline_completed_frame_id{};
-    std::uint32_t timeline_view_id{};
-    bool timeline_truncated{};
-    std::vector<RendererDiagnosticsFrame> completed_frames;
-    std::vector<RendererDiagnosticsPass> passes;
-    RendererDiagnosticsMeasurementSet validation_on, validation_off;
-    std::vector<RendererDiagnosticsViewMeasurements> views;
-    RendererDiagnosticsCadence displayed_cadence;
-    std::string cpu_render_source{"renderer_recording_and_graph_submission"};
-    std::string gpu_critical_path_source{"direct_queue_graph_bracketing_timestamps"};
-    std::string latency_source{"cpu_qpc_graph_submit_to_present_return"};
-    bool input_to_display_latency_available{};
-    std::string input_to_display_latency_reason{"No completed native input-to-display latency report is exposed."};
-    RendererDiagnosticsMemory current_memory, sampled_memory_peak, transition_memory_peak;
-    bool transition_memory_peak_available{};
-    std::string transition_memory_peak_source, transition_memory_peak_reason;
-    std::string memory_source{"dxgi_process_budget_and_partial_renderer_residency_accounting"};
-    bool complete_provider_memory_available{}, stream_misses_available{};
-    std::string provider_memory_reason{"Only reported presentation allocations and reconstruction guides are known."};
-    std::string stream_misses_reason{"Demand miss counters are not exposed; request/publication counters are reported separately."};
-    RendererResidencyStats streaming;
-    RendererPresentationStatus presentation;
+    std::uint64_t total_rendered_frames{};
+    std::uint64_t newest_presented_frame_id{};
+    double validation_on_fps{}, validation_off_fps{};
+    RendererDiagnosticsMemory current_memory;
+    std::optional<std::uint64_t> transition_peak_local_usage_bytes;
     RendererReconstructionStatus reconstruction;
 };
 
@@ -766,18 +698,18 @@ class D3D12Renderer
     D3D12Renderer(const D3D12Renderer &) = delete;
     D3D12Renderer &operator=(const D3D12Renderer &) = delete;
 
-    [[nodiscard]] Result Initialize(const RendererConfig &config);
+#if !defined(HS_OFFLINE_PROBE_BAKER)
+    [[nodiscard]] Result Initialize(RendererConfig config);
+    void HandleWindowMessage(const NativeWindowMessage &message) noexcept;
+#endif
     [[nodiscard]] Result Resize(std::uint32_t width, std::uint32_t height);
     [[nodiscard]] Result Resize(ViewExtent extent) { return Resize(extent.width, extent.height); }
     [[nodiscard]] Result RequestGraphicsSettings(const GraphicsSettingsRequest &);
     [[nodiscard]] SettingsApplyResult GetGraphicsSettingsStatus() const;
     [[nodiscard]] GraphicsCapabilitiesView GetGraphicsCapabilities() const;
-    [[nodiscard]] std::uint64_t MaterialParameterRevision() const noexcept;
-    [[nodiscard]] std::uint64_t PipelineRevision() const noexcept;
-    void HandleWindowMessage(const NativeWindowMessage &message) noexcept;
     [[nodiscard]] RenderViewInput MainViewInput(const CameraView &) const;
     [[nodiscard]] Result Render(const RenderPackage &, RendererFrameResult &);
-#if defined(HS_DEVELOPMENT_TOOLS) || defined(HS_OFFLINE_PROBE_BAKER)
+#if defined(HS_DEVELOPMENT_TOOLS) && !defined(HS_OFFLINE_PROBE_BAKER)
     [[nodiscard]] Result ConfigureView(const RenderViewConfiguration &);
     [[nodiscard]] Result RenderViews(const RenderPackage &, std::span<const RenderViewSample>,
                                      RendererToolFrameResult &);
@@ -789,30 +721,23 @@ class D3D12Renderer
     // Use coordinates, not emission order, to index tiles; each span lasts only for its callback.
     // Offline one-shot owner. This prepares only native static-shadow capture
     // resources; it does not expose a partially initialized gameplay renderer.
-    [[nodiscard]] static Result BakeStaticShadowPages(const RendererConfig &configuration,
+    [[nodiscard]] static Result BakeStaticShadowPages(RendererConfig configuration,
         const std::shared_ptr<const StaticRenderScene> &scene, const LightView &light,
         const std::function<Result(const render_data::StaticShadowArchiveDescription &)> &begin,
         const std::function<Result(std::uint32_t, std::int32_t, std::int32_t, std::span<const float>)> &page_sink);
-    [[nodiscard]] static Result BakeSceneProbePackage(const RendererConfig &configuration,
+    [[nodiscard]] static Result BakeSceneProbePackage(RendererConfig configuration,
         const std::shared_ptr<const StaticRenderScene> &scene, const LightView &sun,
         std::vector<std::byte> &package_bytes, std::uint32_t maximum_cube_views_per_graph = 6,
         SceneProbeBakePolicy policy = {});
-    [[nodiscard]] Result BakeStaticShadowPages(const std::shared_ptr<const StaticRenderScene> &scene,
-        const LightView &light,
-        const std::function<Result(const render_data::StaticShadowArchiveDescription &)> &begin,
-        const std::function<Result(std::uint32_t, std::int32_t, std::int32_t, std::span<const float>)> &page_sink);
 #if defined(HS_OFFLINE_PROBE_BAKER)
     // Synchronous; both spans are valid only for the duration of the callback.
-    [[nodiscard]] static Result BakeTerrainSurfacePages(const RendererConfig &configuration,
+    [[nodiscard]] static Result BakeTerrainSurfacePages(RendererConfig configuration,
         const std::shared_ptr<const StaticRenderScene> &scene,
         const std::function<Result(std::span<const render_data::TerrainSurfaceSection>,
             render_data::TextureDescription, std::array<std::byte,32>)> &begin,
-        const std::function<Result(std::uint32_t, std::span<const std::byte>)> &section_sink);
+        const std::function<Result(std::uint32_t,
+            std::span<const render_data::TextureSubresourceView>)> &section_sink);
 #endif
-#if defined(HS_DEVELOPMENT_TOOLS) || defined(HS_OFFLINE_PROBE_BAKER)
-    [[nodiscard]] Result ReleaseView(ViewId);
-#endif
-
     [[nodiscard]] Result Shutdown();
     [[nodiscard]] bool UsesEnhancedBarriers() const noexcept;
     [[nodiscard]] std::uint64_t ValidationErrorCount() const noexcept;
@@ -849,29 +774,28 @@ class D3D12Renderer
     [[nodiscard]] RendererLightingStatus GetLightingStatus() const;
     [[nodiscard]] RendererTextureStreamingStatus GetTextureStreamingStatus() const;
     [[nodiscard]] RendererTextureProductStatus GetTextureStreamingStatus(std::string_view logical_id) const noexcept;
-    [[nodiscard]] RendererSceneProbeBakeStatus GetSceneProbeBakeStatus() const noexcept;
     [[nodiscard]] std::vector<RendererCharacterAnimationClip> GetCharacterAnimationClips() const;
 #if defined(HS_DEVELOPMENT_TOOLS)
     [[nodiscard]] std::vector<RendererLegacyCharacterAnimationClip> GetLegacyCharacterAnimationClips() const;
 #endif
+#if defined(HS_DEVELOPMENT_TOOLS)
     [[nodiscard]] RendererPsoCacheStats GetPipelineCacheStats() const;
     [[nodiscard]] RendererStartupTimings GetStartupTimings() const noexcept;
-#if defined(HS_DEVELOPMENT_TOOLS)
     // Call on the renderer owner thread; the returned bounded value owns its data.
-    [[nodiscard]] RendererDiagnosticsSnapshot GetDiagnostics() const;
+    [[nodiscard]] RendererDiagnosticsSnapshot GetDiagnostics();
 #endif
 
   private:
 #if defined(HS_OFFLINE_PROBE_BAKER)
     enum class WorldTransportBakeKind { Terrain, StaticShadow, SceneProbe };
-    [[nodiscard]] Result InitializeWorldTransportBake(const RendererConfig &configuration, WorldTransportBakeKind kind);
+    [[nodiscard]] Result InitializeWorldTransportBake(RendererConfig &&native_config, WorldTransportBakeKind kind);
 #endif
     [[nodiscard]] Result BakeStaticShadowPagesPrepared(
         const std::shared_ptr<const StaticRenderScene> &scene, const LightView &light,
         const std::function<Result(const render_data::StaticShadowArchiveDescription &)> &begin,
         const std::function<Result(std::uint32_t, std::int32_t, std::int32_t, std::span<const float>)> &page_sink);
-    [[nodiscard]] Result CapturePng(const std::filesystem::path &path, ViewId view_id);
-    [[nodiscard]] Result CaptureSurfaceDiagnostics(const std::filesystem::path &path);
+    [[nodiscard]] Result CaptureOutputAndParticles(const std::filesystem::path &path, ViewId view_id);
+    [[nodiscard]] Result CaptureSurfaceDiagnostics(const std::filesystem::path &path, std::ostream *summary);
     [[nodiscard]] Result CaptureGeometryDiagnostics(const std::filesystem::path &path);
     [[nodiscard]] Result CaptureVisibilityDiagnostics(const std::filesystem::path &path);
     [[nodiscard]] Result ApplyOptions(const RendererOptions &options);

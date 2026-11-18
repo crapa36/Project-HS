@@ -32,6 +32,11 @@ void Bounds(R &r, GeometryBounds &v)
 { Numbers(r,v.minimum); Numbers(r,v.maximum); Numbers(r,v.sphere); }
 void Bulk(R &r, BulkRange &v)
 { r.Fields(v.offset,v.byte_count,v.format); Blob(r,v.expected_digest); }
+void ValidatePackedRange(const BulkRange &range, std::uint64_t pack_size)
+{
+    Require(range.offset >= 64 && range.offset % 64 == 0 && range.offset <= pack_size &&
+            range.byte_count <= pack_size - range.offset, "Renderer bulk exceeds its aligned pack range.");
+}
 void Metadata(R &r, GeometryMetadata &v)
 {
     r.Fields(v.abi,v.flags,v.vertex_count,v.index_count,v.submesh_count,v.meshlet_count,
@@ -140,8 +145,10 @@ void Atlas(R &r,VfxMeshAtlasDescriptor &v)
 }
 }
 
-std::vector<std::byte> EncodeRendererCatalog(RendererCatalogView v)
+std::vector<std::byte> EncodeRendererCatalog(RendererCatalogView v, std::uint64_t bulk_extent)
 {
+    if (auto valid = ValidateRendererCatalog(v, bulk_extent); !valid)
+        throw std::runtime_error(std::string(valid.Message()));
     CanonicalBytes b("project_hs.renderer_catalog",kRendererCatalogVersion);
     b.Sequence(v.bulks,[](CanonicalBytes &out,const auto &x){out.Scalar(x.asset_id.value);content_identity::Bulk(out,x.range);});
     b.Sequence(v.textures,content_identity::Texture); b.Sequence(v.geometry,content_identity::Geometry);
@@ -176,8 +183,7 @@ Result ValidateRendererCatalog(RendererCatalogView view, std::optional<std::uint
             Require(range.format <= RenderBulkFormat::SurfaceLayoutAbi && range.byte_count &&
                 range.byte_count <= SIZE_MAX, "Invalid renderer bulk size or format.");
             if (pack_size)
-                Require(range.offset >= 64 && range.offset % 64 == 0 && range.offset <= *pack_size &&
-                    range.byte_count <= *pack_size - range.offset, "Renderer bulk exceeds its aligned pack range.");
+                ValidatePackedRange(range, *pack_size);
             assets.push_back(entry.asset_id);
         });
         const auto product = [&](AssetId asset, std::uint32_t index, RenderBulkFormat format) -> const RendererBulkDescriptor & {
@@ -247,14 +253,19 @@ Result ValidateRendererCatalog(RendererCatalogView view, std::optional<std::uint
     catch(const std::exception &e) { return Result::Failure(ErrorCode::InvalidArgument,"hs_render_data",e.what()); }
 }
 
-Result DecodeRendererCatalog(std::span<const std::byte> bytes,std::uint64_t pack_size,
+Result DecodeVerifiedRendererCatalog(std::span<const std::byte> bytes,std::uint64_t pack_size,
                             std::shared_ptr<const RendererCatalogData> &out)
 {
     try
     {
         R r(bytes,"project_hs.renderer_catalog",kRendererCatalogVersion);
         auto next=std::shared_ptr<RendererCatalogData>(new RendererCatalogData);
-        Rows(r,next->bulks,60,[](R &in,RendererBulkDescriptor &x){in.Fields(x.asset_id.value);Bulk(in,x.range);});
+        Rows(r, next->bulks, 68, [&](R &in, RendererBulkDescriptor &entry) {
+            in.Fields(entry.asset_id.value);
+            Bulk(in, entry.range);
+            Require(entry.range.byte_count && entry.range.byte_count <= SIZE_MAX, "Invalid renderer bulk size.");
+            ValidatePackedRange(entry.range, pack_size);
+        });
         Rows(r,next->texture_storage,48,Texture); Rows(r,next->geometry_storage,100,Geometry);
         Rows(r,next->material_storage,84,Material); Rows(r,next->character_storage,120,Character);
         Rows(r,next->animation_storage,64,Animation);
@@ -267,7 +278,6 @@ Result DecodeRendererCatalog(std::span<const std::byte> bytes,std::uint64_t pack
         for(const auto &x:next->material_storage) next->materials.push_back(x.View());
         for(const auto &x:next->character_storage) next->characters.push_back(x.View());
         for(const auto &x:next->animation_storage) next->animations.push_back(x.View());
-        if(auto valid=ValidateRendererCatalog(next->View(),pack_size);!valid) return valid;
         next->pack_size_=pack_size;
         out=std::move(next); return Result::Success();
     }

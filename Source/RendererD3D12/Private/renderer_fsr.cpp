@@ -1007,8 +1007,9 @@ Result FsrSession::NotifyPrepareSubmission(const SdkFrameIdentity &identity, ID3
 #endif
 }
 
-Result FsrSession::Present(std::uint32_t sync_interval, std::uint32_t flags)
+Result FsrSession::Present(std::uint32_t sync_interval, std::uint32_t flags, bool &native_presented)
 {
+    native_presented = false;
 #if !HS_WITH_FSR
     static_cast<void>(sync_interval); static_cast<void>(flags);
     return FsrFailure(ErrorCode::InvalidState, CompiledOutReason);
@@ -1020,6 +1021,7 @@ Result FsrSession::Present(std::uint32_t sync_interval, std::uint32_t flags)
     if (!impl_->prepared || !lease || !lease->submitted || lease->presented)
         return FsrFailure(ErrorCode::InvalidState, "FSR Present requires a matching submitted Prepare exactly once.");
     const HRESULT result = impl_->swapchain->Present(sync_interval, flags);
+    native_presented = result == S_OK;
     lease->presented = true;
     impl_->prepared = false;
     // Composition may still be pending on the SDK thread. Preserve owners and

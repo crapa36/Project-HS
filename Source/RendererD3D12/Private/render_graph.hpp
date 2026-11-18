@@ -70,14 +70,6 @@ struct CompletionSet
     }
 };
 
-struct QueueScheduleDependency
-{
-    std::uint32_t producer_pass_id{};
-    std::uint32_t consumer_pass_id{};
-    QueueHint producer_queue{};
-    QueueHint consumer_queue{};
-};
-
 [[nodiscard]] constexpr bool QueueAccessCompatible(QueueHint queue, Access access) noexcept
 {
     switch (queue)
@@ -88,7 +80,7 @@ struct QueueScheduleDependency
         return access == Access::Common || access == Access::ComputeRead ||
                access == Access::UnorderedRead || access == Access::UnorderedWrite ||
                access == Access::CopySource || access == Access::CopyDest ||
-               access == Access::IndirectArgs;
+               access == Access::IndirectArgs || access == Access::ConstantBuffer;
     case QueueHint::Copy:
         return access == Access::Common || access == Access::CopySource ||
                access == Access::CopyDest;
@@ -201,14 +193,21 @@ class RenderGraphBuilder;
 class TaskSystem;
 struct GpuPassTiming;
 
+struct NativePassSubmission
+{
+    std::uint32_t pass_index{};
+    // Proves handoff to a native queue; completion fences and lifetimes remain separate.
+    bool submitted{};
+};
+
 struct GraphExecutionOptions
 {
+    NativePassSubmission *native_pass_submission{};
     std::array<void *, 3> timestamp_query_heaps{};
     std::array<void *, 3> timestamp_readbacks{};
     std::uint32_t timestamp_base{};
-    // Optional compiled execution-order to query-pair map; UINT32_MAX skips a pass.
-    const std::uint32_t *timestamp_query_slots{};
-    std::size_t timestamp_query_slot_count{};
+    // Critical capture stores the compiled positions of its two endpoint queries.
+    std::optional<std::array<std::uint32_t, 2>> timestamp_endpoint_positions;
     TaskSystem *task_system{};
     // Optional capture output in compiled execution order; each recording task owns a disjoint range.
     GpuPassTiming *cpu_pass_timings{};
@@ -223,8 +222,6 @@ struct GraphExecutionStats
     std::uint32_t copy_batches{};
     std::uint32_t cross_queue_waits{};
     std::uint32_t record_jobs{};
-    std::uint32_t transient_resource_count{};
-    std::uint32_t transient_block_count{};
     std::uint32_t alias_activation_count{};
     std::uint64_t transient_bytes_without_aliasing{};
     std::uint64_t transient_backing_bytes{};
@@ -260,9 +257,7 @@ class TransientResourcePool
     friend class RenderGraphBuilder;
 };
 
-// Owns the native Direct/Compute/Copy submission timelines used by queued
-// RenderGraph execution. The existing renderer single-list path stays separate
-// until individual production passes are explicitly migrated.
+// Owns the native Direct/Compute/Copy submission timelines for the render graph.
 class RenderGraphQueueExecutor
 {
   public:
@@ -314,7 +309,7 @@ class RenderPassContext
   private:
     RenderPassContext(void *native_command_list, void *enhanced_command_list,
                       BarrierMode barrier_mode, const void *graph,
-                      QueueHint queue = QueueHint::Direct) noexcept;
+                      QueueHint queue) noexcept;
 
     void *native_command_list_{};
     void *enhanced_command_list_{};
@@ -322,7 +317,6 @@ class RenderPassContext
     const void *graph_{};
     QueueHint queue_{};
 
-    friend class RenderGraphBuilder;
     friend class RenderGraphQueueExecutor;
 };
 
@@ -405,6 +399,8 @@ class RenderGraphBuilder
     [[nodiscard]] bool AllImportsCertified() const noexcept;
     [[nodiscard]] bool BindTexture(TextureHandle slot, const ExternalTexture &texture, Access initial);
     [[nodiscard]] bool BindBuffer(BufferHandle slot, const ExternalBuffer &buffer, Access initial);
+    [[nodiscard]] std::optional<PassBuilder> AddOrBindNextPass(std::optional<std::uint32_t> &retained_index,
+        std::uint32_t id, std::string_view name, QueueHint queue = QueueHint::Direct);
     [[nodiscard]] std::optional<PassBuilder> BindPass(std::uint32_t declaration_index,
                                                        std::uint32_t expected_pass_id);
     [[nodiscard]] std::uint32_t ResourceCount() const noexcept;
@@ -429,20 +425,10 @@ class RenderGraphBuilder
     [[nodiscard]] Result Prepare(TransientResourcePool &pool, GraphExecutionStats *capture_cpu = nullptr);
     [[nodiscard]] void *Resolve(ResourceHandle handle) const noexcept;
     [[nodiscard]] std::optional<D3D12_RESOURCE_DESC> ResourceDescription(ResourceHandle handle) const noexcept;
-    [[nodiscard]] Result Execute(void *native_command_list, void *enhanced_command_list,
-                                 BarrierMode barriers, void *timestamp_query_heap = nullptr,
-                                 void *timestamp_readback = nullptr,
-                                 std::uint32_t timestamp_base = 0);
     [[nodiscard]] std::uint32_t PassCount() const noexcept;
     [[nodiscard]] std::uint32_t CompiledPassId(std::uint32_t execution_index) const noexcept;
     [[nodiscard]] std::string_view CompiledPassName(std::uint32_t execution_index) const noexcept;
     [[nodiscard]] QueueHint CompiledPassQueue(std::uint32_t execution_index) const noexcept;
-    [[nodiscard]] std::uint32_t QueuePassCount(QueueHint queue) const noexcept;
-    [[nodiscard]] std::uint32_t CompiledQueuePassId(QueueHint queue,
-                                                    std::uint32_t queue_index) const noexcept;
-    [[nodiscard]] std::uint32_t CrossQueueDependencyCount() const noexcept;
-    [[nodiscard]] QueueScheduleDependency CrossQueueDependency(
-        std::uint32_t dependency_index) const noexcept;
     // Execution slots on the physical queue/resource path to this output pass.
     [[nodiscard]] std::vector<std::uint32_t> OutputDependencyClosureSlots(std::uint32_t pass_id) const;
     [[nodiscard]] bool OutputClosureImportsReady(std::span<const std::uint32_t> slots,

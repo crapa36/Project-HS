@@ -18,13 +18,6 @@ Result HlodFailure(std::string message)
 {
     return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", std::move(message));
 }
-std::string ProductDigest(const RendererConfig &config, const std::string &id)
-{
-    const auto digest = RendererProductDigest(config, id);
-    if (digest.size() != 71 || !digest.starts_with("sha256:"))
-        throw std::runtime_error("selected Generation omits HLOD product digest: " + id);
-    return digest;
-}
 std::uint32_t MaterialOrdinal(const render_data::SceneHlod &scene, const render_data::SceneHlodProxy &proxy)
 {
     const auto &id = scene.dependencies.at(proxy.material_dependency);
@@ -79,7 +72,7 @@ Result WithdrawHlodPage(ClusterPageStream &stream, RendererAssetIo &io,
     for (const auto ticket : {stream.read_residency, stream.decoded_residency})
         static_cast<void>(residency.ReleaseNow(ticket));
     stream.read_residency = {}; stream.decoded_residency = {};
-    stream.decoded = {}; std::vector<std::byte>{}.swap(stream.read_storage);
+    stream.decoded = {}; stream.read_storage.Reset();
     stream.request = {}; stream.read_bytes = 0u;
     return Result::Success();
 }
@@ -112,8 +105,7 @@ Result D3D12Renderer::Impl::AppendHlodPages(ClusterRuntimeState &runtime)
         next->content_generation = resource_generation_id;
         next->generation = runtime.generation;
         RendererAssetSource path;
-        if (auto result = ResolveRendererAsset(config, next->logical_id, path); !result) return result;
-        if (auto result = path.BindExpectedDigest(ProductDigest(config, next->logical_id)); !result) return result;
+        if (auto result = ResolveRendererGeometrySource(config, next->logical_id, path); !result) return result;
         std::vector<std::byte> bytes;
         if (auto result = ReadBinary(path, bytes); !result) return result;
         next->scene = std::make_shared<const render_data::AdmittedSceneHlod>(bytes);
@@ -123,7 +115,12 @@ Result D3D12Renderer::Impl::AppendHlodPages(ClusterRuntimeState &runtime)
         {
             RendererAssetSource resolved;
             if (auto result = ResolveRendererAsset(config, dependency, resolved); !result) return result;
-            (void)ProductDigest(config, dependency);
+            if (!resolved.IsPacked())
+            {
+                const auto digest = RendererProductDigest(config, dependency);
+                if (digest.size() != 71 || !digest.starts_with("sha256:"))
+                    return HlodFailure("selected Generation omits HLOD product digest: " + dependency);
+            }
         }
         next->page_base = static_cast<std::uint32_t>(runtime.cpu.pages.size());
         if (next->scene->Value().pages.size() > UINT32_MAX - next->page_base)
@@ -131,8 +128,7 @@ Result D3D12Renderer::Impl::AppendHlodPages(ClusterRuntimeState &runtime)
         for (const auto &page : next->scene->Value().pages)
         {
             RendererAssetSource resolved;
-            if (auto result = ResolveRendererAsset(config, page.logical_id, resolved); !result) return result;
-            if (auto result = resolved.BindExpectedDigest(ProductDigest(config, page.logical_id)); !result) return result;
+            if (auto result = ResolveRendererGeometrySource(config, page.logical_id, resolved); !result) return result;
             next->page_sources.push_back(std::move(resolved));
         }
         for (const auto &proxy : next->scene->Value().proxies)
@@ -411,8 +407,7 @@ Result D3D12Renderer::Impl::PrepareHlodFrame(std::uint32_t frame_slot,
     const bool rebuild_bindings = native.prepared_source != view.matching_scene ||
         native.prepared_generation != generation || native.prepared_leaf_count != leaf_count ||
         native.prepared_hlod_generation != runtime.generation ||
-        native.bindings.size() != order.size() || refs_changed ||
-        native.prepared_pipeline_revision != pipeline_revision;
+        native.bindings.size() != order.size() || refs_changed;
     if (rebuild_bindings)
     {
         native.members.clear(); native.bindings.clear(); native.buckets.clear(); native.material_ordinals.clear();
@@ -470,7 +465,6 @@ Result D3D12Renderer::Impl::PrepareHlodFrame(std::uint32_t frame_slot,
     native.prepared_generation = generation;
     native.prepared_hlod_generation = runtime.generation;
     native.prepared_leaf_count = leaf_count;
-    native.prepared_pipeline_revision = pipeline_revision;
     const auto readback_bytes = std::max<std::uint64_t>(4u, runtime.scene->Value().pages.size() * 4u) + 64u;
     const auto ensure = [&](AllocationResource &resource, ResidencyTicket &ticket, std::uint64_t bytes,
                             D3D12_HEAP_TYPE heap, D3D12_RESOURCE_STATES state) -> Result {

@@ -4,12 +4,12 @@
 namespace hs
 {
 
-Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, OwnedView &view)
+Result D3D12Renderer::Impl::CreateDevice(RendererConfig &&configuration, OwnedView &view)
 {
     if (configuration.ribbon_history_points < renderer_detail::kRibbonHistorySamples)
         return Result::Failure(ErrorCode::InvalidArgument, "hs_renderer_d3d12",
             "Ribbon point budget must provide at least one 64-sample slot");
-    config = configuration;
+    config = std::move(configuration);
 #if !defined(HS_DEVELOPMENT_TOOLS)
     config.validation = false;
     config.gpu_validation = false;
@@ -23,14 +23,12 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
     native_graphics_capabilities = {};
     view.view_id = kMainRenderViewId;
     view.role = RenderViewRole::Main;
-    view.width = std::max(configuration.width, 1u);
-    view.height = std::max(configuration.height, 1u);
-    auto reconstruction_configuration = configuration;
+    view.width = std::max(config.width, 1u);
+    view.height = std::max(config.height, 1u);
     // Native feature admission is not known until the device capability query
     // below, so this bootstrap plan must not allocate for requested DRS yet.
-    reconstruction_configuration.dynamic_resolution = false;
     ViewExtent capacity;
-    if (auto resolved = ResolveNativeReconstruction(reconstruction_configuration, {view.width, view.height},
+    if (auto resolved = ResolveNativeReconstruction(config, false, {view.width, view.height},
             view.reconstruction_plan, capacity); !resolved) return resolved;
     config.temporal_reconstruction = view.reconstruction_plan.temporal_enabled;
     view.render_width = capacity.width;
@@ -62,7 +60,6 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
                 ? "D3D12GetDebugInterface required for GPU-based validation"
                 : "D3D12GetDebugInterface required for debug layer", debug_result);
         debug->EnableDebugLayer();
-        validation_status.debug_layer_enable_called_before_device = true;
         if (config.gpu_validation)
         {
             ComPtr<ID3D12Debug1> debug1;
@@ -71,13 +68,12 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
             if (FAILED(query_result))
                 return HResultFailure("ID3D12Debug1 required for GPU-based validation", query_result);
             debug1->SetEnableGPUBasedValidation(TRUE);
-            validation_status.gpu_validation_enable_called_before_device = true;
         }
     }
 
     ComPtr<ID3D12DeviceRemovedExtendedDataSettings1> dred_settings;
     const bool diagnostic_device = config.validation || config.gpu_validation || config.capture_timing_stream;
-    dred_enabled = false;
+    const bool write_device_report = diagnostic_device && !config.artifact_directory.empty();
     if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&dred_settings))))
     {
         // Ordinary play leaves crash instrumentation to Windows policy.
@@ -86,21 +82,7 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
         dred_settings->SetAutoBreadcrumbsEnablement(mode);
         dred_settings->SetPageFaultEnablement(mode);
         dred_settings->SetBreadcrumbContextEnablement(mode);
-        dred_enabled = diagnostic_device;
     }
-    if (diagnostic_device)
-    {
-        std::ofstream(config.artifact_directory / "dred_config.json", std::ios::trunc)
-            << std::format(
-                   "{{\"enabled\":{},\"auto_breadcrumbs\":{},\"page_fault\":{},"
-                   "\"breadcrumb_context\":{},\"system_controlled\":{}}}\n",
-                   dred_enabled ? "true" : "false", dred_enabled ? "true" : "false",
-                   dred_enabled ? "true" : "false", dred_enabled ? "true" : "false",
-                   diagnostic_device ? "false" : "true");
-    }
-
-#else
-    dred_enabled = false;
 #endif
 
 #if defined(HS_DEVELOPMENT_TOOLS)
@@ -114,7 +96,7 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
         return HResultFailure("CreateDXGIFactory2", result);
     }
 
-    if (configuration.warp)
+    if (config.warp)
     {
         ComPtr<IDXGIAdapter> warp;
         result = factory->EnumWarpAdapter(IID_PPV_ARGS(&warp));
@@ -152,7 +134,7 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
     DXGI_ADAPTER_DESC3 adapter_description{};
     const bool adapter_memory_capacity_known = SUCCEEDED(adapter->GetDesc3(&adapter_description));
 #if defined(HS_DEVELOPMENT_TOOLS)
-    if (diagnostic_device)
+    if (write_device_report)
     {
         LARGE_INTEGER driver_version{};
         const auto has_driver = SUCCEEDED(
@@ -170,13 +152,6 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
 #endif
 
     result = D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device));
-    validation_status.device_creation_attempted = true;
-    validation_status.device_creation_hresult = static_cast<std::int32_t>(result);
-    validation_status.device_creation_succeeded = SUCCEEDED(result);
-    validation_status.device_created_after_requested_enable_calls =
-        (config.validation || config.gpu_validation) && SUCCEEDED(result) &&
-        validation_status.debug_layer_enable_called_before_device &&
-        (!config.gpu_validation || validation_status.gpu_validation_enable_called_before_device);
     if (FAILED(result))
     {
         return HResultFailure("D3D12CreateDevice FL12_0", result);
@@ -243,6 +218,8 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
 #endif
     D3D12_FEATURE_DATA_D3D12_OPTIONS texture_options{};
     D3D12_FEATURE_DATA_D3D12_OPTIONS7 feedback_options{};
+    // The feedback support bit describes the opaque map. Its paired texture is sampled through an SRV.
+    D3D12_FEATURE_DATA_FORMAT_SUPPORT feedback_map_format{DXGI_FORMAT_SAMPLER_FEEDBACK_MIN_MIP_OPAQUE};
     D3D12_FEATURE_DATA_SHADER_MODEL feedback_shader_model{D3D_SHADER_MODEL_6_5};
     ComPtr<ID3D12Device8> feedback_device;
     const bool texture_options_available = SUCCEEDED(device->CheckFeatureSupport(
@@ -253,19 +230,22 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
         texture_options_available && texture_options.ResourceBindingTier >= D3D12_RESOURCE_BINDING_TIER_3 &&
         SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS7, &feedback_options, sizeof(feedback_options))) &&
         feedback_options.SamplerFeedbackTier != D3D12_SAMPLER_FEEDBACK_TIER_NOT_SUPPORTED &&
+        SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &feedback_map_format, sizeof(feedback_map_format))) &&
+        (feedback_map_format.Support2 & D3D12_FORMAT_SUPPORT2_SAMPLER_FEEDBACK) != 0 &&
         SUCCEEDED(device.As(&feedback_device)) &&
         SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &feedback_shader_model, sizeof(feedback_shader_model))) &&
         feedback_shader_model.HighestShaderModel >= D3D_SHADER_MODEL_6_5;
     texture_streaming_capabilities.packed_mip_arrays = texture_streaming_capabilities.tiled_resources &&
         texture_options.TiledResourcesTier >= D3D12_TILED_RESOURCES_TIER_4;
-    // Concrete DeferredLight pixel and adaptive GTAO consumers are integrated;
-    // selected-generation product and actual native admission remain separate.
-    feature_capabilities.adaptive_raster_consumer = true;
-    feature_capabilities.adaptive_compute_consumer = true;
-    reconstruction_configuration = config;
-    reconstruction_configuration.dynamic_resolution = EffectiveDynamicResolution(
-        config.dynamic_resolution, ResolveFeatures(config));
-    if (auto resolved = ResolveNativeReconstruction(reconstruction_configuration,
+    const auto has_shader = [&](const auto &id) {
+        return config.product_paths.contains(id) || FindRendererBulk(config, id);
+    };
+    const bool has_classifier = has_shader("render/shader/adaptive_shading_classify_cs.dxil");
+    feature_capabilities.adaptive_raster_consumer =
+        has_classifier && has_shader("render/shader/adaptive_shading_rate_cs.dxil");
+    feature_capabilities.adaptive_compute_consumer = has_classifier && has_shader(kAoAdaptiveShaderProduct);
+    const bool dynamic_resolution = config.dynamic_resolution;
+    if (auto resolved = ResolveNativeReconstruction(config, dynamic_resolution,
             {view.width, view.height}, view.reconstruction_plan, capacity); !resolved) return resolved;
     view.render_width = capacity.width;
     view.render_height = capacity.height;
@@ -278,7 +258,7 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
                 config.artifact_directory.empty() ? std::filesystem::path{} :
                 config.artifact_directory / "pso-cache", config.capture_timing_stream); !cached) return cached;
     if (auto prepared = PrepareReconstructionProvider(config.reconstruction_request
-            ? &*config.reconstruction_request : nullptr, reconstruction_configuration.dynamic_resolution,
+            ? &*config.reconstruction_request : nullptr, dynamic_resolution,
             config.dynamic_min_percent, config.dynamic_max_percent, {view.width, view.height},
             view.reconstruction_plan, capacity, view.reconstruction_provider, &config); !prepared) return prepared;
     if (view.reconstruction_provider)
@@ -292,7 +272,7 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
             view.reconstruction_provider.reset();
             // Targets have not been allocated yet, so initial native context
             // failure can resolve the complete InternalTAAU fallback extent.
-            if (auto resolved = ResolveNativeReconstruction(reconstruction_configuration, {view.width, view.height},
+            if (auto resolved = ResolveNativeReconstruction(config, dynamic_resolution, {view.width, view.height},
                     view.reconstruction_plan, capacity); !resolved) return resolved;
             view.reconstruction_plan.requested_availability = unavailable;
             view.reconstruction_plan.fallback = ReconstructionFallback::ProviderUnavailable;
@@ -323,12 +303,12 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
         SUCCEEDED(device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12, &options12,
                                               sizeof(options12))) &&
         options12.EnhancedBarriersSupported;
-    if (configuration.barrier_mode == BarrierMode::Enhanced && !supports_enhanced)
+    if (config.barrier_mode == BarrierMode::Enhanced && !supports_enhanced)
     {
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Enhanced barriers requested but unsupported.");
     }
-    enhanced = supports_enhanced && configuration.barrier_mode != BarrierMode::Legacy;
+    enhanced = supports_enhanced && config.barrier_mode != BarrierMode::Legacy;
 
     D3D12_FEATURE_DATA_D3D12_OPTIONS7 options7{};
     D3D12_FEATURE_DATA_SHADER_MODEL shader_model{D3D_SHADER_MODEL_6_5};
@@ -341,20 +321,20 @@ Result D3D12Renderer::Impl::CreateDevice(const RendererConfig &configuration, Ow
             &shader_model, sizeof(shader_model))) &&
         shader_model.HighestShaderModel >= D3D_SHADER_MODEL_6_5 &&
         SUCCEEDED(device.As(&mesh_device));
-    if (configuration.geometry_frontend == GeometryFrontend::MeshShader &&
+    if (config.geometry_frontend == GeometryFrontend::MeshShader &&
         !mesh_shader_supported)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
             "Mesh Shader frontend requested but the device lacks mesh tier 1/SM 6.5 support.");
     // Automatic keeps the indexed profile until end-to-end frontend costs are measured.
-    mesh_shader_enabled = configuration.geometry_frontend == GeometryFrontend::MeshShader;
+    mesh_shader_enabled = config.geometry_frontend == GeometryFrontend::MeshShader;
 #if defined(HS_DEVELOPMENT_TOOLS)
-    if (diagnostic_device)
+    if (write_device_report)
     {
         std::ofstream(config.artifact_directory / "adapter.txt", std::ios::app)
         << "mesh_shader_supported=" << mesh_shader_supported << '\n'
         << "geometry_frontend=" << (mesh_shader_enabled ? "mesh" : "indexed") << '\n'
         << "surface_frontend="
-        << (configuration.surface_frontend == SurfaceFrontend::VisibilityBuffer ? "visibility"
+        << (config.surface_frontend == SurfaceFrontend::VisibilityBuffer ? "visibility"
                                                                                  : "compact")
         << '\n';
     }
@@ -690,7 +670,7 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
 
     const auto publish = [&]() -> GpuPassTimings {
 #if defined(HS_DEVELOPMENT_TOOLS)
-        if (config.capture_timing_stream && timings.completed_frame_id &&
+        if (frame.timing_mode == GpuTimingMode::Full && timings.completed_frame_id &&
             frame.timing_stream_published_frame_id != timings.completed_frame_id)
         {
             constexpr std::size_t frame_limit = 240, pass_limit = 262144;
@@ -727,9 +707,7 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
     timings.cpu_recording_valid = frame.cpu_recording_ms_valid &&
         std::isfinite(frame.cpu_recording_ms) && frame.cpu_recording_ms >= 0.0f;
     timings.passes = frame.timestamp_passes;
-    if (timings.passes.empty() || timings.passes.size() > frame.timestamp_capacity ||
-        frame.timestamp_frequencies.size() != timings.passes.size() ||
-        frame.timestamp_pass_query_slots.size() != timings.passes.size())
+    if (timings.passes.empty() || timings.passes.size() > frame.timestamp_capacity)
     {
         for (auto &pass : timings.passes) pass.measured = false;
         return publish();
@@ -799,9 +777,9 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
         else
 #endif
         {
-            query_slot = frame.timestamp_pass_query_slots[slot];
+            query_slot = static_cast<std::uint32_t>(slot);
             if (queue_index < frame.mapped_timestamps.size()) mapped = frame.mapped_timestamps[queue_index];
-            frequency = frame.timestamp_frequencies[slot];
+            frequency = graph_queue_executor.TimestampFrequency(static_cast<QueueHint>(pass.queue));
         }
         if (query_slot >= capacity || !mapped)
         {
@@ -1022,21 +1000,15 @@ GpuPassTimings D3D12Renderer::Impl::ReadFrameGpuTimings(const FrameContext &fram
     if (begin_pass.queue != RenderQueue::Direct || end_pass.queue != RenderQueue::Direct ||
         !begin_pass.measured || !end_pass.measured)
         return publish();
-    UINT64 direct_frequency{};
-    const auto begin_query_slot = frame.timestamp_pass_query_slots[begin_slot];
-    const auto end_query_slot = frame.timestamp_pass_query_slots[end_slot];
-    if (!queue || FAILED(queue->GetTimestampFrequency(&direct_frequency)) || direct_frequency == 0 ||
-        frame.timestamp_frequencies[begin_slot] != direct_frequency ||
-        frame.timestamp_frequencies[end_slot] != direct_frequency)
+    const auto direct_frequency = begin_pass.timestamp_frequency;
+    if (direct_frequency == 0 || end_pass.timestamp_frequency != direct_frequency)
         return publish();
 
     // Both endpoints share the Direct queue clock. ReferenceGraphSpan is retained
     // for explicit legacy diagnostics. OutputDependencyInterval ends at the
     // Present read of the output and excludes unrelated work outside its closure.
-    if (begin_query_slot >= frame.timing_layout_capacity || end_query_slot >= frame.timing_layout_capacity)
-        return publish();
-    const auto begin = frame.mapped_timestamps[static_cast<std::size_t>(QueueHint::Direct)][begin_query_slot * 2];
-    const auto end = frame.mapped_timestamps[static_cast<std::size_t>(QueueHint::Direct)][end_query_slot * 2 + 1];
+    const auto begin = begin_pass.begin_ticks;
+    const auto end = end_pass.end_ticks;
     if (end <= begin) return publish();
     timings.critical_path_ms = static_cast<double>(
         static_cast<long double>(end - begin) * 1000.0L / direct_frequency);
@@ -1067,13 +1039,13 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
     empty.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
     empty.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
     empty.Buffer.NumElements = 1;
-    auto destination = heap->GetCPUDescriptorHandleForHeapStart();
-    const auto count = heap->GetDesc().NumDescriptors;
+    const auto heap_start = heap->GetCPUDescriptorHandleForHeapStart();
+    auto destination = heap_start;
     const auto stride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
     // SRV is the default for texture/geometry slots. Root tables also declare
     // CBVs and UAVs even when their feature is inactive; initialize those types
     // below before a complete-bank copy can publish or clone the table.
-    for (UINT index = 0; index < count; ++index)
+    for (UINT index = 0; index < kTextureDescriptorCount; ++index)
     {
         device->CreateShaderResourceView(nullptr, &empty, destination);
         destination.ptr += stride;
@@ -1097,107 +1069,114 @@ void D3D12Renderer::Impl::InitializeCanonicalDescriptors(ID3D12DescriptorHeap *h
     empty_uav.Format = DXGI_FORMAT_R32_UINT;
     empty_uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
     empty_uav.Buffer.NumElements = 1;
-    const auto heap_start = heap->GetCPUDescriptorHandleForHeapStart();
-    for (UINT frame = 0; frame < count / kTextureDescriptorCount; ++frame)
-    {
-        const auto frame_offset = static_cast<SIZE_T>(frame) * kTextureDescriptorCount;
-        const auto cpu = [&](UINT offset) {
-            auto handle = heap_start;
-            handle.ptr += (frame_offset + offset) * stride;
-            return handle;
-        };
-        const auto create_null_texture = [&](UINT offset, D3D12_SRV_DIMENSION dimension,
-                                             DXGI_FORMAT format) {
-            D3D12_SHADER_RESOURCE_VIEW_DESC view{};
-            view.Format = format;
-            view.ViewDimension = dimension;
-            view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            if (dimension == D3D12_SRV_DIMENSION_TEXTURE2D)
-                view.Texture2D.MipLevels = 1;
-            else if (dimension == D3D12_SRV_DIMENSION_TEXTURE2DARRAY)
-            {
-                view.Texture2DArray.MipLevels = 1;
-                view.Texture2DArray.ArraySize = 1;
-            }
-            device->CreateShaderResourceView(nullptr, &view, cpu(offset));
-        };
-
-        D3D12_SHADER_RESOURCE_VIEW_DESC terrain_sections_null{};
-        terrain_sections_null.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        terrain_sections_null.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
-        terrain_sections_null.Buffer.NumElements=1;terrain_sections_null.Buffer.StructureByteStride=sizeof(GpuTerrainSection);
-        device->CreateShaderResourceView(nullptr,&terrain_sections_null,cpu(kTerrainPageDescriptorOffset+HS_TERRAIN_SECTION_SRV));
-        terrain_sections_null.Buffer.StructureByteStride=sizeof(GpuTerrainPlaneMip);
-        device->CreateShaderResourceView(nullptr,&terrain_sections_null,cpu(kTerrainPageDescriptorOffset+HS_TERRAIN_MIP_SRV));
-        for (UINT plane = 0; plane < kTerrainPagePlaneCapacity; ++plane)
-            create_null_texture(kTerrainPageDescriptorOffset+HS_TERRAIN_PLANE_SRV+plane,D3D12_SRV_DIMENSION_TEXTURE2D,
-                plane%3==0 ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM);
-        D3D12_UNORDERED_ACCESS_VIEW_DESC terrain_requests_null{};
-        terrain_requests_null.Format=DXGI_FORMAT_R32_UINT;
-        terrain_requests_null.ViewDimension=D3D12_UAV_DIMENSION_BUFFER;
-        terrain_requests_null.Buffer.NumElements=HS_TERRAIN_PAGE_TILE_CAPACITY;
-        device->CreateUnorderedAccessView(nullptr,nullptr,&terrain_requests_null,
-            cpu(kTerrainPageDescriptorOffset+HS_TERRAIN_REQUEST_DESCRIPTOR));
-        constexpr std::array post_table_offsets{
-            0u, kToneMapInputDescriptorOffset, kFxaaInputDescriptorOffset};
-        for (const auto table_offset : post_table_offsets)
-            for (UINT index = 0; index < kPostTextureDescriptorCount; ++index)
-                create_null_texture(table_offset + index, D3D12_SRV_DIMENSION_TEXTURE2D,
-                                    kPostTextureSrvFormats[index]);
-
-        UINT texture_offset = kPostTextureDescriptorCount;
-        for (UINT index = 0; index < kCharacterDescriptorCount; ++index)
-            create_null_texture(texture_offset++, kCharacterSrvDimensions[index],
-                                kCharacterSrvFormats[index]);
-        for (UINT index = 0; index < kMonsterPbrDescriptorCount; ++index)
-            create_null_texture(texture_offset++, kMonsterPbrSrvDimensions[index],
-                                kMonsterPbrSrvFormats[index]);
-        for (UINT index = 0; index < kEnvironmentDescriptorCount; ++index)
-            create_null_texture(texture_offset++, kEnvironmentSrvDimensions[index],
-                                kEnvironmentSrvFormats[index]);
-        create_null_texture(texture_offset++, D3D12_SRV_DIMENSION_TEXTURE2D,
-                            DXGI_FORMAT_R8G8B8A8_UNORM); // VfxGradientLut
-        create_null_texture(texture_offset++, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
-                            DXGI_FORMAT_R8G8B8A8_UNORM); // RibbonDetail
-        create_null_texture(texture_offset++, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
-                            DXGI_FORMAT_R8_UNORM); // VfxAuthoredMask
-        create_null_texture(texture_offset++, D3D12_SRV_DIMENSION_TEXTURE2D,
-                            DXGI_FORMAT_R8G8B8A8_UNORM); // VfxNoiseBasis
-        for (UINT index = 0; index < 3; ++index)
-            create_null_texture(texture_offset++, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
-                                index == 2 ? DXGI_FORMAT_R16G16_FLOAT
-                                           : DXGI_FORMAT_R8G8B8A8_UNORM); // VfxSmoke
-
-        for (const auto offset : cbv_offsets)
-            device->CreateConstantBufferView(nullptr, cpu(offset));
-        for (const auto range : uav_ranges)
-            for (UINT index = 0; index < range.count; ++index)
-                device->CreateUnorderedAccessView(nullptr, nullptr, &empty_uav, cpu(range.offset + index));
-
-        device->CopyDescriptorsSimple(kVolumetricDescriptorCount, cpu(kVolumetricFrameTableOffset),
-            cpu(kVolumetricDescriptorOffset), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        for (const auto &copy : kVolumetricFrameInputCopies)
-            device->CopyDescriptorsSimple(copy.count, cpu(kVolumetricFrameTableOffset + copy.target),
-                cpu(copy.source), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-
-        // Root table36 has an independent immutable CBV/SRV/UAV table per hero
-        // transparency phase, including phases not selected by this frame.
-        for (UINT phase = 0; phase < kLayeredTranslucencyPhaseCount; ++phase)
+    const auto cpu = [&](UINT offset) {
+        auto handle = heap_start;
+        handle.ptr += SIZE_T(offset) * stride;
+        return handle;
+    };
+    const auto create_null_texture = [&](UINT offset, D3D12_SRV_DIMENSION dimension,
+                                         DXGI_FORMAT format) {
+        D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+        view.Format = format;
+        view.ViewDimension = dimension;
+        view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        if (dimension == D3D12_SRV_DIMENSION_TEXTURE2D)
+            view.Texture2D.MipLevels = 1;
+        else if (dimension == D3D12_SRV_DIMENSION_TEXTURE2DARRAY)
         {
-            const auto offset = kLayeredTranslucencyDescriptorOffset + phase * kLayeredTranslucencyTableSize;
-            device->CreateConstantBufferView(nullptr, cpu(offset));
-            device->CreateUnorderedAccessView(nullptr, nullptr, &empty_uav, cpu(offset + kLayeredTranslucencyUavOffset));
+            view.Texture2DArray.MipLevels = 1;
+            view.Texture2DArray.ArraySize = 1;
         }
-    }
+        device->CreateShaderResourceView(nullptr, &view, cpu(offset));
+    };
+
+    create_null_texture(kDecalSurfaceDescriptorOffset + kDecalSurfaceExportOffset + 3u,
+        D3D12_SRV_DIMENSION_TEXTURE2D, DXGI_FORMAT_R16G16B16A16_FLOAT);
+    D3D12_SHADER_RESOURCE_VIEW_DESC terrain_sections_null{};
+    terrain_sections_null.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+    terrain_sections_null.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
+    terrain_sections_null.Buffer.NumElements=1;terrain_sections_null.Buffer.StructureByteStride=sizeof(GpuTerrainSection);
+    device->CreateShaderResourceView(nullptr,&terrain_sections_null,cpu(kTerrainPageDescriptorOffset+HS_TERRAIN_SECTION_SRV));
+    terrain_sections_null.Buffer.StructureByteStride=sizeof(GpuTerrainPlaneMip);
+    device->CreateShaderResourceView(nullptr,&terrain_sections_null,cpu(kTerrainPageDescriptorOffset+HS_TERRAIN_MIP_SRV));
+    for (UINT plane = 0; plane < kTerrainPagePlaneCapacity; ++plane)
+        create_null_texture(kTerrainPageDescriptorOffset+HS_TERRAIN_PLANE_SRV+plane,D3D12_SRV_DIMENSION_TEXTURE2D,
+            plane%3==0 ? DXGI_FORMAT_BC7_UNORM_SRGB : DXGI_FORMAT_BC7_UNORM);
+    D3D12_UNORDERED_ACCESS_VIEW_DESC terrain_requests_null{};
+    terrain_requests_null.Format=DXGI_FORMAT_R32_UINT;
+    terrain_requests_null.ViewDimension=D3D12_UAV_DIMENSION_BUFFER;
+    terrain_requests_null.Buffer.NumElements=HS_TERRAIN_PAGE_TILE_CAPACITY;
+    device->CreateUnorderedAccessView(nullptr,nullptr,&terrain_requests_null,
+        cpu(kTerrainPageDescriptorOffset+HS_TERRAIN_REQUEST_DESCRIPTOR));
+    constexpr std::array post_table_offsets{
+        0u, kToneMapInputDescriptorOffset, kFxaaInputDescriptorOffset};
+    for (const auto table_offset : post_table_offsets)
+        for (UINT index = 0; index < kPostTextureDescriptorCount; ++index)
+            create_null_texture(table_offset + index, D3D12_SRV_DIMENSION_TEXTURE2D,
+                                kPostTextureSrvFormats[index]);
+
+    UINT texture_offset = kPostTextureDescriptorCount;
+    for (UINT index = 0; index < kCharacterDescriptorCount; ++index)
+        create_null_texture(texture_offset++, kCharacterSrvDimensions[index],
+                            kCharacterSrvFormats[index]);
+    for (UINT index = 0; index < kMonsterPbrDescriptorCount; ++index)
+        create_null_texture(texture_offset++, kMonsterPbrSrvDimensions[index],
+                            kMonsterPbrSrvFormats[index]);
+    for (UINT index = 0; index < kEnvironmentDescriptorCount; ++index)
+        create_null_texture(texture_offset++, kEnvironmentSrvDimensions[index],
+                            kEnvironmentSrvFormats[index]);
+    create_null_texture(texture_offset++, D3D12_SRV_DIMENSION_TEXTURE2D,
+                        DXGI_FORMAT_R8G8B8A8_UNORM); // VfxGradientLut
+    create_null_texture(texture_offset++, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+                        DXGI_FORMAT_R8G8B8A8_UNORM); // RibbonDetail
+    create_null_texture(texture_offset++, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+                        DXGI_FORMAT_R8_UNORM); // VfxAuthoredMask
+    create_null_texture(texture_offset++, D3D12_SRV_DIMENSION_TEXTURE2D,
+                        DXGI_FORMAT_R8G8B8A8_UNORM); // VfxNoiseBasis
+    for (UINT index = 0; index < 3; ++index)
+        create_null_texture(texture_offset++, D3D12_SRV_DIMENSION_TEXTURE2DARRAY,
+                            index == 2 ? DXGI_FORMAT_R16G16_FLOAT
+                                       : DXGI_FORMAT_R8G8B8A8_UNORM); // VfxSmoke
+
+    for (const auto offset : cbv_offsets)
+        device->CreateConstantBufferView(nullptr, cpu(offset));
+    for (const auto range : uav_ranges)
+        for (UINT index = 0; index < range.count; ++index)
+            device->CreateUnorderedAccessView(nullptr, nullptr, &empty_uav, cpu(range.offset + index));
+
+    device->CopyDescriptorsSimple(kVolumetricDescriptorCount, cpu(kVolumetricFrameTableOffset),
+        cpu(kVolumetricDescriptorOffset), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    for (const auto &copy : kVolumetricFrameInputCopies)
+        device->CopyDescriptorsSimple(copy.count, cpu(kVolumetricFrameTableOffset + copy.target),
+            cpu(copy.source), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+
+    InitializeNullTranslucencyDescriptors(device.Get(), cpu(kLayeredTranslucencyDescriptorOffset), stride);
+
+    // Every frame starts with the same typed descriptors in the CPU heap.
+    for (UINT frame = 1; frame < kFrameCount; ++frame)
+        device->CopyDescriptorsSimple(kTextureDescriptorCount, cpu(frame * kTextureDescriptorCount),
+            heap_start, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 }
-void D3D12Renderer::Impl::PublishFrameDescriptors(std::uint32_t slot) const noexcept
+void D3D12Renderer::Impl::PublishFrameDescriptors(std::uint32_t slot, D3D12_CPU_DESCRIPTOR_HANDLE decals,
+    D3D12_CPU_DESCRIPTOR_HANDLE translucency) const noexcept
 {
     StartupOperationScope startup_timing(RendererStartupOperation::DescriptorWrite);
     auto source = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     auto destination = srv_heap->GetCPUDescriptorHandleForHeapStart();
     const auto offset = static_cast<SIZE_T>(slot) * kTextureDescriptorCount * srv_stride;
     source.ptr += offset; destination.ptr += offset;
-    device->CopyDescriptorsSimple(kTextureDescriptorCount, destination, source,
+    if (!decals.ptr && !translucency.ptr)
+    {
+        device->CopyDescriptorsSimple(kTextureDescriptorCount, destination, source,
+            D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+        return;
+    }
+    const auto frame = [&](UINT index) { return D3D12_CPU_DESCRIPTOR_HANDLE{source.ptr + SIZE_T(index) * srv_stride}; };
+    const D3D12_CPU_DESCRIPTOR_HANDLE sources[]{source, decals.ptr ? decals : frame(kDecalSurfaceDescriptorOffset),
+        translucency.ptr ? translucency : frame(kLayeredTranslucencyDescriptorOffset), frame(kVolumetricFrameTableOffset)};
+    constexpr UINT counts[]{kDecalSurfaceDescriptorOffset, kDecalSurfaceDescriptorCount,
+        kLayeredTranslucencyDescriptorsPerFrame, kTextureDescriptorCount - kVolumetricFrameTableOffset};
+    device->CopyDescriptors(1, &destination, &kTextureDescriptorCount, static_cast<UINT>(std::size(sources)), sources, counts,
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
 }
 

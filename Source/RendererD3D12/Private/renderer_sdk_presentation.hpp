@@ -50,7 +50,8 @@ class SdkPresentation
                                          ID3D12Fence *, std::uint64_t value);
     // This is the sole actual Present call. It adds Present markers once, calls
     // native proxy Present, and records SDK completion/status even if DXGI fails.
-    [[nodiscard]] Result Present(IDXGISwapChain4 *, const SdkFrameIdentity &, UINT sync_interval, UINT flags);
+    [[nodiscard]] Result Present(IDXGISwapChain4 *, const SdkFrameIdentity &, UINT sync_interval, UINT flags,
+                                 bool &native_presented);
     // Abandoning a prepared frame requires actual completion of all graph
     // queues first; native drain still retires SDK asynchronous work.
     [[nodiscard]] Result DrainBeforeSwapChainMutation(bool abandon_completed_prepare = false);

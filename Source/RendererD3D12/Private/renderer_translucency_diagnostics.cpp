@@ -355,9 +355,7 @@ Result TranslucencyDiagnosticsCapture::BindRetainedBegin(RenderGraphBuilder &gra
         !inputs.work_draw || !inputs.direct_queue || !inputs.direct_timestamp_frequency ||
         !inputs.submitted_frame ||
         (layout.contributor_count &&
-            (layout.argument_copy_pass >= graph.PassCount() ||
-             graph.DeclaredPassId(layout.argument_copy_pass) != 118 ||
-             !graph.BindPass(layout.argument_copy_pass, 118))))
+            !graph.BindPass(layout.argument_copy_pass, 118)))
         return Fail("Translucency retained contributor layout or frame is invalid.");
     auto &slot = *impl_->slots[inputs.frame_slot];
     if (slot.pending || !slot.completion.IsSatisfiedBy(inputs.completed))

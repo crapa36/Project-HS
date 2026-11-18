@@ -5,6 +5,7 @@
 #include "renderer_asset_source.hpp"
 
 #include <filesystem>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <span>
@@ -13,6 +14,35 @@
 
 namespace hs
 {
+class AssetReadBuffer
+{
+  public:
+    struct HeapDelete
+    {
+        void operator()(std::byte *) const noexcept;
+    };
+
+    AssetReadBuffer() = default;
+    explicit AssetReadBuffer(std::size_t);
+    AssetReadBuffer(const AssetReadBuffer &) = delete;
+    AssetReadBuffer &operator=(const AssetReadBuffer &) = delete;
+    AssetReadBuffer(AssetReadBuffer &&) noexcept;
+    AssetReadBuffer &operator=(AssetReadBuffer &&) noexcept;
+    ~AssetReadBuffer() = default;
+
+    [[nodiscard]] std::byte *data() noexcept { return data_.get(); }
+    [[nodiscard]] const std::byte *data() const noexcept { return data_.get(); }
+    [[nodiscard]] std::size_t size() const noexcept { return size_; }
+    [[nodiscard]] bool empty() const noexcept { return size_ == 0; }
+    void Reset() noexcept;
+    [[nodiscard]] std::span<std::byte> Bytes() noexcept { return {data(), size_}; }
+    [[nodiscard]] std::span<const std::byte> Bytes() const noexcept { return {data(), size_}; }
+
+  private:
+    std::unique_ptr<std::byte[], HeapDelete> data_;
+    std::size_t size_{};
+};
+
 struct ImmutableAssetRead
 {
     StreamingRequestId request;
@@ -26,7 +56,7 @@ struct ImmutableAssetRead
 struct AssetReadCompletion
 {
     bool ready{}, cancelled{};
-    std::vector<std::byte> bytes;
+    AssetReadBuffer bytes;
     ResidencyTicket storage;
 };
 
@@ -41,9 +71,6 @@ class RendererAssetIo
     RendererAssetIo &operator=(const RendererAssetIo &) = delete;
     [[nodiscard]] Result Initialize(bool native_enabled, std::uint32_t staging_bytes,
                                     ResidencyManager &);
-    // A resident candidate shares only the native transport. Its read owners,
-    // request IDs, tickets and Generation leases remain independent.
-    [[nodiscard]] Result ShareTransportFrom(const RendererAssetIo &, ResidencyManager &);
     [[nodiscard]] Result Enqueue(ImmutableAssetRead, StreamingManager &, ResidencyManager &,
                                  ResidencyTicket existing_storage_reservation, bool &submitted,
                                  bool defer_native_submit = false);
@@ -51,7 +78,6 @@ class RendererAssetIo
     [[nodiscard]] Result Poll(StreamingRequestId, StreamingManager &, ResidencyManager &,
                               AssetReadCompletion &);
     void Cancel(StreamingRequestId, StreamingManager &) noexcept;
-    void CancelAll(StreamingManager &) noexcept;
     // Reclaim terminal cancelled owners without waiting or decoding them.
     [[nodiscard]] Result CollectCancelled(StreamingManager &, ResidencyManager &);
     [[nodiscard]] Result DrainSubmitted(StreamingManager &, ResidencyManager &);
@@ -62,6 +88,8 @@ class RendererAssetIo
   private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
+    [[nodiscard]] Result CompleteRead(StreamingRequestId, StreamingManager &, ResidencyManager &,
+                                      AssetReadCompletion &, bool wait);
     bool wait_for_reads_{};
 };
 } // namespace hs

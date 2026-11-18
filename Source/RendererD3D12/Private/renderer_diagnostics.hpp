@@ -21,8 +21,7 @@ struct CompletedRenderCadence
     double fps{};
 };
 
-// Storage is fixed at construction. Only an explicit snapshot creates bounded
-// output vectors; recording never retains strings/vectors or appends a log.
+// Storage is fixed at construction; snapshots aggregate directly from the ring.
 class RendererDiagnosticsRecorder
 {
   public:
@@ -33,36 +32,17 @@ class RendererDiagnosticsRecorder
         std::uint32_t view_id = 0) noexcept;
     void RecordCompleted(const GpuPassTimings &) noexcept;
     [[nodiscard]] bool HasCompleted(std::uint64_t frame_id, std::uint32_t view_id) const noexcept;
-    // Observe while old and candidate resources coexist. This reports actual
-    // observed transaction boundaries, never an interpolated or reserved peak.
-    void ObserveTransition(const RendererDiagnosticsMemory &) noexcept;
+    void ObserveTransition(std::uint64_t local_usage_bytes) noexcept;
     [[nodiscard]] RendererDiagnosticsSnapshot Snapshot() const;
     [[nodiscard]] const RendererDiagnosticsFrame &LastRenderedFrame() const noexcept
     { return frames_[(next_frame_ + frames_.size() - 1) % frames_.size()]; }
   private:
-    struct Pass
-    {
-        std::uint32_t pass_id{};
-        std::array<char, 96> name{};
-        RenderQueue queue{};
-        std::uint64_t nanoseconds{}, begin_ticks{}, end_ticks{}, timestamp_frequency{};
-        std::uint64_t begin_qpc{}, end_qpc{}, qpc_frequency{};
-        std::uint64_t cpu_qpc_frequency{};
-        std::uint64_t cpu_record_begin_qpc{}, cpu_record_end_qpc{};
-        std::uint64_t cpu_callback_begin_qpc{}, cpu_callback_end_qpc{};
-        std::uint64_t cpu_provider_submit_begin_qpc{}, cpu_provider_submit_end_qpc{};
-        bool cpu_record_valid{}, cpu_callback_valid{}, cpu_provider_submit_valid{};
-        bool measured{}, clock_calibrated{}, name_truncated{};
-    };
     std::array<RendererDiagnosticsFrame, kRendererDiagnosticsFrameCapacity> frames_{};
     std::uint64_t rendered_main_sequence_{};
-    std::array<Pass, kRendererDiagnosticsPassCapacity> passes_{};
-    std::size_t next_frame_{}, frame_count_{}, pass_count_{};
-    std::uint64_t last_rendered_id_{}, timeline_frame_id_{};
-    std::uint32_t timeline_view_id_{};
-    std::uint64_t rendered_{}, completed_{}, duplicates_{}, rejected_{};
-    bool timeline_truncated_{}, transition_observed_{};
-    RendererDiagnosticsMemory sampled_peak_{}, transition_peak_{};
+    std::size_t next_frame_{}, frame_count_{};
+    std::uint64_t last_rendered_id_{};
+    std::uint64_t rendered_{};
+    std::optional<std::uint64_t> transition_peak_local_usage_bytes_;
 };
 
 } // namespace hs

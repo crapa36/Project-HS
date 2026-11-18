@@ -39,8 +39,8 @@ public:
     [[nodiscard]] std::uint64_t PackSize() const noexcept { return pack_size_; }
 private:
     RendererCatalogData() = default;
-    friend Result DecodeRendererCatalog(std::span<const std::byte>, std::uint64_t,
-                                       std::shared_ptr<const RendererCatalogData> &);
+    friend Result DecodeVerifiedRendererCatalog(std::span<const std::byte>, std::uint64_t,
+                                               std::shared_ptr<const RendererCatalogData> &);
     std::uint64_t pack_size_{};
     std::vector<RendererBulkDescriptor> bulks;
     std::vector<TextureDescriptorStorage> texture_storage;
@@ -61,9 +61,10 @@ private:
 
 };
 
-[[nodiscard]] std::vector<std::byte> EncodeRendererCatalog(RendererCatalogView);
+[[nodiscard]] std::vector<std::byte> EncodeRendererCatalog(RendererCatalogView, std::uint64_t bulk_extent);
 // No pack bound for loose admitted metadata; a wire catalogue always supplies its pack size.
 [[nodiscard]] Result ValidateRendererCatalog(RendererCatalogView, std::optional<std::uint64_t> pack_size);
-[[nodiscard]] Result DecodeRendererCatalog(std::span<const std::byte>, std::uint64_t pack_size,
-                                            std::shared_ptr<const RendererCatalogData> &);
+// Input bytes must come from a table whose SHA was verified by the selected content owner.
+[[nodiscard]] Result DecodeVerifiedRendererCatalog(std::span<const std::byte>, std::uint64_t pack_size,
+                                                    std::shared_ptr<const RendererCatalogData> &);
 }

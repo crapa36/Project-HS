@@ -10,7 +10,6 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
-#include <span>
 
 namespace hs
 {
@@ -20,56 +19,112 @@ constexpr D3D12_RESOURCE_STATES kAllShaderRead =
     D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |
     D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
 
-render_data::TextureDescriptorStorage TextureStreamingDescriptor(
-    const RendererConfig &config, AssetId asset, std::span<const std::byte> bytes,
-    const render_data::TexturePackageView &package)
+UINT FallbackFirstMip(UINT mip_count)
 {
-    render_data::TextureDescriptor descriptor;
-    if (config.development_catalog)
-    {
-        const auto found = config.development_catalog->FindTexture(asset);
-        if (!found) throw std::runtime_error("Missing admitted development texture descriptor.");
-        descriptor = *found;
-    }
-    else if (config.packed_content)
-    {
-        const auto handle = FindRendererTexture(config, asset);
-        if (!handle) throw std::runtime_error("Missing packed texture descriptor.");
-        descriptor = config.packed_textures[handle.value];
-    }
-    else
-    {
-        render_data::TextureDescriptorStorage result;
-        result.asset_id = asset; result.description = package.description;
-        result.dependencies.reserve(package.dependencies.size());
-        for (const auto &dependency : package.dependencies) result.dependencies.push_back(MakeAssetId(dependency));
-        result.subresources.reserve(package.subresources.size());
-        for (const auto &subresource : package.subresources)
-            result.subresources.push_back({static_cast<std::uint64_t>(subresource.bytes.data() - bytes.data()),
-                subresource.row_pitch, subresource.slice_pitch, static_cast<std::uint32_t>(subresource.bytes.size()),
-                Sha256(subresource.bytes), true});
-        return result;
-    }
-    return {descriptor.asset_id, descriptor.bulk_index, descriptor.description,
-        std::vector<AssetId>(descriptor.dependencies.begin(), descriptor.dependencies.end()),
-        std::vector<render_data::TextureSubresourceLayout>(descriptor.subresources.begin(), descriptor.subresources.end()),
-        descriptor.dimension, descriptor.depth};
+    return std::min(4u, mip_count - 1u);
 }
+
+Result ReadFallbackTexture(const RendererConfig &config, const std::string &id,
+    const RendererAssetSource &source, render_data::TextureHandle handle,
+    std::vector<std::byte> &storage, render_data::TexturePackageView &package)
+{
+    if (!source.IsPacked())
+    {
+        if (auto read = ReadBinary(source, storage); !read) return read;
+        package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] {
+            return handle ? render_data::BindTextureDescriptor(storage, config.packed_textures[handle.value])
+                          : ReadRendererTexturePackage(config, id, storage);
+        });
+        return Result::Success();
+    }
+
+    if (!handle) handle = FindRendererTexture(config, MakeAssetId(id));
+    if (!handle || config.packed_textures[handle.value].dimension != render_data::TextureDimension::Texture2DArray)
+        return Result::Failure(ErrorCode::InvalidState, "RendererPack", "Missing 2D texture descriptor: " + id);
+    const auto &descriptor = config.packed_textures[handle.value];
+    const auto &desc = descriptor.description;
+    const UINT first_mip = FallbackFirstMip(desc.mip_count);
+    // Catalogue admission proves that each slice's mip chain is contiguous.
+    const auto &first = descriptor.subresources[first_mip];
+    const auto &last = descriptor.subresources[desc.mip_count - 1];
+    const auto slice_bytes = static_cast<std::size_t>(last.offset + last.byte_count - first.offset);
+    storage.resize(slice_bytes * desc.array_size);
+    package.description = desc;
+    package.subresources.resize(descriptor.subresources.size());
+    StartupOperationScope read_timing(RendererStartupOperation::CheckedBinaryRead);
+    const auto &packed = source.Packed();
+    std::uint64_t product_bytes{};
+    if (auto checked = source.ByteCount(product_bytes); !checked) return checked;
+    for (UINT slice = 0; slice < desc.array_size; ++slice)
+    {
+        const auto layouts = descriptor.subresources.subspan(std::size_t{slice} * desc.mip_count, desc.mip_count);
+        const auto start = layouts[first_mip].offset;
+        if (start > product_bytes || slice_bytes > product_bytes - start)
+            return Result::Failure(ErrorCode::InvalidState, "RendererPack", "Texture mip chain exceeds its bulk: " + id);
+        auto bytes = std::span(storage).subspan(std::size_t{slice} * slice_bytes, slice_bytes);
+        if (auto read = packed.owner->ReadExact(packed.range.offset + start, bytes); !read) return read;
+        for (UINT mip = first_mip; mip < desc.mip_count; ++mip)
+        {
+            const auto &row = layouts[mip];
+            package.subresources[std::size_t{slice} * desc.mip_count + mip] = {slice, mip,
+                std::max(1u, desc.width >> mip), std::max(1u, desc.height >> mip), row.row_pitch, row.slice_pitch,
+                bytes.subspan(static_cast<std::size_t>(row.offset - start), row.byte_count)};
+        }
+    }
+    return Result::Success();
+}
+
 } // namespace
 
+auto D3D12Renderer::Impl::TerrainSectionFrom(const RenderInstance &r) -> std::optional<TerrainSection>
+{
+    const bool meadow=render_data::EnvironmentGeometryOrdinal(r.mesh,r.environment_variant)==render_data::kMeadowGeometryBegin;
+    if(!meadow && r.mesh!=RenderMesh::Ground && r.mesh!=RenderMesh::DirtPatch) return {};
+    const float span=meadow?24.f:1.f;
+    return TerrainSection{r.position.x,r.position.z,r.scale.x*span,r.scale.z*span,
+        std::cos(r.yaw),std::sin(r.yaw),static_cast<UINT>(r.mesh),r.environment_seed};
+}
+
+auto D3D12Renderer::Impl::GpuTerrainSection::From(const TerrainSection &section, const RenderInstance &source)
+    -> GpuTerrainSection
+{
+    return {.center = {section.x, section.z}, .span = {section.span_x, section.span_z},
+        .rotation = {section.cosine, section.sine}, .mesh = section.mesh, .seed = section.seed,
+        .pageSlice = UINT_MAX, .heightTransform = {source.position.y, source.scale.y}};
+}
+
+Result D3D12Renderer::Impl::TerrainPageSourceIdentity(std::array<std::byte,32> &identity) const
+{
+    Sha256Stream hash;
+    const auto add=[&](std::string_view value) {
+        hash.Add(std::as_bytes(std::span(value.data(),value.size())));
+        constexpr std::byte separator{}; hash.Add(std::span(&separator,1));
+    };
+    add("project-hs.terrain-surface.source.v6");
+    const auto digest=[&](std::string_view id)->Result {
+        const auto value=RendererProductDigest(config,id,false);
+        if(value.empty()) return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Missing terrain source digest: "+std::string(id));
+        add(id); add(value); return Result::Success();
+    };
+    for(const auto &id:environment_material_bindings[kTerrainMaterialOrdinal].product_ids)
+        if(auto r=digest(id);!r) return r;
+    for(const auto id:{"terrain/producer/bake_cs.dxil","terrain/producer/mip_cs.dxil",
+                       "render/meadow_ground.rpkg"})
+        if(auto r=digest(id);!r) return r;
+    identity=hash.Finish(); return Result::Success();
+}
+
 Result D3D12Renderer::Impl::PrepareMaterialParameters(
-    const RendererConfig &candidate, bool require_compatible_layout, MaterialPreparationScope scope)
+    const RendererConfig &candidate, MaterialPreparationScope scope)
 {
     if (material_parameter_upload_pending)
         return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                "Material parameter upload is still in flight.");
     material_parameter_candidate.Reset();
-    material_parameter_candidate_counts.fill(0);
-    material_parameter_candidate_bases.fill(0);
-    for (auto &layout : material_parameter_candidate_layouts) layout.clear();
+    material_parameter_counts.fill(0);
+    material_parameter_bases.fill(0);
     material_parameter_upload.Reset();
-    auto &slots = material_parameter_candidate_slots;
-    slots.clear();
+    std::vector<render_data::MaterialParameterSlot> slots;
     try
     {
         const auto material_count = scope == MaterialPreparationScope::StaticEnvironment
@@ -79,59 +134,18 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
             const bool hero = ordinal >= kAuthoredMaterialNames.size();
             const auto name = hero ? kCharacterMaterialNames[ordinal - kAuthoredMaterialNames.size()]
                                    : kAuthoredMaterialNames[ordinal];
-            const std::string id = "render/material/" +
-                std::string(name) + "/parameters.rpkg";
             const auto material_id = render_data::MaterialProduct(name);
-            if (candidate.packed_content || candidate.development_catalog)
-            {
-                const auto handle = FindRendererMaterial(candidate, MakeAssetId(material_id));
-                if (!handle) throw std::runtime_error("Missing compiled material parameters: " + material_id);
-                const auto &material = candidate.packed_materials[handle.value];
-                const auto layout = MaterialLayoutDigest(material);
-                const auto base = static_cast<std::uint32_t>(slots.size());
-                if (require_compatible_layout && (layout != material_parameter_layouts[ordinal] ||
-                    base != material_parameter_bases[ordinal]))
-                    throw std::runtime_error("Compiled material parameter reload changes the resident layout: " + material_id);
-                material_parameter_candidate_layouts[ordinal] = layout;
-                material_parameter_candidate_bases[ordinal] = base;
-                material_parameter_candidate_counts[ordinal] =
-                    static_cast<std::uint32_t>(material.defaults.size());
-                slots.insert(slots.end(), material.defaults.begin(), material.defaults.end());
-                continue;
-            }
-            RendererAssetSource path;
-            if (auto resolved = ResolveRendererAsset(candidate, id, path); !resolved) return resolved;
-            std::vector<std::byte> bytes;
-            if (auto read = ReadBinary(path, bytes); !read) return read;
-            const auto definitions = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::ReadMaterialParameterPackage(bytes, MakeAssetId(id)); });
-            for (const std::string_view required : {"metallic", "roughness_scale"})
-                if (!hero && std::ranges::find(definitions, required,
-                        &render_data::MaterialParameterDefinition::id) == definitions.end())
-                    return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                        "Material parameter declaration is missing: " + std::string(required));
-            material_parameter_candidate_layouts[ordinal] =
-                render_data::MaterialParameterLayoutHash(definitions);
-            const auto &material = material_headers[ordinal].view;
-            const auto layout = std::ranges::find(material.chunks,
-                render_data::ChunkType::MaterialParameterLayout, &render_data::ChunkView::type);
-            if (layout == material.chunks.end() || !layout->required || layout->version != 1 ||
-                layout->count != 1 || layout->stride != 32 ||
-                MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return render_data::DecodeMaterialParameterLayout(layout->bytes); }) !=
-                    material_parameter_candidate_layouts[ordinal])
-                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                    "Material parameter layout disagrees with its shader/material package: " + id);
-            material_parameter_candidate_bases[ordinal] = static_cast<std::uint32_t>(slots.size());
-            material_parameter_candidate_counts[ordinal] =
-                static_cast<std::uint32_t>(definitions.size());
-            if (require_compatible_layout &&
-                (material_parameter_candidate_layouts[ordinal] != material_parameter_layouts[ordinal] ||
-                 material_parameter_candidate_bases[ordinal] != material_parameter_bases[ordinal]))
-                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                    "Material parameter reload changes the resident layout: " + id);
-            for (const auto &definition : definitions) slots.push_back({definition.default_words});
+            const auto handle = FindRendererMaterial(candidate, MakeAssetId(material_id));
+            if (!handle) throw std::runtime_error("Missing compiled material parameters: " + material_id);
+            const auto &material = candidate.packed_materials[handle.value];
+            const auto base = static_cast<std::uint32_t>(slots.size());
+            material_parameter_bases[ordinal] = base;
+            material_parameter_counts[ordinal] =
+                static_cast<std::uint32_t>(material.defaults.size());
+            slots.insert(slots.end(), material.defaults.begin(), material.defaults.end());
         }
         if (scope == MaterialPreparationScope::Resident)
-            if (auto prepared = PrepareDecalMaterialParameters(candidate, require_compatible_layout, slots); !prepared)
+            if (auto prepared = PrepareDecalMaterialParameters(candidate, slots); !prepared)
                 return prepared;
 
         const auto max_slot_count = scope == MaterialPreparationScope::StaticEnvironment
@@ -140,46 +154,7 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
         if (slots.empty() || slots.size() > max_slot_count)
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                    "Invalid material parameter slot count.");
-        material_parameter_candidate_slot_count = static_cast<std::uint32_t>(slots.size());
-        for (std::size_t ordinal = 0; ordinal < kResidentMaterialCount; ++ordinal)
-        {
-            bool changed = true;
-            if (material_parameters.resource &&
-                material_parameter_counts[ordinal] == material_parameter_candidate_counts[ordinal] &&
-                material_parameter_bases[ordinal] == material_parameter_candidate_bases[ordinal] &&
-                material_parameter_layouts[ordinal] == material_parameter_candidate_layouts[ordinal])
-            {
-                const auto old_slots = std::span<const render_data::MaterialParameterSlot>(
-                    material_parameter_slots).subspan(material_parameter_bases[ordinal],
-                        material_parameter_counts[ordinal]);
-                const auto next_slots = std::span<const render_data::MaterialParameterSlot>(
-                    material_parameter_candidate_slots).subspan(material_parameter_candidate_bases[ordinal],
-                        material_parameter_candidate_counts[ordinal]);
-                changed = !std::ranges::equal(old_slots, next_slots);
-            }
-            material_parameter_candidate_changed[ordinal] = changed;
-        }
-        Sha256Stream generation_hash;
-        generation_hash.Add(std::as_bytes(std::span(material_parameter_candidate_bases).first(
-            kAuthoredMaterialNames.size())));
-        generation_hash.Add(std::as_bytes(std::span(material_parameter_candidate_counts).first(
-            kAuthoredMaterialNames.size())));
-        for (std::size_t ordinal = 0; ordinal < kAuthoredMaterialNames.size(); ++ordinal)
-        {
-            const auto &layout = material_parameter_candidate_layouts[ordinal];
-            const auto layout_size = static_cast<std::uint64_t>(layout.size());
-            generation_hash.Add(std::as_bytes(std::span(&layout_size, 1)));
-            generation_hash.Add(std::as_bytes(std::span(layout.data(), layout.size())));
-        }
-        const auto authored_end = material_parameter_candidate_bases[kAuthoredMaterialNames.size() - 1] +
-            material_parameter_candidate_counts[kAuthoredMaterialNames.size() - 1];
-        generation_hash.Add(std::as_bytes(std::span(material_parameter_candidate_slots).first(authored_end)));
-        material_parameter_candidate_generation_digest = generation_hash.Finish();
-        const auto begin = material_parameter_candidate_bases[kTerrainMaterialOrdinal];
-        const auto end = material_parameter_candidate_bases[kTerrainMaterialOrdinal + 1];
-        Sha256Stream hash;
-        hash.Add(std::as_bytes(std::span(material_parameter_candidate_slots).subspan(begin, end - begin)));
-        material_parameter_candidate_terrain_digest = hash.Finish();
+        material_parameter_slot_count = static_cast<std::uint32_t>(slots.size());
     }
     catch (const std::exception &error)
     {
@@ -237,34 +212,9 @@ Result D3D12Renderer::Impl::PrepareMaterialParameters(
 
 void D3D12Renderer::Impl::CommitMaterialParameters() noexcept
 {
-    for (std::size_t ordinal = 0; ordinal < kResidentMaterialCount; ++ordinal)
-        if (material_parameter_candidate_changed[ordinal])
-            material_parameter_revisions[ordinal] = material_parameter_revision + 1u;
-    if (!generation_material_parameters_valid)
-    {
-        generation_material_parameters = material_parameter_candidate_generation_digest;
-        generation_material_parameters_valid = true;
-    }
-    material_parameters_match_generation =
-        material_parameter_candidate_generation_digest == generation_material_parameters;
-    if (!terrain_generation_parameters_valid)
-    {
-        terrain_generation_parameters = material_parameter_candidate_terrain_digest;
-        terrain_generation_parameters_valid = true;
-    }
-    const bool matches = material_parameter_candidate_terrain_digest == terrain_generation_parameters;
-    terrain_parameters_changed |= matches != terrain_parameters_match;
-    terrain_parameters_match = matches;
     // Preparation completed and drained all readers. Publishing every frame
     // slot together prevents raster, shadow and compute observing mixed values.
     material_parameters = std::move(material_parameter_candidate);
-    material_parameter_slot_count = material_parameter_candidate_slot_count;
-    ++material_parameter_revision;
-    material_parameter_bases = material_parameter_candidate_bases;
-    material_parameter_counts = material_parameter_candidate_counts;
-    material_parameter_layouts = std::move(material_parameter_candidate_layouts);
-    material_parameter_slots = std::move(material_parameter_candidate_slots);
-    CommitDecalMaterialParameters();
     D3D12_SHADER_RESOURCE_VIEW_DESC view{};
     view.Format = DXGI_FORMAT_UNKNOWN;
     view.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
@@ -308,7 +258,6 @@ Result D3D12Renderer::Impl::CreateEnvironmentTextures()
     };
     static_assert(std::size(specs) == kEnvironmentTextureCount);
     constexpr UINT kStreamTextureIndex = 0;
-    constexpr UINT kFallbackFirstMip = 4;
     environment_fallback_residency = {};
     environment_material_textures.clear();
     environment_material_bindings = {};
@@ -333,14 +282,13 @@ Result D3D12Renderer::Impl::CreateEnvironmentTextures()
         if (auto resolved = ResolveRendererAsset(config, logical_id, path); !resolved)
             return resolved;
         std::vector<std::byte> storage;
-        if (auto read = ReadBinary(path, storage); !read) return read;
         render_data::TexturePackageView package;
         auto invalid = [&] { return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
             "Invalid environment texture: " + path.Describe(logical_id)); };
         {
             try
             {
-                package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] { return ReadRendererTexturePackage(config, logical_id, storage); });
+                if (auto read = ReadFallbackTexture(config, logical_id, path, {}, storage, package); !read) return read;
             }
             catch (const std::exception &error)
             {
@@ -355,19 +303,8 @@ Result D3D12Renderer::Impl::CreateEnvironmentTextures()
                 !RendererTextureDependencyMatches(config, logical_id, package, source_id) ||
                 package.subresources.size() != spec.slices * spec.mips)
                 return invalid();
-            try
-            {
-                auto descriptor = TextureStreamingDescriptor(config, MakeAssetId(logical_id), storage, package);
-                if (auto supplied = texture_streaming.SupplyDescriptor(logical_id, std::move(descriptor)); !supplied)
-                    return supplied;
-            }
-            catch (const std::exception &error)
-            {
-                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-                    "Could not retain environment texture streaming metadata: " + std::string(error.what()));
-            }
         }
-        const auto source_mip_base = std::min(kFallbackFirstMip, spec.mips - 1u);
+        const auto source_mip_base = FallbackFirstMip(spec.mips);
         const auto target_mips = spec.mips - source_mip_base;
         const auto target_width = std::max(1u, spec.width >> source_mip_base);
         const auto target_height = std::max(1u, spec.height >> source_mip_base);
@@ -544,22 +481,8 @@ Result D3D12Renderer::Impl::LoadEnvironmentMaterialTexture(
     }
     else if (auto resolved = ResolveRendererAsset(config, binding.product_id, path); !resolved) return resolved;
     std::vector<std::byte> bytes;
-    if (auto read = ReadBinary(path, bytes); !read) return read;
-    const auto package = MeasureStartupOperation(RendererStartupOperation::PackageDecodeValidate, [&] {
-        return compiled_texture ? render_data::BindTextureDescriptor(bytes, config.packed_textures[compiled_texture.value]) :
-            ReadRendererTexturePackage(config, binding.product_id, bytes);
-    });
-    try
-    {
-        auto descriptor = TextureStreamingDescriptor(config, MakeAssetId(binding.product_id), bytes, package);
-        if (auto supplied = texture_streaming.SupplyDescriptor(binding.product_id, std::move(descriptor)); !supplied)
-            return supplied;
-    }
-    catch (const std::exception &error)
-    {
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-            "Could not retain texture streaming metadata: " + std::string(error.what()));
-    }
+    render_data::TexturePackageView package;
+    if (auto read = ReadFallbackTexture(config, binding.product_id, path, compiled_texture, bytes, package); !read) return read;
     render_data::ValidateMaterialTexturePackage(binding, package.description, required_layer);
     if (config.development_catalog)
     {
@@ -587,7 +510,7 @@ Result D3D12Renderer::Impl::LoadEnvironmentMaterialTexture(
             return resolved;
     }
     const auto &source_description = package.description;
-    const auto first_mip = std::min(4u, source_description.mip_count - 1u);
+    const auto first_mip = FallbackFirstMip(source_description.mip_count);
     const auto target_mips = source_description.mip_count - first_mip;
     D3D12_RESOURCE_DESC description{};
     description.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
@@ -679,19 +602,12 @@ void D3D12Renderer::Impl::WriteEnvironmentMaterialTextureDescriptor(
     std::uint32_t frame_slot, std::uint32_t material, std::uint32_t slot,
     ID3D12Resource *resource) const noexcept
 {
-    StartupOperationScope startup_timing(RendererStartupOperation::DescriptorWrite);
-    auto handle = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     auto &bank = environment_descriptor_banks[frame_slot];
-    if (bank.heap.Get() != srv_cpu_heap.Get() || bank.first.ptr != handle.ptr || bank.stride != srv_stride)
-    {
-        bank = {};
-        bank.heap = srv_cpu_heap;
-        bank.first = handle;
-        bank.stride = srv_stride;
-    }
     auto &entry = bank.entries[material * render_data::kMaterialTextureSlots + slot];
     // This fixed SRV depends only on the retained resource's immutable native description.
     if (entry.written && entry.resource.Get() == resource) return;
+    StartupOperationScope startup_timing(RendererStartupOperation::DescriptorWrite);
+    auto handle = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     handle.ptr += (static_cast<SIZE_T>(frame_slot) * kTextureDescriptorCount +
                    kMaterialTextureDescriptorOffset +
                    material * render_data::kMaterialTextureSlots + slot) * srv_stride;
@@ -731,84 +647,6 @@ void D3D12Renderer::Impl::PublishEnvironmentMaterialTextures(std::uint32_t frame
             if (streamed.resource) resource = streamed.resource;
             WriteEnvironmentMaterialTextureDescriptor(frame_slot, material, slot, resource);
         }
-}
-
-Result D3D12Renderer::Impl::PrepareHardwareTextureStreaming(const RendererAssetIo *live_transport)
-{
-    if (resource_generation_id.empty() || !resident_generation_lease)
-        return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
-            "Hardware asset streaming requires the actual resident Generation lease.");
-    if (auto result = UpdateResidencyBudget(); !result) return result;
-    if (live_transport && live_transport->NativeEnabled() && !config.packed_content)
-    {
-        if (auto result = asset_io.ShareTransportFrom(*live_transport, residency); !result) return result;
-    }
-    else if (auto result = asset_io.Initialize(HS_WITH_DIRECTSTORAGE != 0 && !config.packed_content, 32u * 1024u * 1024u, residency); !result)
-        return result;
-    if (auto result = texture_streaming.Initialize(device.Get(), allocator, config.texture_quality,
-        QualityProfileFor(config.texture_quality).texture_finest_mip, config.texture_budget_mib, texture_streaming_capabilities, kFrameCount, config.packed_textures); !result) return result;
-    if (auto result = texture_feedback.Initialize(device.Get(), allocator,
-        texture_streaming_capabilities.sampler_feedback && texture_streaming_capabilities.tiled_resources,
-        kFrameCount); !result) return result;
-    const auto register_texture = [&](const std::string &id, const render_data::TextureDescription &description,
-        AllocationResource &fallback, ResidencyTicket existing_ticket, TextureStreamId &stream_id) -> Result {
-        if (!fallback.resource || !fallback.allocation ||
-            fallback.resource->GetDesc().MipLevels > description.mip_count)
-            return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Selected texture fallback is incomplete.");
-        if (auto checked = fallback.EnsureNativeContract(device.Get()); !checked) return checked;
-        TextureStreamRegistration registration;
-        registration.generation = resource_generation_id; registration.logical_id = id;
-        if (auto result = ResolveRendererAsset(config, id, registration.source); !result) return result;
-        registration.generation_lease = resident_generation_lease; registration.description = description;
-        if (config.packed_content) registration.compiled_texture = FindRendererTexture(config, MakeAssetId(id));
-        registration.fallback = fallback.resource;
-        registration.fallback_contract = *fallback.NativeContract();
-        registration.fallback_graph_access = fallback.graph_access;
-        registration.fallback_first_mip = description.mip_count - fallback.resource->GetDesc().MipLevels;
-        registration.fallback_allocation_bytes = fallback.allocation->GetSize();
-        registration.fallback_residency = existing_ticket; registration.pinned = description.mip_count == 1;
-        registration.opacity_sampling = false;
-        for (std::size_t material = 0; material < environment_material_bindings.size(); ++material)
-        {
-            if (environment_material_variants[material] != render_data::EnvironmentMaterialVariant::MaskedTwoSided)
-                continue;
-            const auto &bindings = environment_material_bindings[material];
-            for (std::size_t slot = 0; slot < bindings.product_ids.size(); ++slot)
-                if ((bindings.opacity_texture_mask & (1u << slot)) && bindings.product_ids[slot] == id)
-                {
-                    registration.opacity_sampling = true;
-                    break;
-                }
-            if (registration.opacity_sampling) break;
-        }
-        return texture_streaming.Register(std::move(registration), residency, stream_id);
-    };
-    for (std::uint32_t index = 0; index < kEnvironmentTextureCount; ++index)
-        if (auto result = register_texture(environment_texture_ids[index], environment_texture_descriptions[index],
-            environment_textures[index], index == 0 ? environment_fallback_residency : ResidencyTicket{},
-            environment_texture_stream_ids[index]); !result) return result;
-    environment_material_texture_stream_ids.resize(environment_material_textures.size());
-    for (std::size_t index = 0; index < environment_material_textures.size(); ++index)
-    {
-        auto &texture = environment_material_textures[index];
-        if (auto result = register_texture(texture.product_id, texture.description, texture.texture, {},
-            environment_material_texture_stream_ids[index]); !result) return result;
-    }
-    preferred_texture_scene.reset();
-    preferred_texture_materials.fill(false);
-    preferred_texture_initialized = false;
-    material_texture_stream_ids = {};
-    for (std::size_t material = 0; material < environment_material_bindings.size(); ++material)
-        for (std::size_t slot = 0; slot < render_data::kMaterialTextureSlots; ++slot)
-        {
-            const auto index = environment_material_bindings[material].texture_indices[slot];
-            if (index == UINT32_MAX) continue;
-            if (index >= kEnvironmentTextureCount && index - kEnvironmentTextureCount >= environment_material_texture_stream_ids.size())
-                return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Material texture alias has no selected owner.");
-            material_texture_stream_ids[material * render_data::kMaterialTextureSlots + slot] = index < kEnvironmentTextureCount
-                ? environment_texture_stream_ids[index] : environment_material_texture_stream_ids[index - kEnvironmentTextureCount];
-        }
-    return texture_streaming.Configure(config.texture_quality, QualityProfileFor(config.texture_quality).texture_finest_mip, config.texture_budget_mib);
 }
 
 Result D3D12Renderer::Impl::UpdateResidencyBudget()

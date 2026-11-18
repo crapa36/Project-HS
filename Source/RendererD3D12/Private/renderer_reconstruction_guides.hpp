@@ -50,7 +50,7 @@ struct ReconstructionGuidesInputs
     CompletionSet completed;
     bool reset_history{};
     ReconstructionGuideResource transparent_depth, transparent_motion, transparent_history;
-    ReconstructionGuideResource transparent_classification, transparent_metadata, transparent_unpeeled_fragment_count;
+    ReconstructionGuideResource transparent_classification, transparent_metadata;
     ReconstructionGuideResource transparent_transport;
     bool transparent_guides_enabled{};
     ReconstructionGuideResource screen_overlay_alpha;
@@ -68,8 +68,8 @@ struct ReconstructionGuidesLayout
     std::uint64_t target_generation{};
     std::array<ResourceHandle,6> imports{};
     std::array<ResourceVersion,7> outputs{};
-    std::array<ResourceVersion,16> inputs{};
-    std::array<std::uint32_t,2> pass_indices{}; // 49, 9
+    std::array<ResourceVersion,15> inputs{};
+    std::uint32_t first_pass{};
     std::string provider_name;
     bool external{}, transparent_guides{}, screen_overlay{}, composition{};
 };

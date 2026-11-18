@@ -46,27 +46,6 @@ Result D3D12Renderer::Impl::PrepareVisibilityTargets(OptionTargets &targets,
     return Result::Success();
 }
 
-Result D3D12Renderer::Impl::CreateVisibilityTargets(OwnedView &owner)
-{
-    if (config.surface_frontend != SurfaceFrontend::VisibilityBuffer) return Result::Success();
-    OptionTargets targets;
-    if (auto result = PrepareVisibilityTargets(targets, owner.render_width, owner.render_height); !result)
-        return result;
-    using std::swap;
-    swap(owner.targets.visibility_ids, targets.visibility_ids);
-    swap(owner.targets.visibility_front_face, targets.visibility_front_face);
-    swap(owner.targets.visibility_pixels, targets.visibility_pixels);
-    swap(owner.targets.visibility_counts, targets.visibility_counts);
-    swap(owner.targets.visibility_dispatch_args, targets.visibility_dispatch_args);
-    owner.visibility_targets_initialized = false;
-    auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
-    rtv.ptr += static_cast<SIZE_T>(kFrameCount + kVisibilityRtvOffset) * rtv_stride;
-    device->CreateRenderTargetView(owner.targets.visibility_ids.resource.Get(), nullptr, rtv);
-    rtv.ptr += rtv_stride;
-    device->CreateRenderTargetView(owner.targets.visibility_front_face.resource.Get(), nullptr, rtv);
-    return Result::Success();
-}
-
 Result D3D12Renderer::Impl::WriteVisibilityDescriptors(OwnedView &owner, std::uint32_t frame_slot,
     ID3D12Resource *static_scene, ID3D12Resource *dynamic_scene,
     ID3D12Resource *static_refs, std::uint64_t static_ref_offset,

@@ -16,15 +16,15 @@ namespace hs::render_data
 {
     constexpr std::array fixed_products{
         std::string_view{"render/shader/fullscreen_vs.dxil"},
-        std::string_view{"render/shader/local_probe_capture_source_base_vs.dxil"},
-        std::string_view{"render/shader/local_probe_capture_sky_ps.dxil"},
-        std::string_view{"render/shader/local_probe_sh_cs.dxil"},
-        std::string_view{"render/shader/local_probe_ggx_cs.dxil"},
+        std::string_view{"lighting/producer/local_probe_capture_source_base_vs.dxil"},
+        std::string_view{"lighting/producer/local_probe_capture_sky_ps.dxil"},
+        std::string_view{"lighting/producer/local_probe_sh_cs.dxil"},
+        std::string_view{"lighting/producer/local_probe_ggx_cs.dxil"},
     };
     if (std::ranges::find(fixed_products, product_id) != fixed_products.end())
         return true;
 
-    constexpr std::string_view prefix{"render/shader/"};
+    constexpr std::string_view prefix{"lighting/producer/"};
     if (!product_id.starts_with(prefix))
         return false;
     const auto filename = product_id.substr(prefix.size());
@@ -46,8 +46,9 @@ namespace hs::render_data
 // character, decal or VFX products present only in the full runtime catalog.
 [[nodiscard]] inline bool IsLocalProbeMaterialRevisionProduct(std::string_view product_id)
 {
+    if (IsLocalProbeCaptureShaderProduct(product_id)) return true;
     if (!IsRendererMaterialRevisionProduct(product_id)) return false;
-    if (product_id.starts_with("render/shader/")) return IsLocalProbeCaptureShaderProduct(product_id);
+    if (product_id.starts_with("render/shader/")) return false;
     if (product_id.starts_with("render/texture/"))
         return product_id.starts_with("render/texture/environment_") ||
             product_id.starts_with("render/texture/environment/");

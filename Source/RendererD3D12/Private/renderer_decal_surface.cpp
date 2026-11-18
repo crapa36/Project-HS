@@ -46,7 +46,7 @@ struct DecalSurfaceTargets
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12RootSignature> root;
     ComPtr<ID3D12PipelineState> pipeline;
-    ComPtr<ID3D12DescriptorHeap> exports;
+    ComPtr<ID3D12DescriptorHeap> descriptors;
     std::array<AllocationResource, kDecalSurfaceUavCount> outputs;
     AllocationResource constants;
     std::byte *mapped{};
@@ -57,8 +57,8 @@ struct DecalSurfaceTargets
     std::uint64_t bytes{};
     bool usable{true};
     ~DecalSurfaceTargets() { if (mapped && constants.resource) constants.resource->Unmap(0, nullptr); }
-    D3D12_CPU_DESCRIPTOR_HANDLE Export(std::uint32_t index) const
-    { auto h = exports->GetCPUDescriptorHandleForHeapStart(); h.ptr += SIZE_T(index) * descriptor_stride; return h; }
+    D3D12_CPU_DESCRIPTOR_HANDLE Descriptor(std::uint32_t index) const
+    { auto h = descriptors->GetCPUDescriptorHandleForHeapStart(); h.ptr += SIZE_T(index) * descriptor_stride; return h; }
 };
 std::uint64_t DecalSurfaceCandidate::AllocatedBytes() const noexcept { return targets_ ? targets_->bytes : 0; }
 std::uint64_t DecalSurfaceSystem::AllocatedBytes() const noexcept { return targets_ ? targets_->bytes : 0; }
@@ -114,15 +114,17 @@ Result DecalSurfaceSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *all
     if (FAILED(hr)) return Native("Map decal Surface constants", hr);
     next->mapped = static_cast<std::byte *>(mapped);
     D3D12_DESCRIPTOR_HEAP_DESC heap{}; heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap.NumDescriptors = kDecalSurfaceExportCount;
-    hr = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&next->exports));
-    if (FAILED(hr)) return Native("Create decal Surface export descriptors", hr);
+    heap.NumDescriptors = kDecalSurfaceDescriptorCount;
+    hr = device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&next->descriptors));
+    if (FAILED(hr)) return Native("Create decal Surface descriptors", hr);
     for (std::uint32_t index = 0; index < next->outputs.size(); ++index)
     {
         D3D12_SHADER_RESOURCE_VIEW_DESC srv{}; srv.Format = kOutputFormats[index];
         srv.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D; srv.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
         srv.Texture2D.MipLevels = 1;
-        device->CreateShaderResourceView(next->outputs[index].resource.Get(), &srv, next->Export(index));
+        device->CreateShaderResourceView(next->outputs[index].resource.Get(), &srv, next->Descriptor(kDecalSurfaceExportOffset + index));
+        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{}; uav.Format = kOutputFormats[index]; uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+        device->CreateUnorderedAccessView(next->outputs[index].resource.Get(), nullptr, &uav, next->Descriptor(kDecalSurfaceUavOffset + index));
     }
     candidate.targets_ = std::move(next); candidate.prepared_ = true; return Result::Success();
 }
@@ -172,7 +174,7 @@ Result DecalSurfaceSystem::RegisterFrame(RenderGraphBuilder &graph,const DecalSu
     if (!t || !t->usable || pending_graph_ || !Valid(input.render_active) ||
         input.render_active.width > t->capacity.width || input.render_active.height > t->capacity.height ||
         input.frame_slot >= t->slot_completion.size() || !t->slot_completion[input.frame_slot].IsSatisfiedBy(input.completed) ||
-        !input.main_heap || !input.descriptor_suffix_cpu.ptr || !input.main_table_gpu.ptr ||
+        !input.main_heap || !input.main_table_gpu.ptr ||
         !Fits(input.base, input.render_active, DXGI_FORMAT_R8G8B8A8_UNORM) ||
         !Fits(input.normal, input.render_active, DXGI_FORMAT_R16G16_SNORM) ||
         !Fits(input.material, input.render_active, DXGI_FORMAT_R8G8B8A8_UNORM) ||
@@ -229,7 +231,8 @@ Result DecalSurfaceSystem::RegisterFrame(RenderGraphBuilder &graph,const DecalSu
     constants.info = {input.command_count, input.parameter_slot_count, UINT(gradient.Width), gradient.Height};
     constants.parameter_bases = {input.materials[0].parameter_base, input.materials[1].parameter_base, 0, 0};
     std::memcpy(t->mapped + SIZE_T(input.frame_slot) * kConstantStride, &constants, sizeof(constants));
-    const auto cpu = [&](std::uint32_t offset) { auto h = input.descriptor_suffix_cpu; h.ptr += SIZE_T(offset) * t->descriptor_stride; return h; };
+    output.descriptors = t->descriptors->GetCPUDescriptorHandleForHeapStart();
+    const auto cpu = [&](std::uint32_t offset) { auto h = output.descriptors; h.ptr += SIZE_T(offset) * t->descriptor_stride; return h; };
     D3D12_CONSTANT_BUFFER_VIEW_DESC cbv{t->constants.resource->GetGPUVirtualAddress() + UINT64(input.frame_slot) * kConstantStride, kConstantStride};
     t->device->CreateConstantBufferView(&cbv, cpu(kDecalSurfaceCbvOffset));
     for (std::uint32_t index = 0; index < reads.size(); ++index)
@@ -270,10 +273,6 @@ Result DecalSurfaceSystem::RegisterFrame(RenderGraphBuilder &graph,const DecalSu
                 index == 0 ? "DecalSurface.Base" : index == 1 ? "DecalSurface.Normal" : index == 2 ? "DecalSurface.Material" : "DecalSurface.Emission");
         if(retained&&!graph.BindTexture(handles[index],{target.resource.Get(),target.graph_completion,target.graph_queue,{},target.NativeContract()},target.graph_access))
             return Failure(ErrorCode::InvalidState,"Decal retained output binding failed.");
-        D3D12_UNORDERED_ACCESS_VIEW_DESC uav{}; uav.Format = kOutputFormats[index]; uav.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-        t->device->CreateUnorderedAccessView(target.resource.Get(), nullptr, &uav, cpu(kDecalSurfaceUavOffset + index));
-        t->device->CopyDescriptorsSimple(1, cpu(kDecalSurfaceExportOffset + index), t->Export(index), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-        output.export_srvs[index] = t->Export(index);
     }
     if(auto checked=t->constants.EnsureNativeContract(t->device.Get());!checked)return checked;
     const auto constants_handle = retained?retained->constants:

@@ -34,7 +34,7 @@
       "const": "metallic_roughness"
     },
     "parameters": {
-      "$ref": "material_graph.schema.json#/properties/parameters/oneOf/1"
+      "$ref": "material_graph.schema.json#/properties/parameters"
     },
     "textures": {
       "maxItems": 1,

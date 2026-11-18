@@ -14,7 +14,8 @@
     "textures",
     "nodes",
     "outputs",
-    "render_flags"
+    "render_flags",
+    "samplers"
   ],
   "properties": {
     "id": {
@@ -34,6 +35,7 @@
         "grass_2",
         "grass_3",
         "terrain",
+        "ground_detail",
         "archer_skin",
         "archer_cloth",
         "archer_cutout",
@@ -44,14 +46,7 @@
       ]
     },
     "version": {
-      "enum": [
-        2,
-        3,
-        4,
-        5,
-        6,
-        7
-      ]
+      "const": 7
     },
     "domain": {
       "enum": [
@@ -63,78 +58,47 @@
       "const": "metallic_roughness"
     },
     "parameters": {
-      "oneOf": [
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "metallic",
-            "roughness_scale"
-          ],
-          "properties": {
-            "metallic": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            },
-            "roughness_scale": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 2
-            }
-          }
-        },
-        {
-          "type": "array",
-          "minItems": 2,
-          "maxItems": 64,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "id",
-              "type",
-              "default"
-            ],
-            "properties": {
-              "id": {
-                "$ref": "#/$defs/node_id"
-              },
-              "type": {
-                "enum": [
-                  "bool",
-                  "uint",
-                  "float",
-                  "float2",
-                  "float3",
-                  "float4"
-                ]
-              },
-              "default": {},
-              "uint_min": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 4294967295
-              },
-              "uint_max": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 4294967295
-              }
-            }
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "type",
+          "default"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/node_id"
+          },
+          "type": {
+            "enum": [
+              "bool",
+              "uint",
+              "float",
+              "float2",
+              "float3",
+              "float4"
+            ]
+          },
+          "default": {},
+          "uint_min": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
+          },
+          "uint_max": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295
           }
         }
-      ]
+      }
     },
     "textures": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/legacy_textures"
-        },
-        {
-          "$ref": "#/$defs/texture_declarations"
-        }
-      ]
+      "$ref": "#/$defs/texture_declarations"
     },
     "nodes": {
       "type": "array",
@@ -199,6 +163,37 @@
               },
               "type": {
                 "const": "float"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "op",
+              "type",
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/node_id"
+              },
+              "op": {
+                "const": "parameter"
+              },
+              "type": {
+                "enum": [
+                  "bool",
+                  "uint",
+                  "float",
+                  "float2",
+                  "float3",
+                  "float4"
+                ]
+              },
+              "name": {
+                "$ref": "#/$defs/node_id"
               }
             }
           },
@@ -2299,20 +2294,7 @@
       }
     },
     "outputs": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/opaque_outputs"
-        },
-        {
-          "$ref": "#/$defs/masked_outputs"
-        },
-        {
-          "$ref": "#/$defs/legacy_leaf_outputs"
-        },
-        {
-          "$ref": "#/$defs/closure_outputs"
-        }
-      ]
+      "$ref": "#/$defs/closure_outputs"
     },
     "render_flags": {
       "type": "object",
@@ -2407,19 +2389,6 @@
                   "const": "mask"
                 }
               }
-            },
-            "outputs": {
-              "oneOf": [
-                {
-                  "$ref": "#/$defs/masked_outputs"
-                },
-                {
-                  "$ref": "#/$defs/legacy_leaf_outputs"
-                },
-                {
-                  "$ref": "#/$defs/closure_outputs"
-                }
-              ]
             }
           }
         },
@@ -2434,143 +2403,6 @@
                   "const": "opaque"
                 }
               }
-            },
-            "outputs": {
-              "oneOf": [
-                {
-                  "$ref": "#/$defs/opaque_outputs"
-                },
-                {
-                  "$ref": "#/$defs/closure_outputs"
-                }
-              ]
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "id": {
-            "not": {
-              "const": "leaf_0"
-            }
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "outputs": {
-            "not": {
-              "$ref": "#/$defs/legacy_leaf_outputs"
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "version": {
-            "enum": [
-              3,
-              4,
-              5,
-              6,
-              7
-            ]
-          }
-        }
-      },
-      "then": {
-        "required": [
-          "samplers"
-        ],
-        "properties": {
-          "textures": {
-            "$ref": "#/$defs/texture_declarations"
-          },
-          "outputs": {}
-        }
-      },
-      "else": {
-        "properties": {
-          "textures": {
-            "$ref": "#/$defs/legacy_textures"
-          },
-          "samplers": false
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "version": {
-            "enum": [
-              3,
-              4
-            ]
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "outputs": {
-            "required": [
-              "base_color",
-              "roughness",
-              "normal",
-              "ao",
-              "normal_space"
-            ]
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "version": {
-            "enum": [
-              5,
-              6,
-              7
-            ]
-          }
-        }
-      },
-      "then": {
-        "required": [
-          "samplers"
-        ],
-        "properties": {
-          "textures": {
-            "$ref": "#/$defs/texture_declarations"
-          },
-          "outputs": {
-            "$ref": "#/$defs/closure_outputs"
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "version": {
-            "enum": [
-              2,
-              3,
-              4
-            ]
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "outputs": {
-            "not": {
-              "$ref": "#/$defs/closure_outputs"
             }
           }
         }
@@ -2585,18 +2417,7 @@
         }
       },
       "then": {
-        "required": [
-          "samplers"
-        ],
         "properties": {
-          "version": {
-            "enum": [
-              4,
-              5,
-              6,
-              7
-            ]
-          },
           "textures": {
             "type": "array",
             "minItems": 6,
@@ -2699,70 +2520,6 @@
     {
       "if": {
         "properties": {
-          "version": {
-            "enum": [
-              6,
-              7
-            ]
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "parameters": {
-            "type": "array"
-          }
-        }
-      },
-      "else": {
-        "properties": {
-          "parameters": {
-            "type": "object"
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "version": {
-            "not": {
-              "const": 7
-            }
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "nodes": {
-            "items": {
-              "not": {
-                "required": [
-                  "op"
-                ],
-                "properties": {
-                  "op": {
-                    "enum": [
-                      "coat_closure",
-                      "anisotropy_closure",
-                      "sheen_closure",
-                      "thin_transmission_closure",
-                      "emission_closure",
-                      "unlit_closure",
-                      "subsurface_closure",
-                      "solid_transmission_closure"
-                    ]
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
           "id": {
             "enum": [
               "archer_skin",
@@ -2778,9 +2535,6 @@
       },
       "then": {
         "properties": {
-          "version": {
-            "const": 7
-          },
           "textures": {
             "type": "array",
             "maxItems": 0
@@ -2792,10 +2546,7 @@
           "outputs": {
             "$ref": "#/$defs/closure_outputs"
           }
-        },
-        "required": [
-          "samplers"
-        ]
+        }
       },
       "else": {
         "properties": {
@@ -2803,21 +2554,7 @@
             "minItems": 1
           },
           "textures": {
-            "oneOf": [
-              {
-                "$ref": "#/$defs/legacy_textures"
-              },
-              {
-                "allOf": [
-                  {
-                    "$ref": "#/$defs/texture_declarations"
-                  },
-                  {
-                    "minItems": 3
-                  }
-                ]
-              }
-            ]
+            "minItems": 3
           }
         }
       }
@@ -3251,118 +2988,6 @@
             "tangent",
             "world"
           ]
-        }
-      }
-    },
-    "opaque_outputs": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "surface",
-        "base_color",
-        "roughness"
-      ],
-      "properties": {
-        "surface": {
-          "const": "builtin_metallic_roughness"
-        },
-        "base_color": {
-          "$ref": "#/$defs/edge_float3"
-        },
-        "roughness": {
-          "$ref": "#/$defs/edge_float"
-        },
-        "normal": {
-          "$ref": "#/$defs/edge_float3"
-        },
-        "ao": {
-          "$ref": "#/$defs/edge_float"
-        },
-        "normal_space": {
-          "enum": [
-            "tangent",
-            "world"
-          ]
-        }
-      }
-    },
-    "masked_outputs": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "surface",
-        "base_color",
-        "roughness",
-        "opacity"
-      ],
-      "properties": {
-        "surface": {
-          "const": "builtin_metallic_roughness"
-        },
-        "base_color": {
-          "$ref": "#/$defs/edge_float3"
-        },
-        "roughness": {
-          "$ref": "#/$defs/edge_float"
-        },
-        "opacity": {
-          "$ref": "#/$defs/edge_float"
-        },
-        "normal": {
-          "$ref": "#/$defs/edge_float3"
-        },
-        "ao": {
-          "$ref": "#/$defs/edge_float"
-        },
-        "normal_space": {
-          "enum": [
-            "tangent",
-            "world"
-          ]
-        }
-      }
-    },
-    "legacy_leaf_outputs": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "surface",
-        "opacity"
-      ],
-      "properties": {
-        "surface": {
-          "const": "builtin_metallic_roughness"
-        },
-        "opacity": {
-          "$ref": "#/$defs/edge_float"
-        }
-      }
-    },
-    "legacy_textures": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": [
-        "base_color",
-        "surface",
-        "normal",
-        "detail"
-      ],
-      "properties": {
-        "base_color": {
-          "type": "string",
-          "maxLength": 512
-        },
-        "surface": {
-          "type": "string",
-          "maxLength": 512
-        },
-        "normal": {
-          "type": "string",
-          "maxLength": 512
-        },
-        "detail": {
-          "type": "string",
-          "maxLength": 512
         }
       }
     },

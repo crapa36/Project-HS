@@ -36,7 +36,6 @@ inline bool LocalShadowDynamicCasterChanged(const VirtualShadowCaster &c, bool c
 
 struct LocalShadowProfile
 {
-    bool enabled{};
     std::uint64_t byte_budget{}; // Both depth banks, all frame buffers and native descriptor heaps.
     std::uint32_t maximum_lights{}, face_resolution{}, max_casters{}, max_draw_groups{};
     std::uint32_t filter_samples{};
@@ -115,8 +114,6 @@ struct LocalShadowInputs
     std::span<const LightView> lights;
     DirectX::XMFLOAT3 camera_position{};
     std::uint64_t rendered_frame_id{};
-    // Existing renderer pipeline revision; zero conservatively invalidates dynamic depth.
-    std::uint64_t pipeline_revision{};
     // Snapshot of actual shadow opacity bindings from the resident Generation.
     std::shared_ptr<const void> opacity_owner;
     std::span<const LocalShadowOpacityBinding> opacity_bindings;
@@ -147,7 +144,7 @@ struct LocalShadowLayout
     std::uint64_t storage_generation{};
     std::array<ResourceHandle,9> imports{}; // upload, six frame buffers, two banks
     std::array<ResourceVersion,8> outputs{}; // six buffers, static and dynamic banks
-    std::array<std::uint32_t,4> pass_indices{}; // 220..223
+    std::uint32_t first_pass{};
     std::vector<VirtualShadowNativeRead> native_reads;
     bool initialized{}, material_sampling{};
     std::array<bool,2> sampled_layers{};
@@ -167,7 +164,6 @@ class LocalShadowCandidate
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
   private:
     std::shared_ptr<LocalShadowStorage> storage_;
-    bool prepared_{};
     friend class LocalShadowSystem;
 };
 // Passes220..223. Each selected Point owns six guarded faces, Spot one actual
@@ -179,13 +175,12 @@ class LocalShadowCandidate
 class LocalShadowSystem
 {
   public:
-    using ShaderReader=VirtualShadowSystem::ShaderReader;
     LocalShadowSystem();
     ~LocalShadowSystem();
     LocalShadowSystem(const LocalShadowSystem &)=delete;
     LocalShadowSystem &operator=(const LocalShadowSystem &)=delete;
     [[nodiscard]] Result Prepare(ID3D12Device *,D3D12MA::Allocator *,const LocalShadowProfile &,
-        const ShaderReader &,LocalShadowCandidate &,RendererPipelineCache *cache=nullptr) const;
+        LocalShadowCandidate &) const;
     [[nodiscard]] Result Commit(LocalShadowCandidate &&,const CompletionSet &completed);
     [[nodiscard]] Result PrepareFrameRecordData(const LocalShadowInputs &,LocalShadowFramePlan &);
     [[nodiscard]] Result Register(RenderGraphBuilder &,const LocalShadowInputs &,
@@ -194,14 +189,16 @@ class LocalShadowSystem
         LocalShadowFramePlan &,LocalShadowOutputs &,LocalShadowLayout *layout=nullptr);
     [[nodiscard]] Result BindRetained(RenderGraphBuilder &,const LocalShadowInputs &,
         LocalShadowFramePlan &,const LocalShadowLayout &,LocalShadowOutputs &);
-    [[nodiscard]] bool MatchesLayout(const LocalShadowInputs &,
-        const LocalShadowFramePlan &,const LocalShadowLayout &) const noexcept;
+    [[nodiscard]] bool MatchesShape(const LocalShadowFramePlan &,bool material_sampling,
+        const LocalShadowLayout &) const noexcept;
     [[nodiscard]] Result CompleteSubmission(const RenderGraphBuilder &,const CompletionSet &,bool success);
     [[nodiscard]] Result ResetAfterCompletion(const CompletionSet &);
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
     [[nodiscard]] LocalShadowStatus Status() const;
     // Called only after all old submissions have reliably completed.
   private:
+    [[nodiscard]] bool MatchesLayout(const LocalShadowInputs &,
+        const LocalShadowFramePlan &,const LocalShadowLayout &) const noexcept;
     [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const LocalShadowInputs &,
         LocalShadowFramePlan &,LocalShadowOutputs &,LocalShadowLayout *,
         const LocalShadowLayout *);

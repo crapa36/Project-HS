@@ -63,7 +63,6 @@ struct LocalProbeRuntimeFrameInputs
 {
     std::shared_ptr<const StaticRenderScene> scene;
     std::uint32_t static_instance_generation{};
-    std::uint64_t material_parameter_revision{}, pipeline_revision{}; // Material: 0 matches the admitted Generation, otherwise a unique publication stamp.
     float foliage_density{};
     const renderer_detail::FrameConstants *frame_constants{}; // Copied at Register.
     std::span<const LocalProbePageRevision> page_revisions;
@@ -101,7 +100,6 @@ struct LocalProbeCaptureState;
 struct LocalProbeRevisionDiagnostics
 {
     render_data::SceneProbeRevisions baseline, compatibility;
-    std::uint64_t material_parameter_revision{};
 };
 #endif
 struct LocalProbeRuntimeFramePlan
@@ -109,7 +107,7 @@ struct LocalProbeRuntimeFramePlan
     const LocalProbeRuntimeFrameInputs *source{};
     render_data::SceneProbeRevisions revisions;
     std::shared_ptr<const StaticRenderScene> scene;
-    std::uint64_t static_instance_generation{},material_parameter_revision{},pipeline_revision{};
+    std::uint64_t static_instance_generation{};
 #if defined(HS_OFFLINE_PROBE_BAKER)
     std::size_t light_count{},page_count{},scene_read_count{};
     std::uint32_t max_cube_views{};
@@ -125,7 +123,6 @@ struct LocalProbeRuntimeLayout
     // Common renderer objects share this layout with the offline composition.
     std::shared_ptr<LocalProbeRuntimeCaptureLayout> capture;
     bool active{};
-    [[nodiscard]] bool HasCaptureBindings() const noexcept;
 };
 class LocalProbeRuntimeCandidate
 {
@@ -146,7 +143,6 @@ class LocalProbeRuntime
         float foliage_density);
     [[nodiscard]] std::span<const std::uint32_t> CachedCaptureMaterialOrdinals(
         const std::shared_ptr<const StaticRenderScene> &, float foliage_density) const noexcept;
-    [[nodiscard]] bool CaptureIdentityPending(const CompletionSet &) const noexcept;
 #endif
     LocalProbeRuntime();
     ~LocalProbeRuntime();
@@ -156,13 +152,6 @@ class LocalProbeRuntime
         const RendererConfig &, std::string_view scene_generation,
         LocalProbeRuntimeCandidate &, RendererPipelineCache *) const;
     [[nodiscard]] Result Commit(LocalProbeRuntimeCandidate &&, const CompletionSet &completed);
-    [[nodiscard]] Result CurrentRevisions(const LocalProbeRuntimeFrameInputs &,
-        render_data::SceneProbeRevisions &) const;
-    // Current-revision decision only. Capture bindings, pipelines and service
-    // preparation are deferred until PrepareFrameRecordData receives them.
-    [[nodiscard]] Result PrepareFrameDecisionData(const LocalProbeRuntimeFrameInputs &,
-        LocalProbeRuntimeFramePlan &) const;
-    [[nodiscard]] Result Register(RenderGraphBuilder &, const LocalProbeRuntimeFrameInputs &, LocalProbeOutputs &);
     [[nodiscard]] Result PrepareFrameRecordData(const LocalProbeRuntimeFrameInputs &,
         LocalProbeRuntimeFramePlan &);
     [[nodiscard]] bool MatchesLayout(const LocalProbeRuntimeFrameInputs &,
@@ -179,7 +168,6 @@ class LocalProbeRuntime
     [[nodiscard]] Result ExportBakedPackage(RenderGraphQueueExecutor &, TransientResourcePool &,
         std::uint32_t frame_slot, BarrierMode, std::vector<std::byte> &package_bytes);
 #endif
-    [[nodiscard]] std::span<const render_data::SceneProbeRecord> Probes() const noexcept;
     [[nodiscard]] render_data::SceneProbeRevisions BaselineRevisions() const noexcept;
 #if defined(HS_DEVELOPMENT_TOOLS)
     [[nodiscard]] LocalProbeRevisionDiagnostics RevisionDiagnostics() const;
@@ -188,8 +176,9 @@ class LocalProbeRuntime
     [[nodiscard]] LocalProbeBakeStatus BakeStatus(const CompletionSet &) const noexcept;
 #endif
     [[nodiscard]] std::uint64_t AllocatedBytes() const noexcept;
-    // Called only after all old submissions have reliably completed.
   private:
+    [[nodiscard]] Result CurrentRevisions(const LocalProbeRuntimeFrameInputs &,
+        render_data::SceneProbeRevisions &) const;
     [[nodiscard]] Result RegisterImpl(RenderGraphBuilder &,const LocalProbeRuntimeFrameInputs &,
         const LocalProbeRuntimeFramePlan &,LocalProbeOutputs &,LocalProbeRuntimeLayout *,
         const LocalProbeRuntimeLayout *);

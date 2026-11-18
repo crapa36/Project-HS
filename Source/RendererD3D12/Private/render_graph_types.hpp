@@ -29,6 +29,7 @@ enum class Access : std::uint8_t
     AllShaderRead,
     // Native VRS image consumed by rasterization on the direct queue.
     ShadingRateSource,
+    ConstantBuffer,
 };
 
 enum class ResourceKind : std::uint8_t

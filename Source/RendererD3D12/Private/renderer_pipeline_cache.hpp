@@ -12,21 +12,9 @@
 
 namespace hs
 {
-// Copied under the cache mutex. No COM handles, native descriptors or borrowed
-// strings escape. Failures of optional persistence/storage remain observable.
-struct RendererPipelineCacheStats
-{
-    std::uint64_t hits{},misses{},native_creates{},stores{},store_failures{},load_failures{};
-    std::uint64_t io_failures{},discarded_files{},unsupported_libraries{},uncached_mesh_creates{};
-    std::uint64_t root_registrations{},key_failures{},loaded_bytes{},serialized_bytes{};
-    std::int32_t last_cache_hresult{},last_io_error{};
-    bool initialized{},library_supported{},mesh_library_supported{},persistence_enabled{};
-    // Capture-only inclusive wall nanoseconds; native calls can include driver waits.
-    std::uint64_t key_build_ns{},key_build_max_ns{},library_load_ns{},library_load_max_ns{};
-    std::uint64_t native_create_ns{},native_create_max_ns{},library_store_ns{},library_store_max_ns{};
-    std::uint64_t serialize_ns{},cache_write_ns{},mutex_wait_ns{},mutex_wait_max_ns{};
-    bool capture_timings{};
-};
+#if defined(HS_DEVELOPMENT_TOOLS)
+struct RendererPsoCacheStats;
+#endif
 
 // One device's optional D3D12 pipeline library. Register each root immediately
 // after native creation using its actual serialized bytes. Registration stores
@@ -65,7 +53,9 @@ class RendererPipelineCache
         ID3D12PipelineState **output);
     [[nodiscard]] Result Flush();
     void Reset() noexcept;
-    [[nodiscard]] RendererPipelineCacheStats Stats() const;
+#if defined(HS_DEVELOPMENT_TOOLS)
+    [[nodiscard]] RendererPsoCacheStats Stats() const;
+#endif
   private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

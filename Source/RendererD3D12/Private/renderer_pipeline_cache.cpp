@@ -1,4 +1,7 @@
 #include "renderer_pipeline_cache.hpp"
+#if defined(HS_DEVELOPMENT_TOOLS)
+#include <hs/renderer/renderer.hpp>
+#endif
 #include <hs/core/sha256.hpp>
 #include <wrl/client.h>
 
@@ -6,7 +9,9 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#if defined(HS_DEVELOPMENT_TOOLS)
 #include <chrono>
+#endif
 #include <cstring>
 #include <limits>
 #include <iterator>
@@ -22,8 +27,14 @@
 
 namespace hs
 {
+#if defined(HS_DEVELOPMENT_TOOLS)
+#define HS_PSO_DIAGNOSTICS(...) __VA_ARGS__
+#else
+#define HS_PSO_DIAGNOSTICS(...)
+#endif
 namespace
 {
+#if defined(HS_DEVELOPMENT_TOOLS)
 using CacheClock = std::chrono::steady_clock;
 CacheClock::time_point CacheStart(bool enabled) noexcept
 { return enabled ? CacheClock::now() : CacheClock::time_point{}; }
@@ -41,6 +52,7 @@ std::uint64_t CacheElapsed(CacheClock::time_point start) noexcept
     return start == CacheClock::time_point{} ? 0 : static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(CacheClock::now() - start).count());
 }
+#endif
 template<class F> struct ScopeExit
 {
     F action;
@@ -50,6 +62,7 @@ template<class F> struct ScopeExit
     ~ScopeExit() noexcept { action(); }
 };
 template<class F> ScopeExit<F> Finally(F action) { return ScopeExit<F>(std::move(action)); }
+#if defined(HS_DEVELOPMENT_TOOLS)
 struct CacheDuration
 {
     CacheClock::time_point start;
@@ -59,6 +72,7 @@ struct CacheDuration
         : start(CacheStart(enabled)), total(sum), maximum(peak) {}
     ~CacheDuration() { RecordCacheDuration(start, total, maximum); }
 };
+#endif
 
 using Microsoft::WRL::ComPtr;
 constexpr std::uint32_t kSchema=2;
@@ -295,18 +309,21 @@ struct RendererPipelineCache::Impl
     mutable std::shared_mutex lifecycle_mutex;
     mutable std::mutex mutex;
     std::unordered_map<std::wstring,std::shared_ptr<std::mutex>> key_mutexes;
+#if defined(HS_DEVELOPMENT_TOOLS)
     std::atomic_bool timing_enabled{};
+#endif
     ComPtr<ID3D12Device> device;
-    // Declaration/destruction order preserves the borrowed input blob until both
-    // library references release. Flush serialization never modifies this vector.
-    std::vector<std::byte> loaded_blob;
+    // D3D12 borrows the payload inside this allocation until both library references release.
+    std::unique_ptr<std::byte[]> loaded_file;
     ComPtr<ID3D12PipelineLibrary> library;
     ComPtr<ID3D12PipelineLibrary1> library1;
     std::unordered_map<ShaderOwnerKey,std::array<std::byte,32>,ShaderOwnerKeyHash> shader_owners;
     std::filesystem::path file;
     std::array<std::byte,32> identity{};
-    RendererPipelineCacheStats stats;
-    bool dirty{};
+#if defined(HS_DEVELOPMENT_TOOLS)
+    RendererPsoCacheStats stats;
+#endif
+    bool initialized{},persistence_enabled{},dirty{};
     std::shared_ptr<std::mutex> KeyMutex(const std::wstring &name)
     {
         auto &entry=key_mutexes[name];
@@ -330,41 +347,45 @@ struct RendererPipelineCache::Impl
     void Clear(bool clear_stats) noexcept
     {
         key_mutexes.clear();
-        library1.Reset(); library.Reset(); loaded_blob.clear(); shader_owners.clear(); device.Reset(); file.clear();
-        identity={}; dirty=false; timing_enabled.store(false, std::memory_order_relaxed);
+        library1.Reset(); library.Reset(); loaded_file.reset(); shader_owners.clear(); device.Reset(); file.clear();
+        identity={}; initialized=false; persistence_enabled=false; dirty=false;
+#if defined(HS_DEVELOPMENT_TOOLS)
+        timing_enabled.store(false, std::memory_order_relaxed);
         if(clear_stats) stats={};
-        else
-        {
-            stats.initialized=false; stats.library_supported=false;
-            stats.mesh_library_supported=false; stats.persistence_enabled=false;
-        }
+#else
+        (void)clear_stats;
+#endif
     }
+#if defined(HS_DEVELOPMENT_TOOLS)
     void IoFailure(DWORD error) { ++stats.io_failures; stats.last_io_error=std::int32_t(error); }
+#endif
     void Discard()
     {
-        ++stats.discarded_files; loaded_blob.clear();
+        HS_PSO_DIAGNOSTICS(++stats.discarded_files;)
+        loaded_file.reset();
         if(!DeleteFileW(file.c_str()))
         {
-            const auto error=GetLastError();
-            if(error!=ERROR_FILE_NOT_FOUND && error!=ERROR_PATH_NOT_FOUND) IoFailure(error);
+            HS_PSO_DIAGNOSTICS(const auto error=GetLastError(); if(error!=ERROR_FILE_NOT_FOUND && error!=ERROR_PATH_NOT_FOUND) IoFailure(error);)
         }
     }
-    void ReadFile()
+    std::span<const std::byte> ReadFile()
     {
         File source(CreateFileW(file.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr));
         if(source.handle==INVALID_HANDLE_VALUE)
         {
-            const auto error=GetLastError();
-            if(error!=ERROR_FILE_NOT_FOUND && error!=ERROR_PATH_NOT_FOUND) IoFailure(error);
-            return;
+            HS_PSO_DIAGNOSTICS(const auto error=GetLastError(); if(error!=ERROR_FILE_NOT_FOUND && error!=ERROR_PATH_NOT_FOUND) IoFailure(error);)
+            return {};
         }
         LARGE_INTEGER size;
-        if(!GetFileSizeEx(source.handle,&size)) { IoFailure(GetLastError()); return; }
-        if(size.QuadPart<std::int64_t(kHeaderBytes) || std::uint64_t(size.QuadPart)>kMaximumFileBytes) { Discard(); return; }
-        std::vector<std::byte> bytes(static_cast<std::size_t>(size.QuadPart)); DWORD read=0;
-        if(!::ReadFile(source.handle,bytes.data(),DWORD(bytes.size()),&read,nullptr)) { IoFailure(GetLastError()); return; }
-        if(read!=bytes.size()) { Discard(); return; }
-        const auto blob=std::span(bytes).subspan(kHeaderBytes);
+        if(!GetFileSizeEx(source.handle,&size)) { HS_PSO_DIAGNOSTICS(IoFailure(GetLastError());) return {}; }
+        if(size.QuadPart<std::int64_t(kHeaderBytes) || std::uint64_t(size.QuadPart)>kMaximumFileBytes) { Discard(); return {}; }
+        const auto length=static_cast<std::size_t>(size.QuadPart);
+        auto storage=std::make_unique_for_overwrite<std::byte[]>(length);
+        const std::span bytes(storage.get(),length);
+        DWORD read=0;
+        if(!::ReadFile(source.handle,bytes.data(),DWORD(length),&read,nullptr)) { HS_PSO_DIAGNOSTICS(IoFailure(GetLastError());) return {}; }
+        if(read!=length) { Discard(); return {}; }
+        const auto blob=bytes.subspan(kHeaderBytes);
         bool valid=std::equal(kMagic.begin(),kMagic.end(),bytes.begin()) && Get(bytes,8,4)==kSchema &&
             Get(bytes,12,4)==kHeaderBytes && Get(bytes,48,8)==blob.size() && !blob.empty() &&
             std::equal(identity.begin(),identity.end(),bytes.begin()+16);
@@ -373,8 +394,10 @@ struct RendererPipelineCache::Impl
         {
             const auto digest=Sha256(blob); valid=std::equal(digest.begin(),digest.end(),bytes.begin()+56);
         }
-        if(!valid) { Discard(); return; }
-        loaded_blob.assign(blob.begin(),blob.end()); stats.loaded_bytes=loaded_blob.size();
+        if(!valid) { Discard(); return {}; }
+        loaded_file=std::move(storage);
+        HS_PSO_DIAGNOSTICS(stats.loaded_bytes=blob.size();)
+        return blob;
     }
     HRESULT Store(const std::wstring &name,IUnknown *created,ID3D12PipelineLibrary *target) noexcept
     {
@@ -397,39 +420,33 @@ struct RendererPipelineCache::Impl
             std::lock_guard lock(mutex);
             ReleaseKeyMutex(name,gate);
         });
-        const auto load_start=CacheStart(timing_enabled.load(std::memory_order_relaxed));
+        HS_PSO_DIAGNOSTICS(const auto load_start=CacheStart(timing_enabled.load(std::memory_order_relaxed));)
         auto native=load(native_library.Get(),name.c_str(),output);
-        const auto load_ns=CacheElapsed(load_start);
+        HS_PSO_DIAGNOSTICS(const auto load_ns=CacheElapsed(load_start);)
         {
-            std::lock_guard lock(mutex);
-            stats.library_load_ns+=load_ns;
-            stats.library_load_max_ns=std::max(stats.library_load_max_ns,load_ns);
-            if(SUCCEEDED(native)) { ++stats.hits; return native; }
+            HS_PSO_DIAGNOSTICS(std::lock_guard lock(mutex);)
+            HS_PSO_DIAGNOSTICS(stats.library_load_ns+=load_ns; stats.library_load_max_ns=std::max(stats.library_load_max_ns,load_ns);)
+            if(SUCCEEDED(native)) { HS_PSO_DIAGNOSTICS(++stats.hits;) return native; }
             if(native!=E_INVALIDARG)
             {
-                ++stats.load_failures; stats.last_cache_hresult=std::int32_t(native); return native;
+                HS_PSO_DIAGNOSTICS(++stats.load_failures; stats.last_cache_hresult=std::int32_t(native);)
+                return native;
             }
-            ++stats.misses;
-            ++stats.native_creates;
+            HS_PSO_DIAGNOSTICS(++stats.misses; ++stats.native_creates;)
         }
-        const auto create_start=CacheStart(timing_enabled.load(std::memory_order_relaxed));
+        HS_PSO_DIAGNOSTICS(const auto create_start=CacheStart(timing_enabled.load(std::memory_order_relaxed));)
         native=create(native_device.Get(),output);
-        const auto create_ns=CacheElapsed(create_start);
-        {
-            std::lock_guard lock(mutex);
-            stats.native_create_ns+=create_ns;
-            stats.native_create_max_ns=std::max(stats.native_create_max_ns,create_ns);
-        }
+        HS_PSO_DIAGNOSTICS(const auto create_ns=CacheElapsed(create_start);)
+        HS_PSO_DIAGNOSTICS({ std::lock_guard lock(mutex); stats.native_create_ns+=create_ns; stats.native_create_max_ns=std::max(stats.native_create_max_ns,create_ns); })
         if(SUCCEEDED(native) && output && *output)
         {
-            const auto store_start=CacheStart(timing_enabled.load(std::memory_order_relaxed));
+            HS_PSO_DIAGNOSTICS(const auto store_start=CacheStart(timing_enabled.load(std::memory_order_relaxed));)
             const auto stored=Store(name,static_cast<IUnknown *>(*output),native_library.Get());
-            const auto store_ns=CacheElapsed(store_start);
+            HS_PSO_DIAGNOSTICS(const auto store_ns=CacheElapsed(store_start);)
             std::lock_guard lock(mutex);
-            stats.library_store_ns+=store_ns;
-            stats.library_store_max_ns=std::max(stats.library_store_max_ns,store_ns);
-            if(FAILED(stored)) { ++stats.store_failures; stats.last_cache_hresult=std::int32_t(stored); }
-            else { ++stats.stores; dirty=true; }
+            HS_PSO_DIAGNOSTICS(stats.library_store_ns+=store_ns; stats.library_store_max_ns=std::max(stats.library_store_max_ns,store_ns);)
+            if(FAILED(stored)) { HS_PSO_DIAGNOSTICS(++stats.store_failures; stats.last_cache_hresult=std::int32_t(stored);) }
+            else { HS_PSO_DIAGNOSTICS(++stats.stores;) dirty=true; }
         }
         return native;
     }
@@ -442,19 +459,21 @@ void RendererPipelineCache::Reset() noexcept
     std::lock_guard lock(impl_->mutex);
     impl_->Clear(false);
 }
-RendererPipelineCacheStats RendererPipelineCache::Stats() const
+#if defined(HS_DEVELOPMENT_TOOLS)
+RendererPsoCacheStats RendererPipelineCache::Stats() const
 {
     std::shared_lock lifecycle(impl_->lifecycle_mutex);
     std::lock_guard lock(impl_->mutex);
     return impl_->stats;
 }
+#endif
 
-Result RendererPipelineCache::Initialize(ID3D12Device *device,IDXGIAdapter *adapter,std::filesystem::path directory,bool capture_timings)
+Result RendererPipelineCache::Initialize(ID3D12Device *device,IDXGIAdapter *adapter,std::filesystem::path directory,
+    [[maybe_unused]] bool capture_timings)
 {
     std::unique_lock lifecycle(impl_->lifecycle_mutex);
     std::lock_guard lock(impl_->mutex); impl_->Clear(true);
-    impl_->stats.capture_timings=capture_timings;
-    impl_->timing_enabled.store(capture_timings, std::memory_order_relaxed);
+    HS_PSO_DIAGNOSTICS(impl_->stats.capture_timings=capture_timings; impl_->timing_enabled.store(capture_timings, std::memory_order_relaxed);)
     if(!device || !adapter) return Failure(ErrorCode::InvalidArgument,"Pipeline cache requires a device and adapter.");
     impl_->device=device;
     try
@@ -463,17 +482,18 @@ Result RendererPipelineCache::Initialize(ID3D12Device *device,IDXGIAdapter *adap
         auto native=device->CheckFeatureSupport(D3D12_FEATURE_SHADER_CACHE,&support,sizeof(support));
         if(native==E_INVALIDARG || (SUCCEEDED(native) && !(support.SupportFlags&D3D12_SHADER_CACHE_SUPPORT_LIBRARY)))
         {
-            ++impl_->stats.unsupported_libraries; impl_->stats.initialized=true;
-            impl_->stats.last_cache_hresult=std::int32_t(native); return Result::Success();
+            HS_PSO_DIAGNOSTICS(++impl_->stats.unsupported_libraries; impl_->stats.last_cache_hresult=std::int32_t(native);)
+            impl_->initialized=true; return Result::Success();
         }
         if(FAILED(native)) return NativeFailure("Query pipeline library support",native);
         ComPtr<ID3D12Device1> device1; native=device->QueryInterface(IID_PPV_ARGS(device1.ReleaseAndGetAddressOf()));
         if(Unsupported(native))
         {
-            ++impl_->stats.unsupported_libraries; impl_->stats.initialized=true;
-            impl_->stats.last_cache_hresult=std::int32_t(native); return Result::Success();
+            HS_PSO_DIAGNOSTICS(++impl_->stats.unsupported_libraries; impl_->stats.last_cache_hresult=std::int32_t(native);)
+            impl_->initialized=true; return Result::Success();
         }
         if(FAILED(native)) return NativeFailure("Query Device1 for pipeline library",native);
+        std::span<const std::byte> blob;
         if(!directory.empty())
         {
             DXGI_ADAPTER_DESC description{}; native=adapter->GetDesc(&description);
@@ -483,7 +503,7 @@ Result RendererPipelineCache::Initialize(ID3D12Device *device,IDXGIAdapter *adap
             {
                 // Driver identity is required for persistence. Memory caching
                 // remains valid; a guessed zero driver is never a persistent key.
-                impl_->IoFailure(ERROR_NOT_SUPPORTED); impl_->stats.last_cache_hresult=std::int32_t(native);
+                HS_PSO_DIAGNOSTICS(impl_->IoFailure(ERROR_NOT_SUPPORTED); impl_->stats.last_cache_hresult=std::int32_t(native);)
             }
             else if(FAILED(native)) return NativeFailure("Query cache driver identity",native);
             else
@@ -495,28 +515,26 @@ Result RendererPipelineCache::Initialize(ID3D12Device *device,IDXGIAdapter *adap
                 // adapter compatibility before any cached PSO can be loaded.
                 identity.U64(std::bit_cast<std::uint64_t>(driver.QuadPart)); impl_->identity=identity.Finish();
                 impl_->file=directory/(L"renderer-pso-v2-"+Hex(impl_->identity)+L".bin");
-                impl_->stats.persistence_enabled=true; impl_->ReadFile();
+                impl_->persistence_enabled=true; blob=impl_->ReadFile();
             }
         }
-        native=device1->CreatePipelineLibrary(impl_->loaded_blob.empty()?nullptr:impl_->loaded_blob.data(),
-            impl_->loaded_blob.size(),IID_PPV_ARGS(impl_->library.ReleaseAndGetAddressOf()));
-        if(!impl_->loaded_blob.empty() && (native==E_INVALIDARG || native==D3D12_ERROR_DRIVER_VERSION_MISMATCH || native==D3D12_ERROR_ADAPTER_NOT_FOUND))
+        native=device1->CreatePipelineLibrary(blob.data(),blob.size(),IID_PPV_ARGS(impl_->library.ReleaseAndGetAddressOf()));
+        if(!blob.empty() && (native==E_INVALIDARG || native==D3D12_ERROR_DRIVER_VERSION_MISMATCH || native==D3D12_ERROR_ADAPTER_NOT_FOUND))
         {
-            impl_->stats.last_cache_hresult=std::int32_t(native);
-            impl_->library.Reset(); impl_->Discard(); impl_->stats.loaded_bytes=0;
+            HS_PSO_DIAGNOSTICS(impl_->stats.last_cache_hresult=std::int32_t(native); impl_->stats.loaded_bytes=0;)
+            impl_->library.Reset(); impl_->Discard();
             native=device1->CreatePipelineLibrary(nullptr,0,IID_PPV_ARGS(impl_->library.ReleaseAndGetAddressOf()));
         }
         if(Unsupported(native))
         {
-            impl_->library.Reset(); impl_->loaded_blob.clear(); ++impl_->stats.unsupported_libraries;
-            impl_->stats.last_cache_hresult=std::int32_t(native); impl_->stats.persistence_enabled=false;
-            impl_->stats.initialized=true; return Result::Success();
+            impl_->library.Reset(); impl_->loaded_file.reset();
+            HS_PSO_DIAGNOSTICS(++impl_->stats.unsupported_libraries; impl_->stats.last_cache_hresult=std::int32_t(native);)
+            impl_->persistence_enabled=false; impl_->initialized=true; return Result::Success();
         }
         if(FAILED(native)) return NativeFailure("Create pipeline library",native);
         native=impl_->library.As(&impl_->library1);
         if(FAILED(native) && native!=E_NOINTERFACE) return NativeFailure("Query pipeline Library1",native);
-        impl_->stats.library_supported=true; impl_->stats.mesh_library_supported=impl_->library1!=nullptr;
-        impl_->stats.initialized=true; return Result::Success();
+        impl_->initialized=true; return Result::Success();
     }
     catch(const std::bad_alloc &) { return NativeFailure("Allocate pipeline cache",E_OUTOFMEMORY); }
     catch(const std::exception &error) { return Failure(ErrorCode::TaskFailed,error.what()); }
@@ -525,13 +543,13 @@ Result RendererPipelineCache::RegisterRootSignature(ID3D12RootSignature *root,st
 {
     std::unique_lock lifecycle(impl_->lifecycle_mutex);
     std::lock_guard lock(impl_->mutex);
-    if(!impl_->stats.initialized) return Failure(ErrorCode::InvalidState,"Initialize pipeline cache before registering roots.");
+    if(!impl_->initialized) return Failure(ErrorCode::InvalidState,"Initialize pipeline cache before registering roots.");
     if(!root || serialized.empty()) return Failure(ErrorCode::InvalidArgument,"Root registration requires native root and exact serialized bytes.");
     try
     {
         const auto digest=Sha256(serialized); const auto native=root->SetPrivateData(kRootDigestGuid,UINT(digest.size()),digest.data());
-        if(FAILED(native)) { impl_->stats.last_cache_hresult=std::int32_t(native); return NativeFailure("Register root digest",native); }
-        ++impl_->stats.root_registrations; return Result::Success();
+        if(FAILED(native)) { HS_PSO_DIAGNOSTICS(impl_->stats.last_cache_hresult=std::int32_t(native);) return NativeFailure("Register root digest",native); }
+        HS_PSO_DIAGNOSTICS(++impl_->stats.root_registrations;) return Result::Success();
     }
     catch(const std::bad_alloc &) { return NativeFailure("Allocate root digest",E_OUTOFMEMORY); }
     catch(const std::exception &error) { return Failure(ErrorCode::TaskFailed,error.what()); }
@@ -541,7 +559,7 @@ Result RendererPipelineCache::RegisterShaderOwner(std::span<const std::byte> sha
 {
     std::unique_lock lifecycle(impl_->lifecycle_mutex);
     std::lock_guard lock(impl_->mutex);
-    if(!impl_->stats.initialized) return Failure(ErrorCode::InvalidState,"Register shader digest before initializing pipeline cache.");
+    if(!impl_->initialized) return Failure(ErrorCode::InvalidState,"Register shader digest before initializing pipeline cache.");
     if(!impl_->library) return Result::Success();
     if(shader.empty() || expected_digest.size()!=71 || !expected_digest.starts_with("sha256:"))
         return Failure(ErrorCode::InvalidArgument,"Checked shader owner requires bytes and a SHA-256 product digest.");
@@ -579,25 +597,25 @@ void RendererPipelineCache::ClearShaderOwners() noexcept
 }
 HRESULT RendererPipelineCache::CreateGraphics(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *description,REFIID iid,void **output)
 {
-    const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+    HS_PSO_DIAGNOSTICS(const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));)
     std::shared_lock lifecycle(impl_->lifecycle_mutex);
     std::unique_lock state(impl_->mutex); if(output) *output=nullptr;
-    RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);
-    if(!impl_->stats.initialized) return E_UNEXPECTED;
+    HS_PSO_DIAGNOSTICS(RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);)
+    if(!impl_->initialized) return E_UNEXPECTED;
     if(!description) return E_INVALIDARG;
     std::array<std::byte,32> root; auto native=RootDigest(description->pRootSignature,root);
-    if(FAILED(native)) { ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(native); return native; }
+    if(FAILED(native)) { HS_PSO_DIAGNOSTICS(impl_->stats.last_cache_hresult=std::int32_t(native);) return native; }
     try
     {
-        const auto key_start=CacheStart(impl_->stats.capture_timings);
+        HS_PSO_DIAGNOSTICS(const auto key_start=CacheStart(impl_->stats.capture_timings);)
         const bool use_library=impl_->library && output;
         const auto name=use_library?GraphicsName(*description,root,false,{},
             [&](D3D12_SHADER_BYTECODE shader){return impl_->ShaderDigest(shader);}):std::wstring{};
-        RecordCacheDuration(key_start, impl_->stats.key_build_ns, &impl_->stats.key_build_max_ns);
+        HS_PSO_DIAGNOSTICS(RecordCacheDuration(key_start, impl_->stats.key_build_ns, &impl_->stats.key_build_max_ns);)
         if(!use_library)
         {
-            ++impl_->stats.native_creates;
-            CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);
+            HS_PSO_DIAGNOSTICS(++impl_->stats.native_creates;)
+            HS_PSO_DIAGNOSTICS(CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);)
             return impl_->device->CreateGraphicsPipelineState(description,iid,output);
         }
         return impl_->CreateCached(name,state,output,
@@ -610,8 +628,10 @@ HRESULT RendererPipelineCache::CreateGraphics(const D3D12_GRAPHICS_PIPELINE_STAT
     }
     catch(const KeyError &)
     {
-        if(state.owns_lock()) { ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); }
-        else { std::lock_guard lock(impl_->mutex); ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); }
+        HS_PSO_DIAGNOSTICS(
+            if(state.owns_lock()) impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG);
+            else { std::lock_guard lock(impl_->mutex); impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); }
+        )
         return E_INVALIDARG;
     }
     catch(const std::bad_alloc &) { return E_OUTOFMEMORY; }
@@ -619,25 +639,25 @@ HRESULT RendererPipelineCache::CreateGraphics(const D3D12_GRAPHICS_PIPELINE_STAT
 }
 HRESULT RendererPipelineCache::CreateCompute(const D3D12_COMPUTE_PIPELINE_STATE_DESC *description,REFIID iid,void **output)
 {
-    const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+    HS_PSO_DIAGNOSTICS(const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));)
     std::shared_lock lifecycle(impl_->lifecycle_mutex);
     std::unique_lock state(impl_->mutex); if(output) *output=nullptr;
-    RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);
-    if(!impl_->stats.initialized) return E_UNEXPECTED;
+    HS_PSO_DIAGNOSTICS(RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);)
+    if(!impl_->initialized) return E_UNEXPECTED;
     if(!description) return E_INVALIDARG;
     std::array<std::byte,32> root; auto native=RootDigest(description->pRootSignature,root);
-    if(FAILED(native)) { ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(native); return native; }
+    if(FAILED(native)) { HS_PSO_DIAGNOSTICS(impl_->stats.last_cache_hresult=std::int32_t(native);) return native; }
     try
     {
-        const auto key_start=CacheStart(impl_->stats.capture_timings);
+        HS_PSO_DIAGNOSTICS(const auto key_start=CacheStart(impl_->stats.capture_timings);)
         const bool use_library=impl_->library && output;
         const auto name=use_library?ComputeName(*description,root,
             [&](D3D12_SHADER_BYTECODE shader){return impl_->ShaderDigest(shader);}):std::wstring{};
-        RecordCacheDuration(key_start, impl_->stats.key_build_ns, &impl_->stats.key_build_max_ns);
+        HS_PSO_DIAGNOSTICS(RecordCacheDuration(key_start, impl_->stats.key_build_ns, &impl_->stats.key_build_max_ns);)
         if(!use_library)
         {
-            ++impl_->stats.native_creates;
-            CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);
+            HS_PSO_DIAGNOSTICS(++impl_->stats.native_creates;)
+            HS_PSO_DIAGNOSTICS(CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);)
             return impl_->device->CreateComputePipelineState(description,iid,output);
         }
         return impl_->CreateCached(name,state,output,
@@ -650,8 +670,10 @@ HRESULT RendererPipelineCache::CreateCompute(const D3D12_COMPUTE_PIPELINE_STATE_
     }
     catch(const KeyError &)
     {
-        if(state.owns_lock()) { ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); }
-        else { std::lock_guard lock(impl_->mutex); ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); }
+        HS_PSO_DIAGNOSTICS(
+            if(state.owns_lock()) impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG);
+            else { std::lock_guard lock(impl_->mutex); impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); }
+        )
         return E_INVALIDARG;
     }
     catch(const std::bad_alloc &) { return E_OUTOFMEMORY; }
@@ -660,11 +682,11 @@ HRESULT RendererPipelineCache::CreateCompute(const D3D12_COMPUTE_PIPELINE_STATE_
 HRESULT RendererPipelineCache::CreateMesh(ID3D12Device2 *device,const D3D12_GRAPHICS_PIPELINE_STATE_DESC &graphics,
     D3D12_SHADER_BYTECODE mesh_shader,ID3D12PipelineState **output)
 {
-    const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+    HS_PSO_DIAGNOSTICS(const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));)
     std::shared_lock lifecycle(impl_->lifecycle_mutex);
     std::unique_lock state(impl_->mutex); if(output) *output=nullptr;
-    RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);
-    if(!impl_->stats.initialized) return E_UNEXPECTED;
+    HS_PSO_DIAGNOSTICS(RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);)
+    if(!impl_->initialized) return E_UNEXPECTED;
     if(!device) return E_INVALIDARG;
     // The explicit Device2 argument must be the device owning this library.
     // Different interface pointers of the same COM object are allowed.
@@ -675,21 +697,20 @@ HRESULT RendererPipelineCache::CreateMesh(ID3D12Device2 *device,const D3D12_GRAP
     if(FAILED(native)) return native;
     if(supplied_identity.Get()!=cache_identity.Get()) return E_INVALIDARG;
     std::array<std::byte,32> root; native=RootDigest(graphics.pRootSignature,root);
-    if(FAILED(native)) { ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(native); return native; }
+    if(FAILED(native)) { HS_PSO_DIAGNOSTICS(impl_->stats.last_cache_hresult=std::int32_t(native);) return native; }
     try
     {
-        const auto key_start=CacheStart(impl_->stats.capture_timings);
+        HS_PSO_DIAGNOSTICS(const auto key_start=CacheStart(impl_->stats.capture_timings);)
         const bool use_library=impl_->library1 && output;
         const auto name=use_library?GraphicsName(graphics,root,true,mesh_shader,
             [&](D3D12_SHADER_BYTECODE shader){return impl_->ShaderDigest(shader);}):std::wstring{};
-        RecordCacheDuration(key_start, impl_->stats.key_build_ns, &impl_->stats.key_build_max_ns);
+        HS_PSO_DIAGNOSTICS(RecordCacheDuration(key_start, impl_->stats.key_build_ns, &impl_->stats.key_build_max_ns);)
         MeshStream stream(graphics,mesh_shader);
         const D3D12_PIPELINE_STATE_STREAM_DESC description{sizeof(stream),&stream};
         if(!use_library)
         {
-            ++impl_->stats.uncached_mesh_creates;
-            ++impl_->stats.native_creates;
-            CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);
+            HS_PSO_DIAGNOSTICS(++impl_->stats.uncached_mesh_creates; ++impl_->stats.native_creates;)
+            HS_PSO_DIAGNOSTICS(CacheDuration timing(impl_->stats.capture_timings, impl_->stats.native_create_ns, &impl_->stats.native_create_max_ns);)
             return device->CreatePipelineState(&description,__uuidof(ID3D12PipelineState),reinterpret_cast<void **>(output));
         }
         auto gate=impl_->KeyMutex(name);
@@ -701,43 +722,38 @@ HRESULT RendererPipelineCache::CreateMesh(ID3D12Device2 *device,const D3D12_GRAP
             std::lock_guard lock(impl_->mutex);
             impl_->ReleaseKeyMutex(name,gate);
         });
-        const auto load_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+        HS_PSO_DIAGNOSTICS(const auto load_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));)
         native=library->LoadPipeline(name.c_str(),&description,__uuidof(ID3D12PipelineState),reinterpret_cast<void **>(output));
-        const auto load_ns=CacheElapsed(load_start);
+        HS_PSO_DIAGNOSTICS(const auto load_ns=CacheElapsed(load_start);)
         {
-            std::lock_guard lock(impl_->mutex);
-            impl_->stats.library_load_ns+=load_ns;
-            impl_->stats.library_load_max_ns=std::max(impl_->stats.library_load_max_ns,load_ns);
-            if(SUCCEEDED(native)) { ++impl_->stats.hits; return native; }
-            if(native!=E_INVALIDARG) { ++impl_->stats.load_failures; impl_->stats.last_cache_hresult=std::int32_t(native); return native; }
-            ++impl_->stats.misses;
-            ++impl_->stats.native_creates;
+            HS_PSO_DIAGNOSTICS(std::lock_guard lock(impl_->mutex);)
+            HS_PSO_DIAGNOSTICS(impl_->stats.library_load_ns+=load_ns; impl_->stats.library_load_max_ns=std::max(impl_->stats.library_load_max_ns,load_ns);)
+            if(SUCCEEDED(native)) { HS_PSO_DIAGNOSTICS(++impl_->stats.hits;) return native; }
+            if(native!=E_INVALIDARG) { HS_PSO_DIAGNOSTICS(++impl_->stats.load_failures; impl_->stats.last_cache_hresult=std::int32_t(native);) return native; }
+            HS_PSO_DIAGNOSTICS(++impl_->stats.misses; ++impl_->stats.native_creates;)
         }
-        const auto create_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+        HS_PSO_DIAGNOSTICS(const auto create_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));)
         native=device->CreatePipelineState(&description,__uuidof(ID3D12PipelineState),reinterpret_cast<void **>(output));
-        const auto create_ns=CacheElapsed(create_start);
-        {
-            std::lock_guard lock(impl_->mutex);
-            impl_->stats.native_create_ns+=create_ns;
-            impl_->stats.native_create_max_ns=std::max(impl_->stats.native_create_max_ns,create_ns);
-        }
+        HS_PSO_DIAGNOSTICS(const auto create_ns=CacheElapsed(create_start);)
+        HS_PSO_DIAGNOSTICS({ std::lock_guard lock(impl_->mutex); impl_->stats.native_create_ns+=create_ns; impl_->stats.native_create_max_ns=std::max(impl_->stats.native_create_max_ns,create_ns); })
         if(SUCCEEDED(native) && output && *output)
         {
-            const auto store_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+            HS_PSO_DIAGNOSTICS(const auto store_start=CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));)
             const auto stored=impl_->Store(name,*output,library.Get());
-            const auto store_ns=CacheElapsed(store_start);
+            HS_PSO_DIAGNOSTICS(const auto store_ns=CacheElapsed(store_start);)
             std::lock_guard lock(impl_->mutex);
-            impl_->stats.library_store_ns+=store_ns;
-            impl_->stats.library_store_max_ns=std::max(impl_->stats.library_store_max_ns,store_ns);
-            if(FAILED(stored)) { ++impl_->stats.store_failures; impl_->stats.last_cache_hresult=std::int32_t(stored); }
-            else { ++impl_->stats.stores; impl_->dirty=true; }
+            HS_PSO_DIAGNOSTICS(impl_->stats.library_store_ns+=store_ns; impl_->stats.library_store_max_ns=std::max(impl_->stats.library_store_max_ns,store_ns);)
+            if(FAILED(stored)) { HS_PSO_DIAGNOSTICS(++impl_->stats.store_failures; impl_->stats.last_cache_hresult=std::int32_t(stored);) }
+            else { HS_PSO_DIAGNOSTICS(++impl_->stats.stores;) impl_->dirty=true; }
         }
         return native;
     }
     catch(const KeyError &)
     {
-        if(state.owns_lock()) { ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); }
-        else { std::lock_guard lock(impl_->mutex); ++impl_->stats.key_failures; impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); }
+        HS_PSO_DIAGNOSTICS(
+            if(state.owns_lock()) impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG);
+            else { std::lock_guard lock(impl_->mutex); impl_->stats.last_cache_hresult=std::int32_t(E_INVALIDARG); }
+        )
         return E_INVALIDARG;
     }
     catch(const std::bad_alloc &) { return E_OUTOFMEMORY; }
@@ -745,32 +761,32 @@ HRESULT RendererPipelineCache::CreateMesh(ID3D12Device2 *device,const D3D12_GRAP
 }
 Result RendererPipelineCache::Flush()
 {
-    const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));
+    HS_PSO_DIAGNOSTICS(const auto waiting = CacheStart(impl_->timing_enabled.load(std::memory_order_relaxed));)
     std::unique_lock lifecycle(impl_->lifecycle_mutex);
     std::lock_guard lock(impl_->mutex);
-    RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);
-    if(!impl_->library || !impl_->stats.persistence_enabled || !impl_->dirty) return Result::Success();
+    HS_PSO_DIAGNOSTICS(RecordCacheDuration(waiting, impl_->stats.mutex_wait_ns, &impl_->stats.mutex_wait_max_ns);)
+    if(!impl_->library || !impl_->persistence_enabled || !impl_->dirty) return Result::Success();
     try
     {
         const auto size=impl_->library->GetSerializedSize();
         if(!size || size>kMaximumFileBytes-kHeaderBytes)
         {
-            impl_->IoFailure(ERROR_FILE_TOO_LARGE); return Failure(ErrorCode::TaskFailed,"Pipeline library exceeds the 256 MiB cache-file bound.");
+            HS_PSO_DIAGNOSTICS(impl_->IoFailure(ERROR_FILE_TOO_LARGE);)
+            return Failure(ErrorCode::TaskFailed,"Pipeline library exceeds the 256 MiB cache-file bound.");
         }
         std::vector<std::byte> bytes(kHeaderBytes+size);
         HRESULT native;
-        {
-            CacheDuration timing(impl_->stats.capture_timings, impl_->stats.serialize_ns);
-            native=impl_->library->Serialize(bytes.data()+kHeaderBytes,size);
-        }
-        if(FAILED(native)) { impl_->stats.last_cache_hresult=std::int32_t(native); return NativeFailure("Serialize pipeline library",native); }
-        impl_->stats.serialized_bytes=size;
+        HS_PSO_DIAGNOSTICS(const auto serialize_start=CacheStart(impl_->stats.capture_timings);)
+        native=impl_->library->Serialize(bytes.data()+kHeaderBytes,size);
+        HS_PSO_DIAGNOSTICS(RecordCacheDuration(serialize_start,impl_->stats.serialize_ns);)
+        if(FAILED(native)) { HS_PSO_DIAGNOSTICS(impl_->stats.last_cache_hresult=std::int32_t(native);) return NativeFailure("Serialize pipeline library",native); }
+        HS_PSO_DIAGNOSTICS(impl_->stats.serialized_bytes=size;)
         std::copy(kMagic.begin(),kMagic.end(),bytes.begin()); Put(bytes,8,kSchema,4); Put(bytes,12,kHeaderBytes,4);
         std::copy(impl_->identity.begin(),impl_->identity.end(),bytes.begin()+16); Put(bytes,48,size,8);
         const auto digest=Sha256(std::span(bytes).subspan(kHeaderBytes)); std::copy(digest.begin(),digest.end(),bytes.begin()+56);
-        CacheDuration write_timing(impl_->stats.capture_timings, impl_->stats.cache_write_ns);
+        HS_PSO_DIAGNOSTICS(CacheDuration write_timing(impl_->stats.capture_timings, impl_->stats.cache_write_ns);)
         std::error_code error; std::filesystem::create_directories(impl_->file.parent_path(),error);
-        if(error) { impl_->IoFailure(DWORD(error.value())); return Failure(ErrorCode::TaskFailed,"Create pipeline cache directory: "+error.message()); }
+        if(error) { HS_PSO_DIAGNOSTICS(impl_->IoFailure(DWORD(error.value()));) return Failure(ErrorCode::TaskFailed,"Create pipeline cache directory: "+error.message()); }
         static std::atomic<std::uint64_t> sequence{};
         auto temporary=impl_->file; temporary+=L".tmp-"+std::to_wstring(GetCurrentProcessId())+L"-"+
             std::to_wstring(GetTickCount64())+L"-"+std::to_wstring(sequence.fetch_add(1,std::memory_order_relaxed));
@@ -793,10 +809,10 @@ Result RendererPipelineCache::Flush()
             // Remove only the exact temporary file owned by this Flush call.
             if(owns_temporary && !DeleteFileW(temporary.c_str()))
             {
-                const auto cleanup=GetLastError();
-                if(cleanup!=ERROR_FILE_NOT_FOUND && cleanup!=ERROR_PATH_NOT_FOUND) impl_->IoFailure(cleanup);
+                HS_PSO_DIAGNOSTICS(const auto cleanup=GetLastError(); if(cleanup!=ERROR_FILE_NOT_FOUND && cleanup!=ERROR_PATH_NOT_FOUND) impl_->IoFailure(cleanup);)
             }
-            impl_->IoFailure(io_error); return NativeFailure("Persist pipeline cache",HRESULT_FROM_WIN32(io_error));
+            HS_PSO_DIAGNOSTICS(impl_->IoFailure(io_error);)
+            return NativeFailure("Persist pipeline cache",HRESULT_FROM_WIN32(io_error));
         }
         impl_->dirty=false; return Result::Success();
     }
@@ -804,3 +820,4 @@ Result RendererPipelineCache::Flush()
     catch(const std::exception &error) { return Failure(ErrorCode::TaskFailed,error.what()); }
 }
 } // namespace hs
+#undef HS_PSO_DIAGNOSTICS

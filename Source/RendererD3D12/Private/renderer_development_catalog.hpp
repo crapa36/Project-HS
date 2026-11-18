@@ -5,13 +5,13 @@
 #include <hs/render_data/render_revision.hpp>
 #include <hs/render_data/surface_layout.hpp>
 #include <hs/core/sha256.hpp>
+#include <hs/core/sha256_digest.hpp>
 #include <hs/render_data/renderer_catalog.hpp>
 #include <hs/core/cooked_format.hpp>
 #include "checked_binary_read.hpp"
 
 #include <algorithm>
 #include <array>
-#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -398,20 +398,21 @@ public:
         std::vector<std::pair<AssetId, std::string>> products;
         for (const auto &[id, path] : config.product_paths)
         {
-            if (!result->closure_ids_.insert(MakeAssetId(id).value).second)
+            const auto asset = MakeAssetId(id);
+            if (!result->closure_ids_.insert(asset.value).second)
                 throw std::runtime_error("Developer Generation AssetId collision");
             if (id.starts_with("render/") || id == "vfx/vfx_mesh_atlas.hsbin")
-                products.emplace_back(MakeAssetId(id), id);
+                products.emplace_back(asset, id);
             else
             {
                 const auto digest = config.product_digests.find(id);
-                if (!MakeAssetId(id).value || digest == config.product_digests.end() ||
+                if (!asset.value || digest == config.product_digests.end() ||
                     digest->second.size() != 71 || !digest->second.starts_with("sha256:") ||
                     !std::ranges::all_of(std::string_view(digest->second).substr(7), [](char value) {
                         return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
                     }))
                     throw std::runtime_error("Invalid developer source revision identity: " + id);
-                result->source_revision_assets_.insert(MakeAssetId(id).value);
+                result->source_revision_assets_.insert(asset.value);
             }
         }
         std::ranges::sort(products, {}, [](const auto &entry) { return entry.first.value; });
@@ -440,20 +441,10 @@ public:
             std::error_code error;
             const auto size = std::filesystem::file_size(path, error);
             const auto &digest = config.product_digests.at(id);
-            if (!path.is_absolute() || error || !size || size > std::numeric_limits<std::size_t>::max() ||
-                digest.size() != 71 || !digest.starts_with("sha256:"))
+            const auto hash = ParseSha256Digest(digest);
+            if (!path.is_absolute() || error || !size || size > std::numeric_limits<std::size_t>::max() || !hash)
                 throw std::runtime_error("Invalid developer renderer product identity: " + id);
-            std::array<std::byte, 32> hash{};
-            for (std::size_t i = 0; i < hash.size(); ++i)
-            {
-                unsigned byte{};
-                const auto first = digest.data() + 7 + i * 2;
-                const auto [end, status] = std::from_chars(first, first + 2, byte, 16);
-                if (status != std::errc{} || end != first + 2)
-                    throw std::runtime_error("Invalid developer renderer product digest: " + id);
-                hash[i] = static_cast<std::byte>(byte);
-            }
-            result->bulks.push_back({asset, {0, size, format(id), hash}});
+            result->bulks.push_back({asset, {0, size, format(id), *hash}});
             result->paths_.push_back(path);
         }
         result->texture_slots_ = std::make_unique<TextureSlot[]>(result->bulks.size());

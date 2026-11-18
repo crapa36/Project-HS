@@ -18,15 +18,14 @@ Texture2D<float2> GuideSurfaceHistory : register(t3, space13);
 Texture2D<float4> GuideComposite : register(t4, space13);
 Texture2D<float4> GuideOpaque : register(t5, space13);
 StructuredBuffer<float> GuideCurrentExposure : register(t6, space13);
-Texture2D<float> GuideRevealage : register(t7, space13);
+Texture2D<float2> GuideRevealage : register(t7, space13);
 Texture2D<float> GuideTransparentDepth : register(t9, space13);
 Texture2D<float2> GuideTransparentMotion : register(t10, space13);
 Texture2D<float2> GuideTransparentHistory : register(t11, space13);
 Texture2D<float4> GuideTransparentClassification : register(t12, space13);
 Texture2D<uint2> GuideTransparentMetadata : register(t13, space13);
-Texture2D<uint> GuideTransparentOverflow : register(t14, space13);
-Texture2D<float2> GuideTransparentTransport : register(t15, space13);
-Texture2D<float> GuideScreenOverlayAlpha : register(t16, space13);
+Texture2D<float2> GuideTransparentTransport : register(t14, space13);
+Texture2D<float> GuideScreenOverlayAlpha : register(t15, space13);
 RWTexture2D<float2> GuideMotionOutput : register(u0, space13);
 RWTexture2D<unorm float> GuideResponsiveOutput : register(u1, space13);
 RWTexture2D<float> GuideExposureOutput : register(u2, space13);
@@ -89,7 +88,8 @@ void ReconstructionGuidesCS(uint3 dispatch : SV_DispatchThreadID)
     float3 difference = abs(composite - opaque);
     float colorReactive = max(difference.r, max(difference.g, difference.b)) /
                           max(1.0, max(composite.r, max(composite.g, composite.b)));
-    float coverage = 1.0 - saturate(GuideRevealage.Load(int3(maskPixel, 0)));
+    const float2 mask_revealage = GuideRevealage.Load(int3(maskPixel, 0));
+    float coverage = 1.0 - saturate(mask_revealage.r);
     float maskDepth;
     bool maskTransparent = GuideSelectTransparent(maskPixel, GuideDepth.Load(int3(maskPixel, 0)), maskDepth);
     bool maskSurface = maskTransparent || (maskDepth > 0.0 &&
@@ -109,7 +109,7 @@ void ReconstructionGuidesCS(uint3 dispatch : SV_DispatchThreadID)
         const float2 transport = GuideTransparentTransport.Load(int3(maskPixel, 0));
         responsive = max(responsive, max(transport.x * colorReactive, transport.y * (1.0 - confidence)));
     }
-    if (GuideFrameInfo.y != 0 && GuideTransparentOverflow.Load(int3(maskPixel, 0)) != 0)
+    if (GuideFrameInfo.y != 0 && mask_revealage.g > 0.0)
         responsive = 1.0;
     responsive = max(responsive, 1.0 - confidence);
     if (!maskMotionValid || GuideFrameInfo.x == 0) responsive = 1.0;
@@ -119,7 +119,8 @@ void ReconstructionGuidesCS(uint3 dispatch : SV_DispatchThreadID)
     // Coverage is independent of the responsive/confidence/color-change mask.
     if (GuideFrameInfo.z != 0)
     {
-        float composition = 1.0 - saturate(GuideRevealage.Load(int3(pixel, 0)));
+        const float2 revealage = GuideRevealage.Load(int3(pixel, 0));
+        float composition = 1.0 - saturate(revealage.r);
         if (GuideReactiveParameters.z > 0.0)
             composition = max(composition, GuideScreenOverlayAlpha.Load(int3(pixel, 0)));
         if (transparent)
@@ -127,7 +128,7 @@ void ReconstructionGuidesCS(uint3 dispatch : SV_DispatchThreadID)
             composition = max(composition, saturate(GuideTransparentClassification.Load(int3(pixel, 0)).z));
             composition = max(composition, saturate(GuideTransparentTransport.Load(int3(pixel, 0)).x));
         }
-        if (GuideFrameInfo.y != 0 && GuideTransparentOverflow.Load(int3(pixel, 0)) != 0) composition = 1.0;
+        if (GuideFrameInfo.y != 0 && revealage.g > 0.0) composition = 1.0;
         GuideCompositionOutput[pixel] = saturate(composition);
     }
     if (all(dispatch.xy == uint2(0, 0))) GuideExposureOutput[uint2(0, 0)] = exposure;

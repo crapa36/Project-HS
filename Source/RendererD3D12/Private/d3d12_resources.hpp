@@ -196,9 +196,6 @@ struct FrameContext
     std::uint32_t timestamp_capacity{};
     std::uint64_t ui_upload_bytes{};
     std::vector<GpuPassTiming> timestamp_passes;
-    std::vector<std::uint64_t> timestamp_frequencies;
-    std::vector<std::uint32_t> timestamp_pass_query_slots;
-    std::vector<std::uint32_t> timestamp_query_slots;
 #if defined(HS_DEVELOPMENT_TOOLS)
     struct UploadTiming
     {

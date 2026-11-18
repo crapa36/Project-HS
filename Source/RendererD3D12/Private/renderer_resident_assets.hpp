@@ -22,16 +22,4 @@ struct ResidentUtilitySubmission
     bool signaled{};
 };
 
-// Exact native allocation sizes, rather than package file sizes, describe GPU
-// overlap. The DXGI observation used for admission includes the live generation.
-struct ResidentPreparationAccounting
-{
-    bool enabled{};
-    bool unified_memory{};
-    std::uint64_t host_staging_budget_bytes{};
-    std::uint64_t default_bytes{}, upload_bytes{}, readback_bytes{};
-    std::uint64_t live_native_bytes{}, peak_native_bytes{};
-    std::uint64_t closure_payload_bytes{}, largest_payload_bytes{};
-    std::uint64_t retained_host_bytes{};
-};
 } // namespace hs

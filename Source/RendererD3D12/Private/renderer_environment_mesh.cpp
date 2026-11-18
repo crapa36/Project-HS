@@ -82,7 +82,7 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes(
         if (!handle) throw std::runtime_error("Compiled environment material is missing");
         const auto &descriptor = config.packed_materials[handle.value];
         if (descriptor.kind != render_data::MaterialKind::Environment ||
-            descriptor.surface != material_surface_layouts[ordinal] || MaterialLayoutDigest(descriptor) != material_parameter_layouts[ordinal])
+            descriptor.surface != material_surface_layouts[ordinal])
             throw std::runtime_error("Compiled environment material layout differs from its resident profile");
         material.metallic = descriptor.metallic; material.roughness_scale = descriptor.roughness_scale;
         material.two_sided = (descriptor.flags & render_data::kMaterialFlagTwoSided) != 0;
@@ -222,58 +222,8 @@ Result D3D12Renderer::Impl::CreateEnvironmentMeshes(
             {
                 render_data::RockMaterial packaged_material;
                 EnvironmentMaterialBindingsGpu selected_bindings;
-                if (config.packed_content || config.development_catalog)
-                {
-                    if (auto loaded = load_compiled_material(material_ordinal, required_layer,
-                        packaged_material, selected_bindings); !loaded) return loaded;
-                }
-                else
-                {
-                    const auto &material_package = material_headers[material_ordinal].view;
-                    const auto find_chunk = [&](render_data::ChunkType type) -> const render_data::ChunkView & {
-                        const auto found = std::ranges::find(material_package.chunks, type, &render_data::ChunkView::type);
-                        if (found == material_package.chunks.end() || !found->required)
-                            throw std::runtime_error("Canonical environment material chunk is missing");
-                        return *found;
-                    };
-                    packaged_material = render_data::DecodeRockMaterial(
-                        find_chunk(render_data::ChunkType::MaterialMetadata).bytes, material_package.dependencies);
-                    const auto programs = render_data::DecodeMaterialPrograms(
-                        find_chunk(render_data::ChunkType::MaterialProgram).bytes, material_package.dependencies);
-                    const auto scene_id = "render/shader/" + material_name + "_scene.dxil";
-                    const auto shadow_id = "render/shader/" + material_name + "_shadow.dxil";
-                    if (programs.size() != (masked ? 2u : 1u) ||
-                        programs[0].kind != (masked ? render_data::MaterialProgramKind::MaskedScenePS :
-                            render_data::MaterialProgramKind::OpaqueScenePS) ||
-                        material_package.dependencies[programs[0].dependency_index] != scene_id ||
-                        (masked && (programs[1].kind != render_data::MaterialProgramKind::MaskedShadowPS ||
-                            material_package.dependencies[programs[1].dependency_index] != shadow_id)))
-                        throw std::runtime_error("Canonical environment material program identity is invalid");
-                    const auto bindings = render_data::DecodeMaterialBindings(
-                        find_chunk(render_data::ChunkType::MaterialBindings).bytes, material_package.dependencies);
-                    for (const auto &binding : bindings)
-                    {
-                        const auto slot = binding.slot;
-                        if (binding.dependency_index == 0xffff)
-                        {
-                            if (!packaged_material.textures[slot].empty())
-                                throw std::runtime_error("material metadata declares an absent texture binding");
-                            continue;
-                        }
-                        const auto &texture_id = material_package.dependencies[binding.dependency_index];
-                        if (packaged_material.textures[slot] != texture_id)
-                            throw std::runtime_error("material metadata and typed texture binding disagree");
-                        const render_data::MaterialTextureDefinition definition{
-                            "slot_" + std::to_string(slot), texture_id, binding.dimension, binding.semantic};
-                        if (material_residency == EnvironmentMaterialResidency::CaptureOnly)
-                        {
-                            if (auto checked = validate_capture_binding(definition, required_layer, {}); !checked) return checked;
-                        }
-                        else if (auto loaded = LoadEnvironmentMaterialTexture(definition, required_layer, uploads,
-                            selected_bindings.texture_indices[slot]); !loaded) return loaded;
-                        selected_bindings.product_ids[slot] = texture_id;
-                    }
-                }
+                if (auto loaded = load_compiled_material(material_ordinal, required_layer,
+                    packaged_material, selected_bindings); !loaded) return loaded;
                 const auto variant = render_data::ClassifyEnvironmentMaterial(packaged_material);
                 if (material_ordinal == kTerrainMaterialOrdinal &&
                     std::ranges::any_of(packaged_material.textures, [](const auto &id) { return id.empty(); }))
@@ -605,7 +555,7 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
                                        "Environment geometry decode result owner is missing.");
             if (!streaming.CompleteRead(stream.request, resource_generation_id))
             {
-                std::vector<std::byte>{}.swap(stream.decoded_storage);
+                stream.decoded_storage.Reset();
                 return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12",
                                        "Geometry read completed for a stale content Generation.");
             }
@@ -644,7 +594,7 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
             return Result::Failure(ErrorCode::InvalidState, "hs_renderer_d3d12", "Geometry publication generation exhausted.");
         candidate.generation = static_cast<std::uint32_t>(stream.generation + 1u);
         AllocationResource upload;
-        if (auto prepared = PrepareGeometryPageUpload(candidate, metadata, stream.decoded_storage,
+        if (auto prepared = PrepareGeometryPageUpload(candidate, metadata, stream.decoded_storage.Bytes(),
                 MakeAssetId(stream.logical_id), stream.target_index, upload,
                 stream.preparation.get()); !prepared)
         {
@@ -673,7 +623,7 @@ Result D3D12Renderer::Impl::PumpEnvironmentGeometryStreaming()
         static_cast<void>(residency.ReleaseNow(stream.decode_reservation));
         stream.decoded_residency = {};
         stream.decode_reservation = {}; stream.read_bytes = 0;
-        std::vector<std::byte>{}.swap(stream.decoded_storage);
+        stream.decoded_storage.Reset();
         stream.preparation.reset();
         stream.candidate = std::move(candidate);
         stream.upload = std::move(upload);

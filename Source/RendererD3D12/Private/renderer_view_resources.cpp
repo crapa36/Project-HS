@@ -98,12 +98,10 @@ Result D3D12Renderer::Impl::PrepareExposureResources(OwnedView &owner)
 }
 
 void D3D12Renderer::Impl::WriteViewDescriptors(OwnedView &owner, std::uint32_t frame,
-                                              std::uint32_t read_history,
-                                              std::uint32_t write_history) noexcept
+                                              std::uint32_t read_history) noexcept
 {
     // Both guide targets have stable RTV slots; read/write indices select the
     // shader history and the frame's target bindings independently.
-    (void)write_history;
     auto shadow_null = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
     shadow_null.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount + kVirtualShadowDescriptorOffset) * srv_stride;
     for (UINT index = 0; index < kVirtualShadowDescriptorCount; ++index)
@@ -193,31 +191,6 @@ void D3D12Renderer::Impl::WriteViewDescriptors(OwnedView &owner, std::uint32_t f
         device->CreateUnorderedAccessView(nullptr, nullptr, &view, volume_null);
         volume_null.ptr += srv_stride;
     }
-    // A valid null table remains bound when hero layering is disabled. Enabled
-    // registration replaces it with immutable tables after this slot is waited.
-    auto null_table = srv_cpu_heap->GetCPUDescriptorHandleForHeapStart();
-    null_table.ptr += (static_cast<SIZE_T>(frame) * kTextureDescriptorCount +
-        kLayeredTranslucencyDescriptorOffset) * srv_stride;
-    device->CreateConstantBufferView(nullptr, null_table);
-    null_table.ptr += srv_stride;
-    for (std::uint32_t index = 0; index < 21; ++index)
-    {
-        D3D12_SHADER_RESOURCE_VIEW_DESC view{};
-        view.Format = index == 19 || index == 13 ? DXGI_FORMAT_R32_UINT
-            : index == 18 || (index >= 4 && index < 8) ? DXGI_FORMAT_R32G32_UINT
-            : index == 15 || index == 20 ? DXGI_FORMAT_R16G16_FLOAT
-            : index == 16 ? DXGI_FORMAT_R32G32_FLOAT
-            : index == 17 || index == 12 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R32_FLOAT;
-        view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-        view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-        view.Texture2D.MipLevels = 1;
-        device->CreateShaderResourceView(nullptr, &view, null_table);
-        null_table.ptr += srv_stride;
-    }
-    D3D12_UNORDERED_ACCESS_VIEW_DESC overflow{};
-    overflow.Format = DXGI_FORMAT_R32_UINT;
-    overflow.ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
-    device->CreateUnorderedAccessView(nullptr, nullptr, &overflow, null_table);
     auto rtv = rtv_heap->GetCPUDescriptorHandleForHeapStart();
     rtv.ptr += static_cast<SIZE_T>(kFrameCount + frame * kRtvBankStride + kViewRtvOffset) * rtv_stride;
     const auto create_rtv = [&](ID3D12Resource *resource, DXGI_FORMAT format) {

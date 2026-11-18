@@ -205,11 +205,6 @@ struct GpuSceneCanonicalInputs
     bool operator==(const GpuSceneCanonicalInputs &) const noexcept = default;
 };
 
-struct GpuSceneChanges
-{
-    std::size_t created{}, updated{}, unchanged{}, destroyed{};
-};
-
 class PersistentGpuSceneSlots
 {
   public:
@@ -240,13 +235,10 @@ class PersistentGpuSceneSlots
     void CollectDirtyRangesSince(std::uint64_t uploaded_revision,
                                  std::vector<PersistentGpuSceneRange> &union_ranges,
                                  std::array<std::vector<PersistentGpuSceneRange>, kGpuSceneChannelCount> &channel_ranges) const;
-    [[nodiscard]] std::size_t ActiveCount() const noexcept { return active_count_; }
     [[nodiscard]] std::size_t SlotCount() const noexcept
     {
         return preparing_ && reset_scene_ ? pending_reset_slots_ : instances_.size();
     }
-    [[nodiscard]] std::size_t AnonymousCount() const noexcept { return anonymous_count_; }
-    [[nodiscard]] GpuSceneChanges Changes() const noexcept { return changes_; }
     [[nodiscard]] const RenderInstance::Revisions &Revisions(std::uint32_t slot) const
     {
         return preparing_ ? pending_entries_.at(slot).revisions : entries_.at(slot).revisions;
@@ -304,9 +296,6 @@ class PersistentGpuSceneSlots
     std::vector<DirtySlot> dirty_slots_;
     std::vector<PersistentGpuSceneRange> dirty_ranges_;
     std::array<std::vector<PersistentGpuSceneRange>, kGpuSceneChannelCount> dirty_channel_ranges_;
-    std::size_t active_count_{};
-    std::size_t anonymous_count_{};
-    GpuSceneChanges changes_{};
     std::uint64_t content_revision_{}, pending_content_revision_{};
     std::uint64_t payload_revision_{};
     bool content_changed_{};

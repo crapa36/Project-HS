@@ -197,7 +197,8 @@ struct TextureStreamRegistration
     RendererAssetSource source;
     std::shared_ptr<const void> generation_lease;
     render_data::TextureDescription description;
-    render_data::TextureHandle compiled_texture;
+    // Renderer-owned immutable subresource storage outlives this registration.
+    render_data::TextureDescriptor descriptor{};
     Microsoft::WRL::ComPtr<ID3D12Resource> fallback;
     std::uint32_t fallback_first_mip{};
     std::uint64_t fallback_allocation_bytes{};
@@ -272,14 +273,14 @@ class RendererTextureStreaming
     RendererTextureStreaming(const RendererTextureStreaming &) = delete;
     RendererTextureStreaming &operator=(const RendererTextureStreaming &) = delete;
     [[nodiscard]] Result Initialize(ID3D12Device *, D3D12MA::Allocator *,
-        GraphicsQuality, std::uint32_t finest_mip, std::uint32_t budget_mib, TextureStreamingCapabilities &,
-        std::uint32_t frame_count, std::span<const render_data::TextureDescriptor> texture_catalog);
+        GraphicsQuality, std::uint32_t finest_mip, std::uint32_t budget_mib, TextureStreamingCapabilities,
+        std::uint32_t frame_count);
     [[nodiscard]] Result Register(TextureStreamRegistration, ResidencyManager &, TextureStreamId &);
     // A budget refusal is a successful, non-admitted transaction with zero IDs.
+    // Input registrations may be moved from even on failed admission; owner IDs publish as a batch.
     [[nodiscard]] Result RegisterBatch(std::span<TextureStreamRegistration>, ResidencyManager &,
                                        std::span<TextureStreamId>, bool &admitted,
                                        std::uint64_t *required_budget_bytes = nullptr);
-    [[nodiscard]] Result SupplyDescriptor(std::string logical_id, render_data::TextureDescriptorStorage);
     [[nodiscard]] Result ValidateConfiguration(GraphicsQuality, std::uint32_t budget_mib) const;
     [[nodiscard]] Result Configure(GraphicsQuality, std::uint32_t finest_mip, std::uint32_t budget_mib);
     // The caller supplies the actual scene's conservative set when that set
@@ -300,9 +301,7 @@ class RendererTextureStreaming
     void MarkSubmitted(const CompletionSet &, StreamingManager &) noexcept;
     [[nodiscard]] bool HasStartedWork() const noexcept;
     [[nodiscard]] TextureStreamView View(TextureStreamId) const noexcept;
-    [[nodiscard]] bool HardwareBacked(TextureStreamId) const noexcept;
-    [[nodiscard]] bool NeedsDemand(TextureStreamId, bool baseline_consumer = false,
-                                   bool feedback_active = false) const noexcept;
+    [[nodiscard]] bool NeedsCpuDemand(TextureStreamId) const noexcept;
     void MarkUse(TextureStreamId, const CompletionSet &) noexcept;
     void CancelReads(RendererAssetIo &, StreamingManager &) noexcept;
     void SwapState(RendererTextureStreaming &) noexcept;

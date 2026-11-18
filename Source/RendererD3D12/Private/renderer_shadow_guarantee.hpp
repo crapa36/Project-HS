@@ -251,22 +251,6 @@ struct ShadowRootCoverageDomain
     Float4 right{},up{},forward{};
     double minimum_x{},minimum_y{},maximum_x{},maximum_y{},minimum_z{},maximum_z{};
 };
-[[nodiscard]] inline bool ShadowRootReceiverBoundsValid(Float4 minimum,Float4 maximum) noexcept
-{
-    return std::isfinite(minimum.x)&&std::isfinite(minimum.y)&&std::isfinite(minimum.z)&&std::isfinite(minimum.w)&&
-        std::isfinite(maximum.x)&&std::isfinite(maximum.y)&&std::isfinite(maximum.z)&&std::isfinite(maximum.w)&&
-        minimum.x<=maximum.x&&minimum.y<=maximum.y&&minimum.z<=maximum.z&&
-        (minimum.w==0.0f||minimum.w==1.0f)&&(maximum.w==0.0f||maximum.w==1.0f);
-}
-[[nodiscard]] inline bool ShadowRootContainsXY(Float3 point,const ShadowRootCoverageDomain &domain) noexcept
-{
-    if(!std::isfinite(point.x)||!std::isfinite(point.y)||!std::isfinite(point.z))return false;
-    const auto [x,ex]=ShadowProjectCoordinate(point,domain.right);
-    const auto [y,ey]=ShadowProjectCoordinate(point,domain.up);
-    return std::isfinite(x)&&std::isfinite(y)&&std::isfinite(ex)&&std::isfinite(ey)&&
-        x-ex>=domain.minimum_x&&y-ey>=domain.minimum_y&&
-        x+ex<domain.maximum_x&&y+ey<domain.maximum_y;
-}
 [[nodiscard]] inline bool ShadowRootContainsCaster(Float4 bounds,const ShadowRootCoverageDomain &domain) noexcept
 {
     if(!std::isfinite(bounds.x)||!std::isfinite(bounds.y)||!std::isfinite(bounds.z)||
@@ -522,13 +506,11 @@ template <typename Casters, typename Receivers>
         return deny(VirtualShadowCsmReason::InvalidLightSpace);
     const auto receiver_check=[&](const auto &receiver,bool camera,bool frustum_enclosure=false)
     {
-        if (!finite(receiver.minimum) || !finite(receiver.maximum) ||
-            (receiver.minimum.w != 0 && receiver.minimum.w != 1) ||
+        if (!finite(receiver.minimum) || !finite(receiver.maximum) || receiver.minimum.w != 0 ||
             receiver.minimum.x > receiver.maximum.x || receiver.minimum.y > receiver.maximum.y ||
             receiver.minimum.z > receiver.maximum.z || (receiver.maximum.w!=0&&receiver.maximum.w!=1)) return -1;
-        if(frustum_enclosure && (receiver.minimum.w!=0 || receiver.maximum.w!=0)) return -1;
-        if(camera&&(receiver.minimum.w!=0||receiver.maximum.w!=1)) return -1;
-        if (receiver.minimum.w == 1) return 1; // Private capture retains its own actual CSM.
+        if(frustum_enclosure && receiver.maximum.w!=0) return -1;
+        if(camera&&receiver.maximum.w!=1) return -1;
         // Camera-only GPU feedback envelopes (water/gel/monster unions) are not
         // the surface proof. The independent complete actual-draw range below
         // supplies that proof with tighter bounds, including shadow-off draws.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "renderer_asset_source.hpp"
+#include "renderer_asset_io.hpp"
 
 #include "renderer_cluster_catalog.hpp"
 #include <hs/render_data/material_schema.hpp>
@@ -63,7 +64,7 @@ struct ClusterPageStream
     std::uint64_t last_demand_epoch{};
     std::uint64_t read_bytes{};
     StreamingRequestId request;
-    std::vector<std::byte> read_storage;
+    AssetReadBuffer read_storage;
     render_data::GeometryData decoded;
     std::shared_ptr<render_data::GeometryData> decoded_result;
     ResidencyTicket decoded_residency, read_residency, upload_residency;

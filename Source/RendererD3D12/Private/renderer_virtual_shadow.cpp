@@ -25,7 +25,9 @@ namespace hs
 using Microsoft::WRL::ComPtr;
 namespace
 {
-constexpr std::uint32_t kComputeSrvs = 5, kComputeUavs = 9, kComputeDescriptors = kComputeSrvs+kComputeUavs;
+constexpr std::uint32_t kStaticDepthSrv = 5, kComputeSrvs = kStaticDepthSrv+1;
+constexpr std::uint32_t kResidentPageStride = 4 * sizeof(std::uint32_t);
+constexpr std::uint32_t kComputeUavs = 9, kComputeDescriptors = kComputeSrvs+kComputeUavs;
 constexpr std::uint32_t kIndexedStride = 24, kMeshStride = 16, kClearStride = 20;
 constexpr std::uint32_t kGpuSegmentStride=32;
 constexpr std::uint32_t kSegmentMetadataOffset=512; // Preserve append-only root metadata before command segments.
@@ -237,7 +239,7 @@ struct VirtualShadowTargets
     ComPtr<ID3D12DescriptorHeap> compute_heap, srv_heap, dsv_heap;
     ComPtr<ID3D12RootSignature> root;
     std::array<ComPtr<ID3D12PipelineState>, 5> compute;
-    ComPtr<ID3D12PipelineState> clear_pso, seed_pso;
+    ComPtr<ID3D12PipelineState> clear_pso, seed_pso, dynamic_seed_pso;
     ComPtr<ID3D12CommandSignature> clear_signature;
     CompletionSet lease;
     bool banks_initialized{};
@@ -292,16 +294,16 @@ Result Heap(VirtualShadowTargets &t, D3D12_DESCRIPTOR_HEAP_TYPE type, std::uint3
 }
 Result Pipelines(VirtualShadowTargets &t)
 {
-    D3D12_DESCRIPTOR_RANGE ranges[2]{};
-    ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kComputeSrvs, 0, 21, 0};
-    ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, kComputeUavs, 0, 21, 0};
+    D3D12_DESCRIPTOR_RANGE ranges[3]{};
+    ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kStaticDepthSrv, 0, 21, 0};
+    ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 7, 21, kStaticDepthSrv};
+    ranges[2] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, kComputeUavs, 0, 21, 0};
     std::array<D3D12_ROOT_PARAMETER, 6> parameters{};
     parameters[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV; parameters[0].Descriptor = {0, 21};
-    for (std::uint32_t i = 0; i < 2; ++i)
-    {
-        parameters[i+1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        parameters[i+1].DescriptorTable = {1, &ranges[i]};
-    }
+    parameters[1].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[1].DescriptorTable = {2, &ranges[0]};
+    parameters[2].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[2].DescriptorTable = {1, &ranges[2]};
     parameters[3].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     parameters[3].Constants = {1, 21, 1};
     parameters[4].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV; parameters[4].Descriptor={5,21};
@@ -366,6 +368,12 @@ Result Pipelines(VirtualShadowTargets &t)
             : t.device->CreateGraphicsPipelineState(&graphics,IID_PPV_ARGS(t.seed_pso.ReleaseAndGetAddressOf()));
         if(FAILED(hr)) return HResultFailure("Create virtual shadow static seed PSO",hr);
     }
+    if (auto result=t.reader("render/shader/virtual_shadow_dynamic_seed_ps.dxil",ps); !result) return result;
+    if (ps.empty()) return Invalid("Virtual shadow dynamic seed product is empty.");
+    graphics.PS={ps.data(),ps.size()};
+    hr=t.cache ? t.cache->CreateGraphics(&graphics,IID_PPV_ARGS(t.dynamic_seed_pso.ReleaseAndGetAddressOf()))
+        : t.device->CreateGraphicsPipelineState(&graphics,IID_PPV_ARGS(t.dynamic_seed_pso.ReleaseAndGetAddressOf()));
+    if(FAILED(hr)) return HResultFailure("Create virtual shadow dynamic seed PSO",hr);
     D3D12_INDIRECT_ARGUMENT_DESC arguments[2]{};
     arguments[0].Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT;
     arguments[0].Constant = {3, 0, 1}; arguments[1].Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
@@ -453,7 +461,7 @@ struct VirtualShadowSystem::Impl
     std::vector<std::uint32_t> stable_root_counts;
     std::uint32_t stable_root_count{};
     bool stable_root_valid{},stable_root_eligible{};
-    std::uint32_t stable_head{UINT32_MAX}, stable_changes{};
+    std::uint32_t stable_head{UINT32_MAX};
     DirectX::XMFLOAT4 stable_forward{};
     double stable_minimum{}, stable_maximum{};
     ShadowCommandDemand PrepareCommandDemand(const VirtualShadowInputs &in,const ShadowGuaranteeFacts &facts)
@@ -749,7 +757,7 @@ Result VirtualShadowSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *al
         t->root_static_upload.resource->Unmap(0,&written);
     }
     // Mandatory root storage above is allocated before the fine cache.
-    if (auto result = Allocate(*t, t->residents, Buffer(UINT64(profile.physical_pages)*32, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)); !result) return result;
+    if (auto result = Allocate(*t, t->residents, Buffer(UINT64(profile.physical_pages)*kResidentPageStride, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)); !result) return result;
     if (auto result = Allocate(*t, t->static_bank, BankDescription(t->extent)); !result) return result;
     if (auto result = Allocate(*t, t->dynamic_bank, BankDescription(t->extent)); !result) return result;
     HS_RENDERER_SET_DEBUG_NAME(t->static_bank.resource.Get(), L"VirtualShadow.StaticDepth");
@@ -794,8 +802,9 @@ Result VirtualShadowSystem::Prepare(ID3D12Device *device, D3D12MA::Allocator *al
         StructuredSrv(device, f.casters.resource.Get(), sizeof(GpuCaster), Cpu(t->compute_heap.Get(), compute_base+2, t->descriptor_stride));
         StructuredSrv(device, f.receivers.resource.Get(), sizeof(VirtualShadowReceiver), Cpu(t->compute_heap.Get(), compute_base+3, t->descriptor_stride));
         StructuredSrv(device, f.pages.resource.Get(), sizeof(GpuShadowPageEntry), Cpu(t->compute_heap.Get(), compute_base+4, t->descriptor_stride));
+        TextureSrv(device, t->static_bank.resource.Get(), DXGI_FORMAT_R32_FLOAT, Cpu(t->compute_heap.Get(), compute_base+kStaticDepthSrv, t->descriptor_stride));
         const std::array<AllocationResource *, kComputeUavs> uavs{&f.pages, &t->residents, &f.requests, &f.draws, &f.indexed, &f.mesh, &f.counts, &f.clear, &f.page_draw_counts};
-        constexpr std::array<std::uint32_t, kComputeUavs> strides{32,32,0,32,0,0,0,0,0};
+        constexpr std::array<std::uint32_t, kComputeUavs> strides{sizeof(GpuShadowPageEntry),kResidentPageStride,0,32,0,0,0,0,0};
         for (std::uint32_t i = 0; i < kComputeUavs; ++i) Uav(device, uavs[i]->resource.Get(), strides[i], Cpu(t->compute_heap.Get(), compute_base+kComputeSrvs+i, t->descriptor_stride));
         RawSrv(device, f.metadata.resource.Get(), Cpu(t->srv_heap.Get(), main_base, t->descriptor_stride));
         StructuredSrv(device, f.pages.resource.Get(), 32, Cpu(t->srv_heap.Get(), main_base+1, t->descriptor_stride));
@@ -929,7 +938,7 @@ Result VirtualShadowSystem::PrepareFrame(const VirtualShadowInputs &in, VirtualS
     for (const auto &receiver : in.receivers)
     {
         if (!Finite(receiver.minimum) || !Finite(receiver.maximum) ||
-            (receiver.minimum.w != 0.0f && receiver.minimum.w != 1.0f) || receiver.minimum.x > receiver.maximum.x ||
+            receiver.minimum.w != 0.0f || receiver.minimum.x > receiver.maximum.x ||
             receiver.minimum.y > receiver.maximum.y || receiver.minimum.z > receiver.maximum.z)
             return Invalid("Virtual shadow receiver has invalid world bounds.");
         // XYZ/finite/minimum.w are already validated above. maximum.w is a
@@ -1078,10 +1087,10 @@ Result VirtualShadowSystem::PrepareFrame(const VirtualShadowInputs &in, VirtualS
     impl_->cpu_plan_prepared = true;
     return Result::Success();
 }
-bool VirtualShadowSystem::MatchesLayout(const VirtualShadowInputs &in,
-    const VirtualShadowFramePlan &plan,const VirtualShadowLayout &layout) const noexcept
+bool VirtualShadowSystem::MatchesShape(const VirtualShadowFramePlan &plan,bool material_sampling,
+    const VirtualShadowLayout &layout) const noexcept
 {
-    const auto t=impl_->active;
+    const auto &t=impl_->active;
     if(!t||!plan.prepared||plan.targets!=t||impl_->faulted||
         !layout.target_generation||layout.target_generation!=t->generation||
         layout.fixed_root!=plan.fixed_root||
@@ -1092,8 +1101,13 @@ bool VirtualShadowSystem::MatchesLayout(const VirtualShadowInputs &in,
             bool(t->root_static_upload.resource)&&!t->root_static_initialized)||
         layout.root_dynamic_present!=(plan.fixed_root&&bool(t->root_dynamic.resource))||
         layout.reset!=bool(plan.constants.options.x)||
-        layout.material_sampling!=(bool(in.draw)&&!in.draw_groups.empty()&&
-            bool(in.declare_material_sampling))||
+        layout.material_sampling!=(!plan.groups.empty()&&material_sampling))return false;
+    return true;
+}
+bool VirtualShadowSystem::MatchesLayout(const VirtualShadowInputs &in,
+    const VirtualShadowFramePlan &plan,const VirtualShadowLayout &layout) const noexcept
+{
+    if(!MatchesShape(plan,bool(in.declare_material_sampling),layout)||
         layout.depth!=in.depth||layout.normal!=in.normal||
         layout.native_reads.size()!=in.native_reads.size())return false;
     for(std::size_t index=0;index<in.native_reads.size();++index)
@@ -1201,60 +1215,41 @@ Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const Virtua
     const auto mapped_hr = f.upload.resource->Map(0, &no_read, &mapped);
     if (FAILED(mapped_hr)) return HResultFailure("Map immutable virtual shadow frame snapshot", mapped_hr);
     auto *bytes = static_cast<std::byte *>(mapped);
-    const auto pack = [&](const VirtualShadowCaster &c,std::size_t i,std::uint32_t &head,std::uint32_t &changes) {
+    const auto pack = [](const VirtualShadowCaster &c,std::size_t i,std::uint32_t &head) {
         const bool is_static = c.immutable_source && !c.skin && !c.wind && !c.animated_alpha;
         const bool was_static = c.previous_immutable_source && !c.previous_skin && !c.previous_wind && !c.previous_animated_alpha;
-        const bool changed = c.force_content_invalidation || c.present != c.previous_present || is_static != was_static ||
-            c.instance_generation != c.previous_generation || c.current_revisions != c.previous_revisions ||
-            c.current_cut_revision != c.previous_cut_revision || !Same(c.current_bounds, c.previous_bounds);
         const std::uint32_t flags = (c.present ? 1u : 0u) | (c.previous_present ? 2u : 0u) |
-            (is_static ? 4u : 0u) | (was_static ? 8u : 0u) | (changed ? 16u : 0u) | (c.baked_source ? 64u : 0u);
+            (is_static ? 4u : 0u) | (c.baked_source ? 64u : 0u);
         GpuCaster gpu{c.current_bounds, c.previous_bounds,
             {c.instance_index, c.instance_generation, c.source_ref, c.geometry_record},
             {flags, c.draw_group, 0u, head}};
-        if (changed && (is_static || was_static))
-        {
+        if ((is_static || was_static) && (c.force_content_invalidation || c.present != c.previous_present ||
+            is_static != was_static || c.instance_generation != c.previous_generation ||
+            c.current_revisions != c.previous_revisions || c.current_cut_revision != c.previous_cut_revision ||
+            !Same(c.current_bounds, c.previous_bounds)))
             head = static_cast<std::uint32_t>(i);
-            ++changes;
-        }
         return gpu;
     };
     if(!in.stable_caster_revision || impl_->stable_revision!=in.stable_caster_revision)
     {
         impl_->stable_words.resize(in.casters.stable.size());
-        impl_->stable_head=UINT32_MAX; impl_->stable_changes=0;
+        impl_->stable_head=UINT32_MAX;
         for(std::size_t i=0;i<in.casters.stable.size();++i)
-            impl_->stable_words[i]=pack(in.casters.stable[i],i,impl_->stable_head,impl_->stable_changes);
+            impl_->stable_words[i]=pack(in.casters.stable[i],i,impl_->stable_head);
         impl_->stable_revision=in.stable_caster_revision;
     }
     const bool upload_stable=!in.stable_caster_revision || f.stable_revision!=in.stable_caster_revision;
     const auto stable_bytes=in.casters.stable.size()*sizeof(GpuCaster);
     if(upload_stable && stable_bytes) std::memcpy(bytes+t->caster_offset,impl_->stable_words.data(),stable_bytes);
     constants.limits.x=impl_->stable_head;
-    [[maybe_unused]] auto changed_static_count=impl_->stable_changes;
     for(std::size_t i=0;i<in.casters.dynamic.size();++i)
     {
         const auto index=in.casters.stable.size()+i;
-        const auto gpu=pack(in.casters.dynamic[i],index,constants.limits.x,changed_static_count);
+        const auto gpu=pack(in.casters.dynamic[i],index,constants.limits.x);
         std::memcpy(bytes+t->caster_offset+index*sizeof(GpuCaster),&gpu,sizeof(gpu));
     }
     f.pending_stable_revision=in.stable_caster_revision;
     const auto caster_copy_offset=upload_stable ? 0 : stable_bytes;
-    // Link only cache-invalidating changes; preserve caster order and draw identities.
-#ifndef NDEBUG
-    std::uint32_t linked_count{};
-    for (auto index = constants.limits.x; index != UINT32_MAX; )
-    {
-        assert(index < in.casters.size());
-        GpuCaster caster;
-        std::memcpy(&caster, bytes+t->caster_offset+index*sizeof(GpuCaster), sizeof(caster));
-        assert((caster.properties.x & 16u) != 0 && (caster.properties.x & 12u) != 0);
-        assert(caster.properties.w == UINT32_MAX || caster.properties.w < index);
-        index = caster.properties.w;
-        ++linked_count;
-    }
-    assert(linked_count == changed_static_count);
-#endif
     std::memcpy(bytes, &constants, sizeof(constants));
     if (!in.receivers.empty()) std::memcpy(bytes+t->receiver_offset, in.receivers.data(), in.receivers.size_bytes());
     auto *gpu_segments=reinterpret_cast<GpuCommandSegment *>(bytes+t->segment_offset);
@@ -1533,7 +1528,11 @@ Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const Virtua
         for (const auto &read : in.native_reads) if (read.version.resource) pass.Read(read.version, read.access);
         if (in.draw && !in.draw_groups.empty() && in.declare_material_sampling)
             if(!retained)in.declare_material_sampling(pass.Native());
-        if (layer) dynamic_bank = pass.Write(dynamic_bank, Access::DepthWrite);
+        if (layer)
+        {
+            pass.Read(static_bank, Access::ShaderRead);
+            dynamic_bank = pass.Write(dynamic_bank, Access::DepthWrite);
+        }
         else static_bank = pass.ReadWrite(static_bank, Access::DepthWrite);
         pass.SetExecuteChecked([t, slot=in.frame_slot, layer, callback=in.draw, outputs=out,
             group_count=std::uint32_t(in.draw_groups.size()), initialize=!t->banks_initialized](RenderPassContext &ctx) -> Result
@@ -1548,7 +1547,7 @@ Result VirtualShadowSystem::RegisterImpl(RenderGraphBuilder &graph, const Virtua
             const D3D12_RECT scissor{0,0,LONG(t->extent.width),LONG(t->extent.height)};
             list->RSSetViewports(1, &viewport); list->RSSetScissorRects(1, &scissor);
             ID3D12DescriptorHeap *heaps[]{t->compute_heap.Get()}; list->SetDescriptorHeaps(1, heaps);
-            list->SetGraphicsRootSignature(t->root.Get()); list->SetPipelineState(!layer && t->profile.baked ? t->seed_pso.Get() : t->clear_pso.Get());
+            list->SetGraphicsRootSignature(t->root.Get()); list->SetPipelineState(layer ? t->dynamic_seed_pso.Get() : t->profile.baked ? t->seed_pso.Get() : t->clear_pso.Get());
             list->SetGraphicsRootConstantBufferView(0, frame.upload.resource->GetGPUVirtualAddress());
             list->SetGraphicsRootShaderResourceView(4,t->baked_staging.resource ? t->baked_staging.resource->GetGPUVirtualAddress() : 0);
             list->SetGraphicsRootShaderResourceView(5,frame.metadata.resource->GetGPUVirtualAddress()+kSegmentMetadataOffset);

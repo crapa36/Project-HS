@@ -29,9 +29,9 @@ Result D3D12Renderer::Impl::SelectTextureFeedbackShaders(const RendererConfig &r
     for (const std::string_view name : kAuthoredMaterialNames)
     {
         const bool masked = name.starts_with("leaf_") || name.starts_with("grass_");
-        for (const std::string_view family : {"scene", "resolve", "probe_capture", "visibility", "shadow", "probe_shadow"})
+        for (const std::string_view family : {"scene", "resolve", "visibility", "shadow"})
         {
-            if (!masked && (family == "visibility" || family == "shadow" || family == "probe_shadow")) continue;
+            if (!masked && (family == "visibility" || family == "shadow")) continue;
             const auto baseline = "render/shader/" + std::string(name) + "_" + std::string(family) + ".dxil";
             const auto feedback = "render/shader/" + std::string(name) + "_" + std::string(family) + "_feedback.dxil";
             if (request.packed_content)
@@ -283,8 +283,7 @@ Result D3D12Renderer::Impl::CreateRootSignature()
             D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC_WHILE_SET_AT_EXECUTE, 0},
         {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, kLayeredTranslucencySrvCount, 0, 14,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 1},
-        {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 14,
-            D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, kLayeredTranslucencyUavOffset}};
+    };
     const D3D12_DESCRIPTOR_RANGE1 view_skin_ranges[]{
         {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 4, 3,
             D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE, 0},
@@ -403,7 +402,7 @@ Result D3D12Renderer::Impl::CreateRootSignature()
     parameters[35].Descriptor = {29, 3, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE};
     parameters[35].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
     parameters[36].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-    parameters[36].DescriptorTable = {3, hero_transparency_ranges};
+    parameters[36].DescriptorTable = {2, hero_transparency_ranges};
     parameters[36].ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
     std::array<D3D12_STATIC_SAMPLER_DESC, 3> samplers{};
@@ -636,8 +635,7 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
             return read;
         }
     }
-    // Direct evaluation and the sampled LUT are pinned to the same immutable
-    // selected Generation, including during development Generation reload.
+    // Direct evaluation and the sampled LUT use the same immutable Generation.
     RendererAssetSource deferred_path;
     if (auto resolved = ResolveRendererAsset(pipeline_config, "render/shader/deferred_ps.dxil", deferred_path);
         !resolved) return resolved;
@@ -1013,10 +1011,10 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     particle.BlendState.RenderTarget[1].SrcBlendAlpha = D3D12_BLEND_ZERO;
     particle.BlendState.RenderTarget[1].DestBlendAlpha = D3D12_BLEND_ONE;
     particle.BlendState.RenderTarget[1].BlendOpAlpha = D3D12_BLEND_OP_ADD;
-    particle.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+    particle.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_RED;
     particle.NumRenderTargets = 2;
     particle.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    particle.RTVFormats[1] = DXGI_FORMAT_R16_FLOAT;
+    particle.RTVFormats[1] = DXGI_FORMAT_R16G16_FLOAT;
     std::fill(std::begin(particle.RTVFormats) + 2, std::end(particle.RTVFormats),
               DXGI_FORMAT_UNKNOWN);
     result = pipeline_cache.CreateGraphics(&particle, IID_PPV_ARGS(&particle_pipeline));
@@ -1214,7 +1212,8 @@ Result D3D12Renderer::Impl::CreatePipeline(const RendererConfig &request)
     ribbon_oit.BlendState.IndependentBlendEnable = TRUE;
     ribbon_oit.NumRenderTargets = 2;
     ribbon_oit.RTVFormats[0] = DXGI_FORMAT_R32G32B32A32_FLOAT;
-    ribbon_oit.RTVFormats[1] = DXGI_FORMAT_R16_FLOAT;
+    ribbon_oit.RTVFormats[1] = DXGI_FORMAT_R16G16_FLOAT;
+    ribbon_oit.BlendState.RenderTarget[1].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_RED;
     ribbon_oit.BlendState.RenderTarget[0].SrcBlend = D3D12_BLEND_ONE;
     ribbon_oit.BlendState.RenderTarget[0].DestBlend = D3D12_BLEND_ONE;
     ribbon_oit.BlendState.RenderTarget[1].SrcBlend = D3D12_BLEND_ZERO;

@@ -139,17 +139,17 @@ void TerrainStochasticBasis(float2 world,uint layer,uint seed,float2 warp,
 }
 
 void TerrainParallaxCells(Texture2DArray<float4> height, SamplerState environment_wrap,
-    uint layer, float pomWeight, uint height_slot, HsTextureGradState height_state,
+    uint layer, float pomWeight, float clamp_mip,
     inout TerrainCellSample x,inout TerrainCellSample y,inout TerrainCellSample z)
 {
-    // Disabled/subpixel POM performs no height lookup.
+    // TerrainSample records whole-texture MinMip with these same wrapped gradients at the final UV.
     [branch] if(pomWeight<=0) return;
     [loop] for(uint j=0;j<HS_MATERIAL_POM_STEPS;++j)
     {
         float hx=0,hy=0,hz=0;
-        [branch] if(x.active) hx=HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(x.uv,layer),x.dx,x.dy,height_state).r;
-        [branch] if(y.active) hy=HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(y.uv,layer),y.dx,y.dy,height_state).r;
-        [branch] if(z.active) hz=HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(z.uv,layer),z.dx,z.dy,height_state).r;
+        [branch] if(x.active) hx=height.SampleGrad(environment_wrap,float3(x.uv,layer),x.dx,x.dy,int2(0,0),clamp_mip).r;
+        [branch] if(y.active) hy=height.SampleGrad(environment_wrap,float3(y.uv,layer),y.dx,y.dy,int2(0,0),clamp_mip).r;
+        [branch] if(z.active) hz=height.SampleGrad(environment_wrap,float3(z.uv,layer),z.dx,z.dy,int2(0,0),clamp_mip).r;
         if(x.active) { if(x.depth>=1-hx) x.active=false; else { x.previous=x.depth;x.depth+=1.0/HS_MATERIAL_POM_STEPS;x.uv=x.start-x.ray*x.depth; } }
         if(y.active) { if(y.depth>=1-hy) y.active=false; else { y.previous=y.depth;y.depth+=1.0/HS_MATERIAL_POM_STEPS;y.uv=y.start-y.ray*y.depth; } }
         if(z.active) { if(z.depth>=1-hz) z.active=false; else { z.previous=z.depth;z.depth+=1.0/HS_MATERIAL_POM_STEPS;z.uv=z.start-z.ray*z.depth; } }
@@ -159,9 +159,9 @@ void TerrainParallaxCells(Texture2DArray<float4> height, SamplerState environmen
     {
         float mx=(x.previous+x.depth)*0.5,my=(y.previous+y.depth)*0.5,mz=(z.previous+z.depth)*0.5;
         float2 tx=x.start-x.ray*mx,ty=y.start-y.ray*my,tz=z.start-z.ray*mz;
-        float hx=HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(tx,layer),x.dx,x.dy,height_state).r;
-        float hy=HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(ty,layer),y.dx,y.dy,height_state).r;
-        float hz=HsTextureSampleGradPrepared(height,height_slot,environment_wrap,float3(tz,layer),z.dx,z.dy,height_state).r;
+        float hx=height.SampleGrad(environment_wrap,float3(tx,layer),x.dx,x.dy,int2(0,0),clamp_mip).r;
+        float hy=height.SampleGrad(environment_wrap,float3(ty,layer),y.dx,y.dy,int2(0,0),clamp_mip).r;
+        float hz=height.SampleGrad(environment_wrap,float3(tz,layer),z.dx,z.dy,int2(0,0),clamp_mip).r;
         if(mx>=1-hx) x.depth=mx;else x.previous=mx;
         if(my>=1-hy) y.depth=my;else y.previous=my;
         if(mz>=1-hz) z.depth=mz;else z.previous=mz;
@@ -242,7 +242,7 @@ HsMaterialTerrainResult TerrainLayer(
     TerrainCellSample cellX=TerrainPrepareCell(basisX,dx,dy,parallax);
     TerrainCellSample cellY=TerrainPrepareCell(basisY,dx,dy,parallax);
     TerrainCellSample cellZ=TerrainPrepareCell(basisZ,dx,dy,parallax);
-    TerrainParallaxCells(height,environment_wrap,layer,parallax.z,height_slot,height_state,cellX,cellY,cellZ);
+    TerrainParallaxCells(height,environment_wrap,layer,parallax.z,height_state.clamp_mip,cellX,cellY,cellZ);
     HsMaterialTerrainResult x=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,cellX,layer,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
     HsMaterialTerrainResult y=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,cellY,layer,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
     HsMaterialTerrainResult z=TerrainSample(gaussian,surface,normal,detail,height,environment_wrap,cellZ,layer,detail_enabled,detail_weight,gaussian_slot,surface_slot,normal_slot,detail_slot,height_slot,gaussian_state,surface_state,normal_state,detail_state,height_state);
@@ -458,20 +458,6 @@ struct HsTerrainSection
 };
 
 #ifndef HS_TERRAIN_PAGE_BAKE
-#ifndef HS_TERRAIN_SECTION_DECLARED
-#define HS_TERRAIN_SECTION_DECLARED
-struct HsTerrainPageSection
-{
-#define HS_TERRAIN_F2(name) float2 name;
-#define HS_TERRAIN_U1(name) uint name;
-#define HS_TERRAIN_U2(name) uint2 name;
-    HS_TERRAIN_GPU_SECTION_FIELDS(HS_TERRAIN_F2, HS_TERRAIN_U1, HS_TERRAIN_U2)
-#undef HS_TERRAIN_F2
-#undef HS_TERRAIN_U1
-#undef HS_TERRAIN_U2
-};
-StructuredBuffer<HsTerrainPageSection> HsTerrainSections : register(HS_TERRAIN_JOIN(t,HS_TERRAIN_SECTION_SRV),HS_TERRAIN_JOIN(space,HS_TERRAIN_PAGE_SPACE));
-#endif
 struct HsTerrainPlaneMip
 {
 #define HS_TERRAIN_U1(name) uint name;

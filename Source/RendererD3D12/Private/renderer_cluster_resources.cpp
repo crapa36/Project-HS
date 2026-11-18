@@ -82,12 +82,12 @@ Result D3D12Renderer::Impl::PrepareClusterPageUpload(std::uint32_t logical_slot,
     {
         if (stream.compiled)
         {
-            const auto view = render_data::BindGeometryDescriptor(stream.read_storage, *stream.compiled);
+            const auto view = render_data::BindGeometryDescriptor(stream.read_storage.Bytes(), *stream.compiled);
             chunks = {view.chunks[0], view.chunks[1], view.chunks[3], view.chunks[4], view.chunks[5], view.chunks[6]};
         }
         else
         {
-            const auto package = render_data::ReadPackage(stream.read_storage,
+            const auto package = render_data::ReadPackage(stream.read_storage.Bytes(),
                 MakeAssetId(stream.logical_id));
             chunks[0] = PageChunk(package, render_data::ChunkType::GeometryVertices);
             chunks[1] = PageChunk(package, render_data::ChunkType::GeometryIndices);
@@ -281,14 +281,15 @@ Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
         const auto host_factor = stream.compiled ? 1u : 3u;
         if (!file_bytes || file_bytes > UINT64_MAX / host_factor || !residency.CanStage(file_bytes * host_factor))
             return ClusterFailure("Required pinned hierarchy root exceeds the host staging budget.");
-        if (auto result = ReadBinary(stream.source, stream.read_storage); !result) return result;
+        stream.read_storage = AssetReadBuffer(static_cast<std::size_t>(file_bytes));
+        if (auto result = stream.source.ReadInto(stream.read_storage.Bytes()); !result) return result;
         if (stream.read_storage.size() != file_bytes) return ClusterFailure("Pinned hierarchy root changed during read.");
         stream.read_bytes = stream.read_storage.size();
         stream.read_residency = residency.Register(ResidencyCategory::Staging, stream.read_bytes, false, ResidencyStorage::HostStaging);
         if (!stream.read_residency) return ClusterFailure("Could not account pinned root read storage.");
         if (!stream.compiled)
         {
-            if (auto result = stream.decode(stream.read_storage, stream.decoded); !result) return result;
+            if (auto result = stream.decode(stream.read_storage.Bytes(), stream.decoded); !result) return result;
             const auto &data = stream.decoded;
             const auto decoded_bytes = data.vertices.capacity() * sizeof(render_data::ExpandedVertex) +
                 data.indices.capacity() * 4u + data.submeshes.capacity() * sizeof(render_data::GeometrySubmesh) +
@@ -323,7 +324,7 @@ Result D3D12Renderer::Impl::CreateClusterResources(std::uint32_t generation_tag)
         runtime.cpu.pages[stream.logical_slot] = {generation_tag, 1u, stream.physical_slot,
             stream.version, stream.page->triangle_offset, stream.page->remap_offset, 0u, 0u};
         stream.decoded = {};
-        std::vector<std::byte>{}.swap(stream.read_storage);
+        stream.read_storage.Reset();
         stream.read_bytes = 0;
         static_cast<void>(residency.ReleaseNow(stream.read_residency));
         static_cast<void>(residency.ReleaseNow(stream.decoded_residency));

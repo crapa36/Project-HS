@@ -12,7 +12,6 @@ Result D3D12Renderer::Impl::LoadMaterialSurfaceProfile(
     try
     {
         decltype(material_surface_layouts) layouts{};
-        decltype(material_headers) headers{};
         std::uint32_t mask{};
         const auto material_count = scope == MaterialPreparationScope::StaticEnvironment
             ? kAuthoredMaterialNames.size() : kResidentMaterialCount;
@@ -22,37 +21,17 @@ Result D3D12Renderer::Impl::LoadMaterialSurfaceProfile(
             const std::string name(hero ? kCharacterMaterialNames[ordinal - kAuthoredMaterialNames.size()]
                                         : kAuthoredMaterialNames[ordinal]);
             const auto id = render_data::MaterialProduct(name);
-            if (candidate.packed_content || candidate.development_catalog)
-            {
-                const auto handle = FindRendererMaterial(candidate, MakeAssetId(id));
-                if (!handle) throw std::runtime_error("Missing compiled material surface: " + id);
-                const auto &material = candidate.packed_materials[handle.value];
-                if (material.kind != (hero ? render_data::MaterialKind::Hero : render_data::MaterialKind::Environment))
-                    throw std::runtime_error("Compiled material surface has the wrong domain: " + id);
-                layouts[ordinal] = material.surface;
-                mask |= layouts[ordinal].varying_mask;
-                continue;
-            }
-            RendererAssetSource path;
-            if (auto resolved = ResolveRendererAsset(candidate, id, path); !resolved) return resolved;
-            auto &header = headers[ordinal];
-            if (auto read = ReadBinary(path, header.bytes); !read) return read;
-            header.view = render_data::ReadPackage(header.bytes, MakeAssetId(id));
-            const auto &package = header.view;
-            const auto chunk = std::ranges::find(package.chunks,
-                render_data::ChunkType::MaterialSurfaceLayout, &render_data::ChunkView::type);
-            if (chunk == package.chunks.end() || !chunk->required ||
-                !((chunk->version == 1 && chunk->stride == render_data::kLegacyMaterialSurfaceLayoutStride) ||
-                  (chunk->version == 2 && chunk->stride == render_data::kMaterialSurfaceLayoutStride)) ||
-                chunk->count != 1)
-                throw std::runtime_error("required material surface profile is missing: " + id);
-            layouts[ordinal] = render_data::DecodeMaterialSurfaceLayout(chunk->bytes);
+            const auto handle = FindRendererMaterial(candidate, MakeAssetId(id));
+            if (!handle) throw std::runtime_error("Missing compiled material surface: " + id);
+            const auto &material = candidate.packed_materials[handle.value];
+            if (material.kind != (hero ? render_data::MaterialKind::Hero : render_data::MaterialKind::Environment))
+                throw std::runtime_error("Compiled material surface has the wrong domain: " + id);
+            layouts[ordinal] = material.surface;
             mask |= layouts[ordinal].varying_mask;
         }
         const auto layout = render_data::ComputeMaterialSidecarLayout(mask);
         material_surface_layouts = std::move(layouts);
         material_sidecar_layout = layout;
-        material_headers = std::move(headers);
         return Result::Success();
     }
     catch (const std::exception &error)

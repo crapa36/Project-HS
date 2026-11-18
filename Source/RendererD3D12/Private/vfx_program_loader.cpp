@@ -7,6 +7,7 @@
 #include <utility>
 #include <limits>
 #include <set>
+#include <string_view>
 #include <bit>
 
 namespace hs
@@ -14,7 +15,7 @@ namespace hs
 namespace
 {
 constexpr std::uint32_t kMagic = 0x34565348u;
-constexpr std::size_t kHeaderBytes = 32;
+constexpr std::size_t kHeaderBytes = 28;
 constexpr std::size_t kDirectoryBytes = 13 * 16;
 constexpr std::uint32_t kSectionCount = 13;
 constexpr std::uint32_t kStrides[kSectionCount] = {68, 52, 96, 12, 40, 4, 16, 8, 12, 12, 0, 20, 4};
@@ -38,12 +39,6 @@ struct Section { std::uint32_t count{}, offset{}, bytes{}; };
 bool Fail(std::string& error, const char* message) { error = message; return false; }
 bool RangeOk(VfxRange r, std::size_t count) { return r.first <= count && r.count <= count - r.first; }
 bool Finite(float v) { return std::isfinite(v); }
-std::uint32_t Hash(std::span<const std::byte> bytes)
-{
-    std::uint32_t h = 2166136261u;
-    for (const std::byte b : bytes) { h ^= std::to_integer<unsigned char>(b); h *= 16777619u; }
-    return h;
-}
 template<class T> bool EnumOk(T value, std::uint32_t count) { return static_cast<std::uint32_t>(value) < count; }
 }
 
@@ -51,16 +46,15 @@ bool LoadVfxProgram(std::span<const std::byte> bytes, VfxProgramData& output, st
 {
     error.clear();
     if (bytes.size() < kHeaderBytes) return Fail(error, "VFX program header is truncated");
-    Reader header{bytes}; std::uint32_t magic{}, format{}, schema{}, engine{}, minimum{}, sections{}, payloadBytes{}, checksum{};
+    Reader header{bytes}; std::uint32_t magic{}, format{}, schema{}, engine{}, minimum{}, sections{}, payloadBytes{};
     if (!header.Read(magic) || !header.Read(format) || !header.Read(schema) || !header.Read(engine) ||
-        !header.Read(minimum) || !header.Read(sections) || !header.Read(payloadBytes) || !header.Read(checksum))
+        !header.Read(minimum) || !header.Read(sections) || !header.Read(payloadBytes))
         return Fail(error, "VFX program header is truncated");
-    if (magic != kMagic || format != 5 || schema != 4 || engine != 1 || minimum > 1)
+    if (magic != kMagic || format != 6 || schema != 4 || engine != 1 || minimum > 1)
         return Fail(error, "VFX program version contract mismatch");
     if (sections != kSectionCount || payloadBytes != bytes.size() - kHeaderBytes)
         return Fail(error, "VFX program length or section count mismatch");
     const auto payload = bytes.subspan(kHeaderBytes);
-    if (Hash(payload) != checksum) return Fail(error, "VFX program checksum mismatch");
     std::array<Section, kSectionCount> table{};
     Reader directory{payload}; std::uint32_t kind{};
     for (std::uint32_t i = 0; i < kSectionCount; ++i) {
@@ -113,14 +107,14 @@ bool LoadVfxProgram(std::span<const std::byte> bytes, VfxProgramData& output, st
         const auto &e=parsed.effect_lookup[i];
         if(e.handle!=i+1 || !e.effect_id || !effectIds.insert(e.effect_id).second) return Fail(error,"VFX effect identity is duplicate or invalid");
     }
-    for (const auto& r:parsed.texture_resources) if(!RangeOk(r.asset_path_bytes,parsed.strings.size())) return Fail(error,"VFX texture resource string range is invalid");
     for (std::size_t i=0;i<parsed.texture_resources.size();++i) {
         const auto &r=parsed.texture_resources[i];
+        if(!RangeOk(r.asset_path_bytes,parsed.strings.size())) return Fail(error,"VFX texture resource string range is invalid");
         if(r.slot!=i || r.asset_path_bytes.count==0) return Fail(error,"VFX texture slot is invalid");
-        const std::string path(reinterpret_cast<const char*>(parsed.strings.data()+r.asset_path_bytes.first),r.asset_path_bytes.count);
+        const std::string_view path(reinterpret_cast<const char*>(parsed.strings.data()+r.asset_path_bytes.first),r.asset_path_bytes.count);
         constexpr std::string_view prefix="Content/Textures/VFX/";
         if(!path.starts_with(prefix) || !path.ends_with(".dds")) return Fail(error,"VFX texture resource path is invalid");
-        const auto name=std::string_view(path).substr(prefix.size());
+        const auto name=path.substr(prefix.size());
         if(name.size()<=4 || name.find("..")!=std::string_view::npos) return Fail(error,"VFX texture basename is invalid");
         for(const unsigned char ch:name) if(!((ch>='a'&&ch<='z')||(ch>='A'&&ch<='Z')||(ch>='0'&&ch<='9')||ch=='_'||ch=='-'||ch=='.')) return Fail(error,"VFX texture basename is invalid");
     }

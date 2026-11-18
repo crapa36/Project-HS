@@ -90,7 +90,7 @@ class FsrSession
         ID3D12CommandQueue *queue, ID3D12Fence *fence, std::uint64_t value);
     // Sole native Present entry point; calls the SDK proxy under the same lock as
     // Prepare. It never retires leases merely because Present returned.
-    [[nodiscard]] Result Present(std::uint32_t sync_interval, std::uint32_t flags);
+    [[nodiscard]] Result Present(std::uint32_t sync_interval, std::uint32_t flags, bool &native_presented);
     // Call before overwriting/reusing tagged inputs. Uses the SDK's documented
     // WaitForPresents dispatch plus submitted graph fences before retiring leases.
     [[nodiscard]] Result WaitForPresentationInputs();
